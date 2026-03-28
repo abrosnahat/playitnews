@@ -13,7 +13,7 @@ from telegram.ext import Application
 from telegram.request import HTTPXRequest
 
 import database as db
-from ai_adapter import adapt_article
+from ai_adapter import adapt_article, is_gaming_related
 from bot import build_handlers, publish_post, send_admin_notification
 from config import (
     CHECK_INTERVAL_MINUTES,
@@ -108,6 +108,11 @@ async def check_news(app: Application) -> None:
         new_count = 0
         for art in articles:
             if not db.is_article_seen(art["url"]):
+                # AI relevance check — skip non-gaming articles
+                if not await is_gaming_related(art["title"]):
+                    logger.info("AI: не игровая тематика, пропускаем: %s", art["title"])
+                    db.mark_article_seen(art["url"], art["title"])
+                    continue
                 new_count += 1
                 await process_article(app, art["url"], art["title"])
                 # Small delay between articles to avoid hammering the site or Claude

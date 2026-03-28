@@ -20,9 +20,6 @@ from telegram.ext import (
     Application,
     CallbackQueryHandler,
     ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    filters,
 )
 from telegram.error import TelegramError, TimedOut
 
@@ -54,10 +51,6 @@ def _probe_video_dims(path: str) -> tuple[int, int]:
         logger.debug("ffprobe failed for %s: %s", path, exc)
     return 0, 0
 
-# ConversationHandler states
-WAITING_EDIT_TEXT = 1
-
-
 # ---------------------------------------------------------------------------
 # Notification to admin
 # ---------------------------------------------------------------------------
@@ -76,7 +69,6 @@ async def send_admin_notification(
     then a control message with Approve / Edit / Cancel buttons."""
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("Approve", callback_data=f"approve:{post_id}"),
-        InlineKeyboardButton("Edit text", callback_data=f"edit:{post_id}"),
         InlineKeyboardButton("Cancel", callback_data=f"cancel:{post_id}"),
     ]])
 
@@ -255,73 +247,11 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ---------------------------------------------------------------------------
-# Edit conversation
-# ---------------------------------------------------------------------------
-
-async def handle_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Triggered when admin clicks 'Edit text'. Ask for new text."""
-    query = update.callback_query
-    await query.answer()
-    post_id = int(query.data.split(":")[1])
-
-    post = db.get_scheduled_post(post_id)
-    if not post or post["status"] not in ("pending", "approved"):
-        await query.edit_message_text("This post can no longer be edited.")
-        return ConversationHandler.END
-
-    context.user_data["editing_post_id"] = post_id
-
-    await query.edit_message_text(
-        f"Post #{post_id} — send me the new post text.\n\n"
-        f"Current text:\n\n{post['post_text']}\n\n"
-        f"(Send /cancel to abort editing)"
-    )
-    return WAITING_EDIT_TEXT
-
-
-async def handle_edit_receive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Receive edited text from admin and publish immediately."""
-    post_id = context.user_data.get("editing_post_id")
-    if not post_id:
-        await update.message.reply_text("No post being edited. Operation cancelled.")
-        return ConversationHandler.END
-
-    new_text = update.message.text.strip()
-    db.update_post_text(post_id, new_text)
-
-    await update.message.reply_text(f"Post #{post_id} updated. Publishing now...")
-    await publish_post(bot=context.bot, post_id=post_id)
-
-    context.user_data.pop("editing_post_id", None)
-    return ConversationHandler.END
-
-
-async def handle_edit_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data.pop("editing_post_id", None)
-    await update.message.reply_text("Edit cancelled. The post remains unchanged.")
-    return ConversationHandler.END
-
-
-# ---------------------------------------------------------------------------
 # Build handlers list for Application
 # ---------------------------------------------------------------------------
 
 def build_handlers():
-    edit_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(handle_edit_start, pattern=r"^edit:\d+$")],
-        states={
-            WAITING_EDIT_TEXT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_receive),
-                MessageHandler(filters.COMMAND & filters.Regex(r"^/cancel$"), handle_edit_cancel),
-            ]
-        },
-        fallbacks=[MessageHandler(filters.COMMAND, handle_edit_cancel)],
-        per_chat=True,
-        allow_reentry=True,
-    )
-
     return [
-        edit_conv,
         CallbackQueryHandler(handle_approve, pattern=r"^approve:\d+$"),
         CallbackQueryHandler(handle_cancel, pattern=r"^cancel:\d+$"),
     ]

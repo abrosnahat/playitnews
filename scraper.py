@@ -12,7 +12,7 @@ import aiohttp
 import certifi
 from bs4 import BeautifulSoup
 
-from config import IMAGES_DIR, VIDEOS_DIR, NEWS_URL
+from config import IMAGES_DIR, VIDEOS_DIR, NEWS_URL, BLOCKED_URL_CATEGORIES
 
 # Use certifi CA bundle; falls back to no-verify if still failing on macOS
 SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
@@ -96,8 +96,14 @@ async def get_latest_article_links(session: aiohttp.ClientSession) -> list[dict]
             continue
         if full_url in seen_urls:
             continue
-        seen_urls.add(full_url)
         title = title_tag.get_text(strip=True)
+
+        # --- Filter by URL category ---
+        if any(cat in full_url for cat in BLOCKED_URL_CATEGORIES):
+            logger.debug("Пропускаем (категория): %s", full_url)
+            continue
+
+        seen_urls.add(full_url)
         articles.append({"url": full_url, "title": title})
 
     logger.info("Найдено статей на странице: %d", len(articles))

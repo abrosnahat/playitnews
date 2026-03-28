@@ -6,15 +6,15 @@ Monitors [playground.ru/news](https://www.playground.ru/news), automatically tra
 
 ## Features
 
-| Feature | Details |
-|---------|---------|
-| Source monitoring | Checks playground.ru/news every 30 min (configurable) |
-| AI adaptation | Translates RU→EN, rephrases for gaming audience, adds hashtags via Claude |
-| Image handling | Downloads article images and attaches them to the post |
-| Scheduled posting | Posts are delayed 1 hour (configurable) before publishing |
-| Admin review | You receive a Telegram notification with **Approve / Edit / Cancel** buttons |
-| Edit support | Reply with new text to update the draft before it publishes |
-| Persistent state | SQLite tracks seen articles and scheduled posts across restarts |
+| Feature           | Details                                                                      |
+| ----------------- | ---------------------------------------------------------------------------- |
+| Source monitoring | Checks playground.ru/news every 30 min (configurable)                        |
+| AI adaptation     | Translates RU→EN, rephrases for gaming audience, adds hashtags via Claude    |
+| Image handling    | Downloads article images and attaches them to the post                       |
+| Scheduled posting | Posts are delayed 1 hour (configurable) before publishing                    |
+| Admin review      | You receive a Telegram notification with **Approve / Edit / Cancel** buttons |
+| Edit support      | Reply with new text to update the draft before it publishes                  |
+| Persistent state  | SQLite tracks seen articles and scheduled posts across restarts              |
 
 ---
 
@@ -24,7 +24,7 @@ Monitors [playground.ru/news](https://www.playground.ru/news), automatically tra
 
 1. Open Telegram → `@BotFather` → `/newbot`
 2. Copy the **token** it gives you.
-3. Add the bot as **Administrator** in your channel `@playitnews` with *Post Messages* permission.
+3. Add the bot as **Administrator** in your channel `@playitnews` with _Post Messages_ permission.
 
 ### 2. Get your personal Chat ID
 
@@ -57,7 +57,7 @@ nano .env
 
 ```bash
 source .venv/bin/activate
-python main.py
+python3 main.py
 ```
 
 ---
@@ -80,11 +80,11 @@ Scheduled: 2026-02-25 15:30 UTC
 [Approve]  [Edit text]  [Cancel]
 ```
 
-| Button | Action |
-|--------|--------|
-| **Approve** | Marks the post as approved; it publishes at the scheduled time |
+| Button        | Action                                                                |
+| ------------- | --------------------------------------------------------------------- |
+| **Approve**   | Marks the post as approved; it publishes at the scheduled time        |
 | **Edit text** | Bot asks you to send the new text; updates and approves automatically |
-| **Cancel** | Cancels the post — it will not be published |
+| **Cancel**    | Cancels the post — it will not be published                           |
 
 > If you do nothing, the post publishes at the scheduled time regardless (default behaviour: **auto-publish**).
 
@@ -145,6 +145,7 @@ launchctl load ~/Library/LaunchAgents/com.playitnews.bot.plist
 ```
 
 Stop it:
+
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.playitnews.bot.plist
 ```

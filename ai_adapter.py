@@ -84,6 +84,47 @@ async def adapt_article(title: str, body: str) -> str:
         return f"{title}\n\n[AI processing failed. Please edit before publishing.]\n\n#gaming #news"
 
 
+async def is_gaming_related(title: str) -> bool:
+    """
+    Ask Ollama whether a news article title is about video games.
+    Returns True  → process the article.
+    Returns False → skip it.
+    Falls back to True (fail-open) if Ollama is unavailable.
+    """
+    user_message = (
+        "You are a strict gaming news filter. Answer with a single word only: YES or NO.\n\n"
+        "Is the following Russian news article title about VIDEO GAMES?"
+        " This includes: games, gaming industry, game consoles, esports, game engines, "
+        "GPUs/CPUs/hardware specifically for gaming.\n"
+        "Answer NO for: movies, TV shows, series, anime (unless a game adaptation), "
+        "smartphones, tablets, TVs, or any non-gaming consumer electronics.\n\n"
+        f"Title: {title}\n\n"
+        "Answer (YES or NO):"
+    )
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [{"role": "user", "content": user_message}],
+        "stream": False,
+        "options": {"num_predict": 5},
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+                answer = data["message"]["content"].strip().upper()
+                result = "YES" in answer
+                logger.info("AI фильтр [%s]: '%s'", "+" if result else "-", title[:70])
+                return result
+    except Exception as exc:
+        logger.warning("AI фильтр недоступен (%s), разрешаем статью: %s", exc, title[:70])
+        return True  # fail-open: не блокируем если Ollama лежит
+
+
 async def shorten_post(text: str, target_chars: int = 900) -> str:
     """Rewrite the post using fewer words to fit within target_chars."""
     user_message = (

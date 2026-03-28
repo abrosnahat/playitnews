@@ -24,5 +24,13 @@ DB_PATH = os.path.join(BASE_DIR, "data.db")
 # Source
 NEWS_URL = "https://www.playground.ru/news"
 
+# --- Content filtering ---
+# Skip articles whose URL path contains any of these segments.
+# Covers entire categories (movies, trailers, etc.).
+BLOCKED_URL_CATEGORIES: list[str] = [
+    "/news/movies/",
+]
+
+
 os.makedirs(IMAGES_DIR, exist_ok=True)
 os.makedirs(VIDEOS_DIR, exist_ok=True)
