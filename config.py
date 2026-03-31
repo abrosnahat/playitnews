@@ -21,6 +21,10 @@ IMAGES_DIR = os.path.join(BASE_DIR, "images")
 VIDEOS_DIR = os.path.join(BASE_DIR, "videos")
 DB_PATH = os.path.join(BASE_DIR, "data.db")
 
+# Pixabay (free stock images/videos for video generation)
+# Get a free API key at https://pixabay.com/api/docs/
+PIXABAY_API_KEY: str = os.getenv("PIXABAY_API_KEY", "")
+
 # Source
 NEWS_URL = "https://www.playground.ru/news"
 

@@ -170,7 +170,7 @@ def main() -> None:
             httpx_kwargs={"verify": certifi.where()},
             connect_timeout=15,
             read_timeout=60,
-            write_timeout=60,
+            write_timeout=300,   # large file uploads (video) can take time
             pool_timeout=30,
         ))
         .build()

@@ -159,3 +159,71 @@ async def shorten_post(text: str, target_chars: int = 900) -> str:
     except Exception as exc:
         logger.error("Ошибка Ollama shorten API: %s", exc)
         return text  # fallback: return original
+
+
+async def generate_video_script(post_text: str, article_title: str) -> str:
+    """
+    Generate a spoken narration script for TikTok/Reels/Shorts.
+    Formula: [What happened] → [Short fact] → [Detail] → [Why it matters] → [Question/conclusion]
+    Target: 65-90 words (~35-45 seconds spoken at natural pace).
+    """
+    # Strip HTML tags for clean input
+    clean_text = re.sub(r"<[^>]+>", "", post_text)
+
+    user_message = (
+        "Write a short spoken video narration script for TikTok/Reels/Shorts based on the gaming news below.\n\n"
+        "STRICT RULES:\n"
+        "- Language: English ONLY\n"
+        "- Length: 65–90 words MAXIMUM (critical — must fit in 35–45 seconds of speech)\n"
+        "- Plain spoken text only — NO hashtags, NO HTML, NO emojis, NO markdown\n"
+        "- The text will be read aloud by a voice AI, so write naturally spoken sentences\n"
+        "- Follow this exact narrative formula with 1-2 sentences per step:\n"
+        "  1. [What happened] — hook sentence that grabs attention immediately\n"
+        "  2. [Short fact] — one key number, stat, or specific detail\n"
+        "  3. [Detail] — one interesting or surprising detail from the news\n"
+        "  4. [Why it matters] — why gamers should care about this\n"
+        "  5. [Question or conclusion] — end with a question or strong closing line\n\n"
+        "- Do NOT start with 'In today's news', 'Hey guys', or any generic opener\n"
+        "- Start directly with the most exciting or surprising fact\n\n"
+        f"Article title: {article_title}\n\n"
+        f"Post content:\n{clean_text[:1800]}\n\n"
+        "Write the script now (plain text, 65–90 words):"
+    )
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a viral TikTok script writer specializing in gaming news. "
+                    "You write punchy, engaging narration scripts that hook viewers in the first 3 seconds. "
+                    "You always write in plain English, no formatting, no symbols — just natural spoken words."
+                ),
+            },
+            {"role": "user", "content": user_message},
+        ],
+        "stream": False,
+        "options": {"num_predict": 180},
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+                script = data["message"]["content"].strip()
+                # Strip any residual markdown or HTML
+                script = re.sub(r"<[^>]+>", "", script)
+                script = re.sub(r"[*_`#]", "", script)
+                script = script.strip()
+                logger.info("Video script generated: %d words", len(script.split()))
+                return script
+    except Exception as exc:
+        logger.error("Error generating video script: %s", exc)
+        # Fallback: use first 350 chars of clean post text
+        return clean_text[:350].strip()
