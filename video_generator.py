@@ -491,97 +491,215 @@ def _detect_word_boundaries_from_audio(
     sentence_cues: list[tuple[float, float, str]],
 ) -> list[tuple[float, float, str]]:
     """
-    Use ffmpeg silencedetect to find acoustic word boundaries in clean TTS audio.
-    For each sentence cue the silence gaps between words are detected and each
-    word in the sentence is mapped to the corresponding non-silent audio chunk.
-    Falls back to syllable-proportional split if not enough chunks are found.
+    Use ffmpeg silencedetect to find word boundaries in TTS audio.
+
+    Strategy:
+    1. Try progressively more sensitive silencedetect configurations.
+    2. If we get exactly N segments for N words → perfect, use them directly.
+    3. If we get K < N segments → use them as anchors: distribute words
+       across those K chunks proportionally by char length (bounded drift).
+    4. If no silence detected → char-proportional across the sentence.
+
+    This bounds sync error to within a single detected speech chunk (typically
+    1-2 words) rather than drifting across the whole sentence.
     """
-    # Run silencedetect on the full audio (-35dB threshold, 40ms min silence)
-    result = subprocess.run(
-        [
-            "ffmpeg", "-i", audio_path,
-            "-af", "silencedetect=noise=-35dB:d=0.04",
-            "-f", "null", "-",
-        ],
-        capture_output=True, text=True, timeout=30,
-    )
-    # Parse silence_start / silence_end from stderr
-    silences: list[tuple[float, float]] = []
-    s_start: float | None = None
-    for line in result.stderr.split("\n"):
-        if "silence_start" in line:
-            m = re.search(r"silence_start:\s*([\d.]+)", line)
-            if m:
-                s_start = float(m.group(1))
-        elif "silence_end" in line and s_start is not None:
-            m = re.search(r"silence_end:\s*([\d.]+)", line)
-            if m:
-                silences.append((s_start, float(m.group(1))))
-                s_start = None
+    # Try progressively more sensitive configs (most sensitive first)
+    CONFIGS = [
+        "noise=-28dB:d=0.012",   # very sensitive — catches short TTS pauses
+        "noise=-30dB:d=0.018",
+        "noise=-33dB:d=0.025",
+        "noise=-35dB:d=0.035",   # original-ish
+    ]
 
-    audio_dur = _get_audio_duration(audio_path)
+    def _run_silencedetect(config: str) -> list[tuple[float, float]]:
+        res = subprocess.run(
+            ["ffmpeg", "-i", audio_path, "-af", f"silencedetect={config}",
+             "-f", "null", "-"],
+            capture_output=True, text=True, timeout=30,
+        )
+        silences: list[tuple[float, float]] = []
+        s_start: float | None = None
+        for line in res.stderr.split("\n"):
+            if "silence_start" in line:
+                m = re.search(r"silence_start:\s*([\d.]+)", line)
+                if m:
+                    s_start = float(m.group(1))
+            elif "silence_end" in line and s_start is not None:
+                m = re.search(r"silence_end:\s*([\d.]+)", line)
+                if m:
+                    silences.append((s_start, float(m.group(1))))
+                    s_start = None
+        return silences
 
-    # Build list of non-silent regions from the silence gaps
-    def _speech_segments(t_from: float, t_to: float) -> list[tuple[float, float]]:
-        """Non-silent segments within [t_from, t_to]."""
+    def _speech_segs(
+        silences: list[tuple[float, float]], t_from: float, t_to: float
+    ) -> list[tuple[float, float]]:
+        """Non-silent regions within [t_from, t_to]."""
         segs: list[tuple[float, float]] = []
         prev = t_from
         for ss, se in silences:
             if se <= t_from or ss >= t_to:
                 continue
             gap_start = max(ss, t_from)
-            if gap_start > prev + 0.02:
+            if gap_start > prev + 0.01:       # at least 10ms of speech
                 segs.append((prev, gap_start))
-            prev = max(se, t_from)
-        if prev < t_to - 0.02:
+            prev = max(se, prev)
+        if prev < t_to - 0.01:
             segs.append((prev, t_to))
         return segs
 
-    def _syllables(word: str) -> int:
-        """Rough syllable count for proportional fallback."""
-        word = re.sub(r"[^a-z]", "", word.lower())
-        count = len(re.findall(r"[aeiouy]+", word))
-        if word.endswith("e") and len(word) > 2:
-            count -= 1
-        return max(1, count)
+    def _clean(word: str) -> str:
+        return word.strip(".,!?;:\"'()-\u2013\u2014")
 
+    def _char_weight(word: str) -> float:
+        return max(1.0, float(len(word)))
+
+    def _distribute_words_in_region(
+        words: list[str], t_from: float, t_to: float
+    ) -> list[tuple[float, float, str]]:
+        """Distribute words inside [t_from, t_to] by char-length proportion."""
+        total = sum(_char_weight(w) for w in words) or 1.0
+        dur   = t_to - t_from
+        result = []
+        t = t_from
+        for word in words:
+            w_dur = dur * _char_weight(word) / total
+            c = _clean(word)
+            if c:
+                result.append((t, t + w_dur, c))
+            t += w_dur
+        return result
+
+    # Pick the silencedetect config that gives the closest match to total words
+    best_silences: list[tuple[float, float]] = []
+    best_score = -1
+    total_words = sum(len(s.split()) for _, _, s in sentence_cues)
+
+    for cfg in CONFIGS:
+        silences = _run_silencedetect(cfg)
+        # Count speech segments across all sentence windows
+        n_segs = sum(
+            len(_speech_segs(silences, ts, te))
+            for ts, te, txt in sentence_cues
+            for _ in [None]          # dummy loop to use ts/te
+        )
+        # Recount properly
+        n_segs = 0
+        for ts, te, txt in sentence_cues:
+            n_segs += len(_speech_segs(silences, ts, te))
+
+        score = -(abs(n_segs - total_words))   # closer to total_words = better
+        if score > best_score:
+            best_score = score
+            best_silences = silences
+
+    # Build word cues using best silences
     word_cues: list[tuple[float, float, str]] = []
 
     for t_start, t_end, sentence in sentence_cues:
-        words = sentence.split()
+        words = [w for w in sentence.split() if _clean(w)]
         if not words:
             continue
-        segs = _speech_segments(t_start, t_end)
+
+        segs = _speech_segs(best_silences, t_start, t_end)
 
         if len(segs) == len(words):
-            # Perfect match — assign each word to its detected speech segment
+            # Perfect — each word → its speech segment
             for word, (ws, we) in zip(words, segs):
-                clean = word.strip(".,!?;:\"'()-\u2013\u2014")
-                if clean:
-                    word_cues.append((ws, we, clean))
+                c = _clean(word)
+                if c:
+                    word_cues.append((ws, we, c))
+
+        elif len(segs) > 1:
+            # Use detected segments as anchors; distribute words between them
+            # proportionally by character length within each chunk.
+            avg_word_dur = (t_end - t_start) / len(words)
+            chunk_words: list[list[str]] = [[] for _ in segs]
+            remaining = list(words)
+            for i, (ws, we) in enumerate(segs):
+                n = max(1, round((we - ws) / avg_word_dur))
+                if i == len(segs) - 1:
+                    chunk_words[i] = remaining
+                else:
+                    n = min(n, len(remaining) - (len(segs) - i - 1))
+                    chunk_words[i] = remaining[:n]
+                    remaining = remaining[n:]
+            for (ws, we), chunk in zip(segs, chunk_words):
+                word_cues.extend(_distribute_words_in_region(chunk, ws, we))
+
         else:
-            # Fallback: distribute proportionally by syllable count
-            total_syl = sum(_syllables(w) for w in words) or 1
-            t = t_start
-            for word in words:
-                frac = _syllables(word) / total_syl
-                dur  = (t_end - t_start) * frac
-                clean = word.strip(".,!?;:\"'()-\u2013\u2014")
-                if clean:
-                    word_cues.append((t, t + dur, clean))
-                t += dur
+            # No usable silence detected — char-proportional across sentence
+            word_cues.extend(_distribute_words_in_region(words, t_start, t_end))
 
     return word_cues
+
+
+def _run_whisper_sync(
+    audio_path: str,
+    sentence_cues: list[tuple[float, float, str]],
+) -> list[tuple[float, float, str]]:
+    """
+    Use Whisper to get acoustic word timing, then map our known script words
+    to that timing by position ratio.  This is immune to Whisper transcription
+    errors because we only use the *timing* from Whisper, not its text.
+
+    Returns [] if Whisper is unavailable or produces no word segments.
+    """
+    try:
+        import whisper as _whisper  # openai-whisper
+    except ImportError:
+        return []
+
+    def _clean(word: str) -> str:
+        return word.strip(".,!?;:\"'()-\u2013\u2014")
+
+    # Collect script words in order
+    script_words = [
+        _clean(w)
+        for _, _, text in sentence_cues
+        for w in text.split()
+        if _clean(w)
+    ]
+    if not script_words:
+        return []
+
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = _whisper.load_model("tiny")
+        result = model.transcribe(audio_path, word_timestamps=True, language="en")
+
+    # Collect (start, end) timing pairs from Whisper
+    wh_timings: list[tuple[float, float]] = [
+        (float(w["start"]), float(w["end"]))
+        for seg in result.get("segments", [])
+        for w in seg.get("words", [])
+    ]
+
+    if not wh_timings:
+        return []
+
+    n_sc = len(script_words)
+    n_wh = len(wh_timings)
+
+    cues: list[tuple[float, float, str]] = []
+    for i, word in enumerate(script_words):
+        # Map script word index → nearest Whisper timing slot by position ratio
+        j = round(i * (n_wh - 1) / max(n_sc - 1, 1)) if n_sc > 1 else 0
+        j = min(j, n_wh - 1)
+        start, end = wh_timings[j]
+        cues.append((start, end, word))
+
+    return cues
 
 
 async def _synthesize_voice(
     text: str, workdir: str
 ) -> tuple[str, list[tuple[float, float, str]]]:
     """
-    Generate MP3 audio via edge-tts CLI, then use ffmpeg silencedetect
-    to find accurate word-level boundaries from the actual audio signal.
-    Sentence-level VTT anchors the start/end of each sentence, then
-    silencedetect finds the gap between words within each sentence.
+    Generate MP3 audio via edge-tts CLI, then use Whisper to get accurate
+    word-level timestamps from the actual audio signal.
+    Falls back to ffmpeg silencedetect if Whisper is unavailable.
     Returns (audio_path, [(start_sec, end_sec, word), ...]).
     """
     audio_path = os.path.join(workdir, "voice.mp3")
@@ -608,14 +726,24 @@ async def _synthesize_voice(
     if not os.path.exists(vtt_path):
         open(vtt_path, "w").close()
 
-    # Get sentence-level anchors from VTT, then detect exact word boundaries
-    # from the audio signal using ffmpeg silencedetect (no ML model needed).
+    # Get sentence-level anchors from VTT, then extract word timing from audio.
     sentence_cues = _parse_vtt_cues(vtt_path)
+
+    # Try Whisper first (most accurate — extracts timing directly from audio).
     word_cues = await asyncio.to_thread(
-        _detect_word_boundaries_from_audio, audio_path, sentence_cues
+        _run_whisper_sync, audio_path, sentence_cues
     )
-    logger.info("TTS: %d word cues (silencedetect), audio %.1f s",
-                len(word_cues), _get_audio_duration(audio_path))
+    if word_cues:
+        logger.info("TTS: %d word cues (whisper), audio %.1f s",
+                    len(word_cues), _get_audio_duration(audio_path))
+    else:
+        # Fallback: ffmpeg silencedetect (no ML model required)
+        word_cues = await asyncio.to_thread(
+            _detect_word_boundaries_from_audio, audio_path, sentence_cues
+        )
+        logger.info("TTS: %d word cues (silencedetect fallback), audio %.1f s",
+                    len(word_cues), _get_audio_duration(audio_path))
+
     return audio_path, word_cues
 
 
