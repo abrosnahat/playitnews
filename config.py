@@ -25,6 +25,12 @@ DB_PATH = os.path.join(BASE_DIR, "data.db")
 # Get a free API key at https://pixabay.com/api/docs/
 PIXABAY_API_KEY: str = os.getenv("PIXABAY_API_KEY", "")
 
+# Instagram Graph API
+# Required: Business/Creator account connected to a Facebook Page
+# Graph API app must have instagram_content_publish permission
+INSTAGRAM_USER_ID: str = os.getenv("INSTAGRAM_USER_ID", "")
+INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
+
 # Source
 NEWS_URL = "https://www.playground.ru/news"
 

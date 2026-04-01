@@ -38,6 +38,11 @@ def init_db() -> None:
             conn.execute("ALTER TABLE scheduled_posts ADD COLUMN video_paths TEXT DEFAULT '[]'")
         except Exception:
             pass  # column already exists
+        # Migration: add generated_video_path column
+        try:
+            conn.execute("ALTER TABLE scheduled_posts ADD COLUMN generated_video_path TEXT DEFAULT NULL")
+        except Exception:
+            pass  # column already exists
 
 
 # --- seen articles ---
@@ -109,6 +114,23 @@ def update_post_text(post_id: int, new_text: str) -> None:
             "UPDATE scheduled_posts SET post_text = ? WHERE id = ?",
             (new_text, post_id),
         )
+
+
+def set_generated_video_path(post_id: int, path: str | None) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE scheduled_posts SET generated_video_path = ? WHERE id = ?",
+            (path, post_id),
+        )
+
+
+def get_generated_video_path(post_id: int) -> str | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT generated_video_path FROM scheduled_posts WHERE id = ?",
+            (post_id,),
+        ).fetchone()
+    return row[0] if row else None
 
 
 def set_notification_message_id(post_id: int, message_id: int) -> None:

@@ -27,6 +27,7 @@ import database as db
 from config import TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_CHANNEL_ID
 from ai_adapter import shorten_post, generate_video_script
 import video_generator
+import instagram_publisher
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +249,16 @@ def _build_video_keyboard(post_id: int) -> InlineKeyboardMarkup:
     ]])
 
 
+def _build_video_done_keyboard(post_id: int) -> InlineKeyboardMarkup:
+    """Keyboard shown after a video has been successfully generated."""
+    row1 = [InlineKeyboardButton("🔄 Regenerate", callback_data=f"create_video:{post_id}")]
+    row2 = []
+    if instagram_publisher.is_configured():
+        row2.append(InlineKeyboardButton("📲 Post to Instagram", callback_data=f"post_instagram:{post_id}"))
+    buttons = [row1, row2] if row2 else [row1]
+    return InlineKeyboardMarkup(buttons)
+
+
 async def handle_create_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Generate a TikTok/Reels/Shorts video for the approved article."""
     query = update.callback_query
@@ -349,11 +360,13 @@ async def handle_create_video(update: Update, context: ContextTypes.DEFAULT_TYPE
                 write_timeout=300,
                 read_timeout=120,
             )
-        os.remove(video_path)
+        # Keep video on disk and persist path to DB so it survives bot restarts
+        db.set_generated_video_path(post_id, video_path)
+        context.bot_data[f"video_caption:{post_id}"] = script
         await context.bot.send_message(
             chat_id=TELEGRAM_ADMIN_CHAT_ID,
-            text=f"Video for post #{post_id} done. Regenerate?",
-            reply_markup=_build_video_keyboard(post_id),
+            text=f"Video for post #{post_id} ready.",
+            reply_markup=_build_video_done_keyboard(post_id),
         )
     except TelegramError as exc:
         logger.error("Failed to send video for post #%d: %s", post_id, exc)
@@ -361,6 +374,59 @@ async def handle_create_video(update: Update, context: ContextTypes.DEFAULT_TYPE
             chat_id=TELEGRAM_ADMIN_CHAT_ID,
             text=f"Could not send video: {exc}\nSaved at: {video_path}",
             reply_markup=_build_video_keyboard(post_id),
+        )
+
+
+async def handle_post_instagram(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Upload the generated video to Instagram as a Reel."""
+    query = update.callback_query
+    await query.answer("Uploading to Instagram…")
+    post_id = int(query.data.split(":")[1])
+
+    video_path = db.get_generated_video_path(post_id)
+    post       = db.get_scheduled_post(post_id)
+    caption    = context.bot_data.get(f"video_caption:{post_id}") or (post.get("post_text", "") if post else "")
+
+    if not video_path or not os.path.exists(video_path):
+        await context.bot.send_message(
+            chat_id=TELEGRAM_ADMIN_CHAT_ID,
+            text=f"Video file for post #{post_id} not found. Please regenerate first.",
+            reply_markup=_build_video_keyboard(post_id),
+        )
+        return
+
+    status_msg = await context.bot.send_message(
+        chat_id=TELEGRAM_ADMIN_CHAT_ID,
+        text=f"Uploading Reel for post #{post_id} to Instagram…\n(1) Uploading to temporary storage\u2026",
+    )
+
+    try:
+        # instagram_publisher handles: R2 upload → container → poll → publish → R2 delete
+        media_id = await instagram_publisher.publish_reel(
+            video_path=video_path,
+            caption=caption,
+        )
+
+        # Clean up local file and clear DB path
+        try:
+            os.remove(video_path)
+        except OSError:
+            pass
+        db.set_generated_video_path(post_id, None)
+        context.bot_data.pop(f"video_caption:{post_id}", None)
+
+        await status_msg.edit_text(
+            f"\u2705 Reel published to Instagram for post #{post_id}\n"
+            f"Media ID: {media_id}\n\n"
+            f"Generate another video?",
+            reply_markup=_build_video_keyboard(post_id),
+        )
+    except Exception as exc:
+        logger.error("Instagram publish failed for post #%d: %s", post_id, exc)
+        await status_msg.edit_text(
+            f"\u274c Instagram publish failed for post #{post_id}:\n{exc}\n\n"
+            f"Video file is still available locally.",
+            reply_markup=_build_video_done_keyboard(post_id),
         )
 
 
@@ -382,7 +448,8 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def build_handlers():
     return [
-        CallbackQueryHandler(handle_approve,      pattern=r"^approve:\d+$"),
-        CallbackQueryHandler(handle_cancel,       pattern=r"^cancel:\d+$"),
-        CallbackQueryHandler(handle_create_video, pattern=r"^create_video:\d+$"),
+        CallbackQueryHandler(handle_approve,        pattern=r"^approve:\d+$"),
+        CallbackQueryHandler(handle_cancel,         pattern=r"^cancel:\d+$"),
+        CallbackQueryHandler(handle_create_video,   pattern=r"^create_video:\d+$"),
+        CallbackQueryHandler(handle_post_instagram, pattern=r"^post_instagram:\d+$"),
     ]
