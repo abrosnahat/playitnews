@@ -7,3 +7,6 @@ data.db
 images/
 videos/
 playitnews.log
+client_secrets.json
+client_secret_*.json
+youtube_token.json

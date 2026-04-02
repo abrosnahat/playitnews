@@ -31,6 +31,14 @@ PIXABAY_API_KEY: str = os.getenv("PIXABAY_API_KEY", "")
 INSTAGRAM_USER_ID: str = os.getenv("INSTAGRAM_USER_ID", "")
 INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
 
+# YouTube Data API v3
+# client_secrets.json path (downloaded from Google Cloud Console)
+YOUTUBE_CLIENT_SECRETS: str = os.getenv("YOUTUBE_CLIENT_SECRETS", os.path.join(BASE_DIR, "client_secrets.json"))
+# OAuth token file (auto-created by get_youtube_token.py)
+YOUTUBE_TOKEN_FILE: str = os.getenv("YOUTUBE_TOKEN_FILE", os.path.join(BASE_DIR, "youtube_token.json"))
+# Category ID: 20 = Gaming
+YOUTUBE_CATEGORY_ID: str = os.getenv("YOUTUBE_CATEGORY_ID", "20")
+
 # Source
 NEWS_URL = "https://www.playground.ru/news"
 

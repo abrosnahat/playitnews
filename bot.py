@@ -29,6 +29,7 @@ from ai_adapter import shorten_post, generate_video_script
 import ai_adapter
 import video_generator
 import instagram_publisher
+import youtube_publisher
 
 # How many YouTube results to skip forward on each regenerate
 YT_SKIP_STEP = 3
@@ -259,6 +260,8 @@ def _build_video_done_keyboard(post_id: int) -> InlineKeyboardMarkup:
     row2 = []
     if instagram_publisher.is_configured():
         row2.append(InlineKeyboardButton("📲 Post to Instagram", callback_data=f"post_instagram:{post_id}"))
+    if youtube_publisher.is_configured():
+        row2.append(InlineKeyboardButton("▶️ Post to YouTube", callback_data=f"post_youtube:{post_id}"))
     buttons = [row1, row2] if row2 else [row1]
     return InlineKeyboardMarkup(buttons)
 
@@ -444,6 +447,73 @@ async def handle_post_instagram(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
 
+async def handle_post_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Upload the generated video to YouTube Shorts."""
+    query = update.callback_query
+    await query.answer("Uploading to YouTube…")
+    post_id = int(query.data.split(":")[1])
+
+    video_path = db.get_generated_video_path(post_id)
+    post = db.get_scheduled_post(post_id)
+
+    if not video_path or not os.path.exists(video_path):
+        await context.bot.send_message(
+            chat_id=TELEGRAM_ADMIN_CHAT_ID,
+            text=f"Video file for post #{post_id} not found. Please regenerate first.",
+            reply_markup=_build_video_keyboard(post_id),
+        )
+        return
+
+    # Build title in English (translate from Russian via AI, fallback to original)
+    raw_title = (post.get("article_title", "") if post else "") or f"Gaming news #{post_id}"
+    title = await ai_adapter.translate_title_to_english(raw_title)
+    title = title[:100]
+
+    # Build description: clean script + hashtags + CTA
+    raw_desc = context.bot_data.get(f"video_caption:{post_id}") or (post.get("post_text", "") if post else "")
+    desc = re.sub(r'[*_`~]', '', raw_desc)
+    desc = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', desc)  # [text](url) → text
+    desc = re.sub(r'<[^>]+>', '', desc)
+    if post:
+        post_text_clean = re.sub(r'<[^>]+>', '', post.get("post_text", ""))
+        hashtags = " ".join(re.findall(r'#\w+', post_text_clean))
+        if hashtags and hashtags not in desc:
+            desc = desc.rstrip() + "\n\n" + hashtags
+    desc = "More news in the telegram channel, link in the bio\n\n" + desc
+
+    # Extract tags from hashtags in post_text
+    tags: list[str] = []
+    if post:
+        post_text_clean = re.sub(r'<[^>]+>', '', post.get("post_text", ""))
+        tags = [h.lstrip("#") for h in re.findall(r'#\w+', post_text_clean)]
+
+    status_msg = await context.bot.send_message(
+        chat_id=TELEGRAM_ADMIN_CHAT_ID,
+        text=f"Uploading Short for post #{post_id} to YouTube…",
+    )
+
+    try:
+        video_id = await youtube_publisher.upload_short(
+            video_path=video_path,
+            title=title,
+            description=desc,
+            tags=tags,
+        )
+        await status_msg.edit_text(
+            f"\u2705 YouTube Short published for post #{post_id}\n"
+            f"https://youtu.be/{video_id}\n\n"
+            f"Generate another video?",
+            reply_markup=_build_video_keyboard(post_id),
+        )
+    except Exception as exc:
+        logger.error("YouTube publish failed for post #%d: %s", post_id, exc)
+        await status_msg.edit_text(
+            f"\u274c YouTube publish failed for post #{post_id}:\n{exc}\n\n"
+            f"Video file is still available locally.",
+            reply_markup=_build_video_done_keyboard(post_id),
+        )
+
+
 async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -466,4 +536,5 @@ def build_handlers():
         CallbackQueryHandler(handle_cancel,         pattern=r"^cancel:\d+$"),
         CallbackQueryHandler(handle_create_video,   pattern=r"^create_video:\d+$"),
         CallbackQueryHandler(handle_post_instagram, pattern=r"^post_instagram:\d+$"),
+        CallbackQueryHandler(handle_post_youtube,    pattern=r"^post_youtube:\d+$"),
     ]

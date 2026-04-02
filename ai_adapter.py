@@ -204,6 +204,42 @@ async def extract_game_name(article_title: str) -> str:
     return ""
 
 
+async def translate_title_to_english(article_title: str) -> str:
+    """
+    Translate a Russian (or mixed) article headline to a concise English YouTube title.
+    Returns the English title, or the original string on failure.
+    """
+    user_message = (
+        "Translate the following gaming news headline into English. "
+        "Keep it concise (max 80 characters), catchy, and suitable as a YouTube video title. "
+        "Return ONLY the translated title, nothing else.\n\n"
+        f"Headline: {article_title}\n\n"
+        "English title:"
+    )
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [{"role": "user", "content": user_message}],
+        "stream": False,
+        "options": {"num_predict": 40},
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+                translated = data["message"]["content"].strip().strip('"\'')
+                if translated and len(translated) <= 100:
+                    logger.info("Translated title: '%s' ← '%s'", translated, article_title[:60])
+                    return translated
+    except Exception as exc:
+        logger.warning("translate_title_to_english failed: %s", exc)
+    return article_title
+
+
 async def generate_video_script(post_text: str, article_title: str) -> str:
     """
     Generate a spoken narration script for TikTok/Reels/Shorts.
