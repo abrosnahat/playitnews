@@ -755,17 +755,20 @@ async def _fetch_youtube_clips(
     game_query: str,
     count: int,
     workdir: str,
+    skip: int = 0,
 ) -> list[str]:
     """
     Search YouTube for gameplay footage of *game_query*, download short clips.
     Uses yt-dlp (already in requirements) — no API key needed.
+    *skip*: skip the first N search results (for regenerate diversity).
     Returns list of local .mp4 paths.
     """
     clips_dir = os.path.join(workdir, "yt_clips")
     os.makedirs(clips_dir, exist_ok=True)
 
-    # Search query: add 'gameplay footage' to narrow to in-game content
-    yt_search = f"ytsearch{count + 2}:{game_query} gameplay footage"
+    # Request more results than needed so we can skip the first *skip* entries.
+    fetch_count = count + skip + 2
+    yt_search = f"ytsearch{fetch_count}:{game_query} gameplay"
 
     # yt-dlp: download best video<=720p, no audio, max 50 MB, no playlist
     ydl_args = [
@@ -775,7 +778,7 @@ async def _fetch_youtube_clips(
         "--quiet",
         "--format", "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]",
         "--max-filesize", f"{YT_MAX_FILESIZE}M",
-        "--max-downloads", str(count),
+        "--max-downloads", str(count + skip),   # download skip+count, discard first skip
         "--output", os.path.join(clips_dir, "%(autonumber)s.%(ext)s"),
         # Trim: skip first YT_CLIP_SKIP seconds (intros/title cards),
         # then take YT_CLIP_DURATION seconds of actual gameplay
@@ -784,18 +787,20 @@ async def _fetch_youtube_clips(
         yt_search,
     ]
 
-    logger.info("Searching YouTube: '%s gameplay footage' (%d clips)", game_query, count)
+    logger.info("Searching YouTube: '%s gameplay footage' (%d clips, skip=%d)", game_query, count, skip)
     ok = await _run_async(ydl_args, timeout=180)
     if not ok:
         logger.warning("yt-dlp exited with error — checking partial downloads")
 
-    paths = [
+    all_paths = [
         os.path.join(clips_dir, f)
         for f in sorted(os.listdir(clips_dir))
         if f.endswith((".mp4", ".webm", ".mkv"))
     ]
-    logger.info("Downloaded %d YouTube clips for '%s'", len(paths), game_query)
-    return paths[:count]
+    # Discard the first *skip* results, take up to *count* of the rest
+    result = all_paths[skip:][:count]
+    logger.info("Downloaded %d YouTube clips for '%s' (skipped %d)", len(result), game_query, skip)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1071,6 +1076,7 @@ async def create_short_video(
     post: dict,
     script: str,
     search_query: str,
+    yt_skip: int = 0,
 ) -> Optional[str]:
     """
     Generate a TikTok/Reels/Shorts video for an approved post.
@@ -1128,7 +1134,7 @@ async def create_short_video(
         # ── Primary: article videos (Playground HLS) ─────────────────────────
         # ── Secondary: YouTube gameplay footage ──────────────────────────────
         yt_needed = max(0, target_n - len(article_videos))
-        yt_clips = await _fetch_youtube_clips(search_query, min(yt_needed, YT_MAX_CLIPS), workdir)
+        yt_clips = await _fetch_youtube_clips(search_query, min(yt_needed, YT_MAX_CLIPS), workdir, skip=yt_skip)
 
         # Article videos first, then YouTube clips — no images
         all_images: list[str] = []

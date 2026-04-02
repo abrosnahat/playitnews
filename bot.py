@@ -26,8 +26,12 @@ from telegram.error import TelegramError, TimedOut
 import database as db
 from config import TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_CHANNEL_ID
 from ai_adapter import shorten_post, generate_video_script
+import ai_adapter
 import video_generator
 import instagram_publisher
+
+# How many YouTube results to skip forward on each regenerate
+YT_SKIP_STEP = 3
 
 logger = logging.getLogger(__name__)
 
@@ -295,32 +299,31 @@ async def handle_create_video(update: Update, context: ContextTypes.DEFAULT_TYPE
         text="Step 2/4: Synthesizing voice (edge-tts)...",
     )
 
-    # Derive search keywords from the narration script — more thematic than 
-    # just the headline, gives Pixabay better context.
-    # Extract nouns/game-specific words: capitalised words + words >4 chars,
-    # skip stop-words, take up to 3 for a focused query.
-    stop = {"a","an","the","and","or","of","in","is","to","for","was",
-            "are","on","at","by","it","with","this","that","its","has",
-            "but","not","yet","still","very","just","even","been","will",
-            "from","than","what","how","long","time","could","would","they"}
-    script_words = re.findall(r"[A-Za-z][a-z]{3,}|[A-Z][A-Za-z]{2,}", script)
-    keywords = [w for w in script_words if w.lower() not in stop]
-    # Prefer capitalised (proper noun) words first, then any long word
-    proper   = [w for w in keywords if w[0].isupper()][:3]
-    common   = [w for w in keywords if not w[0].isupper()][:2]
-    chosen   = (proper + common)[:3]
-    search_query = " ".join(chosen) if chosen else "gaming video game"
+    # Build YouTube search query: ask Gemma3 to extract the game name,
+    # fall back to regex (Latin tokens from title) if AI is unavailable.
+    title = post.get("article_title", "")
+    search_query = await ai_adapter.extract_game_name(title)
+    if not search_query:
+        # Regex fallback: split on separators, keep only Latin/digit tokens
+        first_chunk = re.split(r"[:–—|]", title)[0].strip()
+        latin_tokens = [t for t in first_chunk.split() if re.match(r"^[A-Za-z0-9'&.]+$", t)]
+        search_query = " ".join(latin_tokens).strip() or "gaming gameplay"
 
     await context.bot.send_message(
         chat_id=TELEGRAM_ADMIN_CHAT_ID,
-        text=f"Step 3/4: Collecting media (Pixabay: '{search_query}')...",
+        text=f"Step 3/4: Searching YouTube for '{search_query}' gameplay clips...",
     )
+
+    # Each regenerate advances the YouTube search window so clips differ.
+    # Read current skip, then bump it for next time.
+    yt_skip = db.increment_yt_skip(post_id, YT_SKIP_STEP) - YT_SKIP_STEP
 
     # 2. Generate video
     video_path = await video_generator.create_short_video(
         post=post,
         script=script,
         search_query=search_query,
+        yt_skip=yt_skip,
     )
 
     if not video_path or not os.path.exists(video_path):
@@ -385,7 +388,18 @@ async def handle_post_instagram(update: Update, context: ContextTypes.DEFAULT_TY
 
     video_path = db.get_generated_video_path(post_id)
     post       = db.get_scheduled_post(post_id)
-    caption    = context.bot_data.get(f"video_caption:{post_id}") or (post.get("post_text", "") if post else "")
+    raw_caption = context.bot_data.get(f"video_caption:{post_id}") or (post.get("post_text", "") if post else "")
+    # Strip Telegram/Markdown formatting tags for Instagram plain-text caption
+    caption = re.sub(r'[*_`~]', '', raw_caption)
+    caption = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', caption)  # [text](url) → text
+    caption = re.sub(r'<[^>]+>', '', caption)              # HTML tags
+    # Append hashtags from post_text (they survive stripping as-is)
+    if post:
+        post_text_clean = re.sub(r'<[^>]+>', '', post.get("post_text", ""))
+        hashtags = " ".join(re.findall(r'#\w+', post_text_clean))
+        if hashtags and hashtags not in caption:
+            caption = caption.rstrip() + "\n\n" + hashtags
+    caption = "More news in the telegram channel, link in the bio\n\n" + caption
 
     if not video_path or not os.path.exists(video_path):
         await context.bot.send_message(

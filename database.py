@@ -43,6 +43,11 @@ def init_db() -> None:
             conn.execute("ALTER TABLE scheduled_posts ADD COLUMN generated_video_path TEXT DEFAULT NULL")
         except Exception:
             pass  # column already exists
+        # Migration: add yt_skip_count column
+        try:
+            conn.execute("ALTER TABLE scheduled_posts ADD COLUMN yt_skip_count INTEGER DEFAULT 0")
+        except Exception:
+            pass  # column already exists
 
 
 # --- seen articles ---
@@ -131,6 +136,20 @@ def get_generated_video_path(post_id: int) -> str | None:
             (post_id,),
         ).fetchone()
     return row[0] if row else None
+
+
+def increment_yt_skip(post_id: int, added: int) -> int:
+    """Bump the YouTube result skip counter by *added* and return new value."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE scheduled_posts SET yt_skip_count = COALESCE(yt_skip_count, 0) + ? WHERE id = ?",
+            (added, post_id),
+        )
+        row = conn.execute(
+            "SELECT yt_skip_count FROM scheduled_posts WHERE id = ?",
+            (post_id,),
+        ).fetchone()
+    return row[0] if row else added
 
 
 def set_notification_message_id(post_id: int, message_id: int) -> None:

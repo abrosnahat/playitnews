@@ -161,6 +161,49 @@ async def shorten_post(text: str, target_chars: int = 900) -> str:
         return text  # fallback: return original
 
 
+async def extract_game_name(article_title: str) -> str:
+    """
+    Ask Ollama to extract just the game title (including part/edition number)
+    from a Russian or English article headline, for use in YouTube search.
+    Returns an English game name string, or empty string on failure.
+
+    Examples:
+      "GTA 6 вступила в решающий этап" → "GTA 6"
+      "Forza Horizon 6: легендарная Acura" → "Forza Horizon 6"
+      "Elden Ring 2 анонсирован" → "Elden Ring 2"
+    """
+    user_message = (
+        "Extract only the video game title (including its part/sequel number or subtitle "
+        "if present) from the following news headline. "
+        "Return ONLY the game name in English, nothing else — no punctuation, no explanation.\n\n"
+        f"Headline: {article_title}\n\n"
+        "Game title:"
+    )
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [{"role": "user", "content": user_message}],
+        "stream": False,
+        "options": {"num_predict": 20},
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+                name = data["message"]["content"].strip().strip('"\'')
+                # Sanity check: must be non-empty and reasonably short
+                if name and len(name) <= 60:
+                    logger.info("AI game name: '%s' ← '%s'", name, article_title[:60])
+                    return name
+    except Exception as exc:
+        logger.warning("extract_game_name failed: %s", exc)
+    return ""
+
+
 async def generate_video_script(post_text: str, article_title: str) -> str:
     """
     Generate a spoken narration script for TikTok/Reels/Shorts.

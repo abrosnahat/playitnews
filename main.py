@@ -36,6 +36,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext._updater").setLevel(logging.CRITICAL)  # suppress disconnect noise
 logger = logging.getLogger(__name__)
 
 
