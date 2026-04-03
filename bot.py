@@ -1,6 +1,7 @@
 """
 Telegram bot handlers and post-sending logic.
 """
+import asyncio
 import logging
 import os
 import re
@@ -258,11 +259,20 @@ def _build_video_done_keyboard(post_id: int) -> InlineKeyboardMarkup:
     """Keyboard shown after a video has been successfully generated."""
     row1 = [InlineKeyboardButton("🔄 Regenerate", callback_data=f"create_video:{post_id}")]
     row2 = []
-    if instagram_publisher.is_configured():
-        row2.append(InlineKeyboardButton("📲 Post to Instagram", callback_data=f"post_instagram:{post_id}"))
-    if youtube_publisher.is_configured():
-        row2.append(InlineKeyboardButton("▶️ Post to YouTube", callback_data=f"post_youtube:{post_id}"))
-    buttons = [row1, row2] if row2 else [row1]
+    ig_ok = instagram_publisher.is_configured()
+    yt_ok = youtube_publisher.is_configured()
+    if ig_ok:
+        row2.append(InlineKeyboardButton("📲 Instagram", callback_data=f"post_instagram:{post_id}"))
+    if yt_ok:
+        row2.append(InlineKeyboardButton("▶️ YouTube", callback_data=f"post_youtube:{post_id}"))
+    row3 = []
+    if ig_ok and yt_ok:
+        row3.append(InlineKeyboardButton("📲▶️ Post to Both", callback_data=f"post_both:{post_id}"))
+    buttons = [row1]
+    if row2:
+        buttons.append(row2)
+    if row3:
+        buttons.append(row3)
     return InlineKeyboardMarkup(buttons)
 
 
@@ -424,19 +434,11 @@ async def handle_post_instagram(update: Update, context: ContextTypes.DEFAULT_TY
             caption=caption,
         )
 
-        # Clean up local file and clear DB path
-        try:
-            os.remove(video_path)
-        except OSError:
-            pass
-        db.set_generated_video_path(post_id, None)
-        context.bot_data.pop(f"video_caption:{post_id}", None)
-
         await status_msg.edit_text(
             f"\u2705 Reel published to Instagram for post #{post_id}\n"
             f"Media ID: {media_id}\n\n"
-            f"Generate another video?",
-            reply_markup=_build_video_keyboard(post_id),
+            f"Video file kept for further publishing.",
+            reply_markup=_build_video_done_keyboard(post_id),
         )
     except Exception as exc:
         logger.error("Instagram publish failed for post #%d: %s", post_id, exc)
@@ -502,8 +504,8 @@ async def handle_post_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
         await status_msg.edit_text(
             f"\u2705 YouTube Short published for post #{post_id}\n"
             f"https://youtu.be/{video_id}\n\n"
-            f"Generate another video?",
-            reply_markup=_build_video_keyboard(post_id),
+            f"Video file kept for further publishing.",
+            reply_markup=_build_video_done_keyboard(post_id),
         )
     except Exception as exc:
         logger.error("YouTube publish failed for post #%d: %s", post_id, exc)
@@ -512,6 +514,95 @@ async def handle_post_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"Video file is still available locally.",
             reply_markup=_build_video_done_keyboard(post_id),
         )
+
+
+async def handle_post_both(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Upload the generated video to Instagram and YouTube simultaneously."""
+    query = update.callback_query
+    await query.answer("Uploading to Instagram & YouTube…")
+    post_id = int(query.data.split(":")[1])
+
+    video_path = db.get_generated_video_path(post_id)
+    post = db.get_scheduled_post(post_id)
+
+    if not video_path or not os.path.exists(video_path):
+        await context.bot.send_message(
+            chat_id=TELEGRAM_ADMIN_CHAT_ID,
+            text=f"Video file for post #{post_id} not found. Please regenerate first.",
+            reply_markup=_build_video_keyboard(post_id),
+        )
+        return
+
+    # --- Build Instagram caption ---
+    raw_caption = context.bot_data.get(f"video_caption:{post_id}") or (post.get("post_text", "") if post else "")
+    caption = re.sub(r'[*_`~]', '', raw_caption)
+    caption = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', caption)
+    caption = re.sub(r'<[^>]+>', '', caption)
+    if post:
+        post_text_clean = re.sub(r'<[^>]+>', '', post.get("post_text", ""))
+        hashtags = " ".join(re.findall(r'#\w+', post_text_clean))
+        if hashtags and hashtags not in caption:
+            caption = caption.rstrip() + "\n\n" + hashtags
+    caption = "More news in the telegram channel, link in the bio\n\n" + caption
+
+    # --- Build YouTube title / description / tags ---
+    raw_title = (post.get("article_title", "") if post else "") or f"Gaming news #{post_id}"
+    yt_title = (await ai_adapter.translate_title_to_english(raw_title))[:100]
+    raw_desc = context.bot_data.get(f"video_caption:{post_id}") or (post.get("post_text", "") if post else "")
+    yt_desc = re.sub(r'[*_`~]', '', raw_desc)
+    yt_desc = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', yt_desc)
+    yt_desc = re.sub(r'<[^>]+>', '', yt_desc)
+    tags: list[str] = []
+    if post:
+        post_text_clean = re.sub(r'<[^>]+>', '', post.get("post_text", ""))
+        hashtags_list = re.findall(r'#\w+', post_text_clean)
+        tags = [h.lstrip("#") for h in hashtags_list]
+        hashtags_str = " ".join(hashtags_list)
+        if hashtags_str and hashtags_str not in yt_desc:
+            yt_desc = yt_desc.rstrip() + "\n\n" + hashtags_str
+    yt_desc = "More news in the telegram channel, link in the bio\n\n" + yt_desc
+
+    status_msg = await context.bot.send_message(
+        chat_id=TELEGRAM_ADMIN_CHAT_ID,
+        text=f"Uploading to Instagram & YouTube for post #{post_id}…",
+    )
+
+    ig_result = ""
+    yt_result = ""
+
+    # Run both uploads concurrently
+    ig_task = asyncio.create_task(
+        instagram_publisher.publish_reel(video_path=video_path, caption=caption)
+    )
+    yt_task = asyncio.create_task(
+        youtube_publisher.upload_short(video_path=video_path, title=yt_title, description=yt_desc, tags=tags)
+    )
+
+    ig_err = None
+    yt_err = None
+
+    try:
+        media_id = await ig_task
+        ig_result = f"\u2705 Instagram: Media ID {media_id}"
+    except Exception as exc:
+        ig_err = exc
+        ig_result = f"\u274c Instagram: {exc}"
+        logger.error("Instagram publish failed for post #%d: %s", post_id, exc)
+
+    try:
+        video_id = await yt_task
+        yt_result = f"\u2705 YouTube: https://youtu.be/{video_id}"
+    except Exception as exc:
+        yt_err = exc
+        yt_result = f"\u274c YouTube: {exc}"
+        logger.error("YouTube publish failed for post #%d: %s", post_id, exc)
+
+    both_ok = ig_err is None and yt_err is None
+    await status_msg.edit_text(
+        f"{ig_result}\n{yt_result}\n\n"
+        + ("Video file kept for further publishing." if not both_ok else "Done!"),
+        reply_markup=_build_video_done_keyboard(post_id) if not both_ok else _build_video_keyboard(post_id),
+    )
 
 
 async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -537,4 +628,5 @@ def build_handlers():
         CallbackQueryHandler(handle_create_video,   pattern=r"^create_video:\d+$"),
         CallbackQueryHandler(handle_post_instagram, pattern=r"^post_instagram:\d+$"),
         CallbackQueryHandler(handle_post_youtube,    pattern=r"^post_youtube:\d+$"),
+        CallbackQueryHandler(handle_post_both,        pattern=r"^post_both:\d+$"),
     ]
