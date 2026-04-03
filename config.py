@@ -39,6 +39,9 @@ YOUTUBE_TOKEN_FILE: str = os.getenv("YOUTUBE_TOKEN_FILE", os.path.join(BASE_DIR,
 # Category ID: 20 = Gaming
 YOUTUBE_CATEGORY_ID: str = os.getenv("YOUTUBE_CATEGORY_ID", "20")
 
+# TikTok browser session (persistent Chromium profile, created by get_tiktok_session.py)
+TIKTOK_SESSION_DIR: str = os.getenv("TIKTOK_SESSION_DIR", os.path.join(BASE_DIR, "tiktok_session"))
+
 # Source
 NEWS_URL = "https://www.playground.ru/news"
 

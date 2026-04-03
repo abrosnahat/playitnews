@@ -31,6 +31,7 @@ import ai_adapter
 import video_generator
 import instagram_publisher
 import youtube_publisher
+import tiktok_publisher
 
 # How many YouTube results to skip forward on each regenerate
 YT_SKIP_STEP = 3
@@ -258,16 +259,19 @@ def _build_video_keyboard(post_id: int) -> InlineKeyboardMarkup:
 def _build_video_done_keyboard(post_id: int) -> InlineKeyboardMarkup:
     """Keyboard shown after a video has been successfully generated."""
     row1 = [InlineKeyboardButton("🔄 Regenerate", callback_data=f"create_video:{post_id}")]
-    row2 = []
     ig_ok = instagram_publisher.is_configured()
     yt_ok = youtube_publisher.is_configured()
+    tt_ok = tiktok_publisher.is_configured()
+    row2 = []
     if ig_ok:
         row2.append(InlineKeyboardButton("📲 Instagram", callback_data=f"post_instagram:{post_id}"))
     if yt_ok:
         row2.append(InlineKeyboardButton("▶️ YouTube", callback_data=f"post_youtube:{post_id}"))
+    if tt_ok:
+        row2.append(InlineKeyboardButton("🎵 TikTok", callback_data=f"post_tiktok:{post_id}"))
     row3 = []
-    if ig_ok and yt_ok:
-        row3.append(InlineKeyboardButton("📲▶️ Post to Both", callback_data=f"post_both:{post_id}"))
+    if sum([ig_ok, yt_ok, tt_ok]) >= 2:
+        row3.append(InlineKeyboardButton("🌐 Post to All", callback_data=f"post_all:{post_id}"))
     buttons = [row1]
     if row2:
         buttons.append(row2)
@@ -516,10 +520,10 @@ async def handle_post_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
 
-async def handle_post_both(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Upload the generated video to Instagram and YouTube simultaneously."""
+async def handle_post_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Upload the generated video to TikTok."""
     query = update.callback_query
-    await query.answer("Uploading to Instagram & YouTube…")
+    await query.answer("Uploading to TikTok…")
     post_id = int(query.data.split(":")[1])
 
     video_path = db.get_generated_video_path(post_id)
@@ -533,7 +537,6 @@ async def handle_post_both(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    # --- Build Instagram caption ---
     raw_caption = context.bot_data.get(f"video_caption:{post_id}") or (post.get("post_text", "") if post else "")
     caption = re.sub(r'[*_`~]', '', raw_caption)
     caption = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', caption)
@@ -545,63 +548,111 @@ async def handle_post_both(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             caption = caption.rstrip() + "\n\n" + hashtags
     caption = "More news in the telegram channel, link in the bio\n\n" + caption
 
-    # --- Build YouTube title / description / tags ---
-    raw_title = (post.get("article_title", "") if post else "") or f"Gaming news #{post_id}"
-    yt_title = (await ai_adapter.translate_title_to_english(raw_title))[:100]
-    raw_desc = context.bot_data.get(f"video_caption:{post_id}") or (post.get("post_text", "") if post else "")
-    yt_desc = re.sub(r'[*_`~]', '', raw_desc)
-    yt_desc = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', yt_desc)
-    yt_desc = re.sub(r'<[^>]+>', '', yt_desc)
+    status_msg = await context.bot.send_message(
+        chat_id=TELEGRAM_ADMIN_CHAT_ID,
+        text=f"Uploading to TikTok for post #{post_id}…",
+    )
+    try:
+        await tiktok_publisher.upload_video(video_path=video_path, caption=caption)
+        await status_msg.edit_text(
+            f"\u2705 TikTok video published for post #{post_id}\n\n"
+            f"Video file kept for further publishing.",
+            reply_markup=_build_video_done_keyboard(post_id),
+        )
+    except Exception as exc:
+        logger.error("TikTok publish failed for post #%d: %s", post_id, exc)
+        await status_msg.edit_text(
+            f"\u274c TikTok publish failed for post #{post_id}:\n{exc}\n\n"
+            f"Video file is still available locally.",
+            reply_markup=_build_video_done_keyboard(post_id),
+        )
+
+
+async def handle_post_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Upload the generated video to all configured platforms simultaneously."""
+    query = update.callback_query
+    await query.answer("Uploading to all platforms…")
+    post_id = int(query.data.split(":")[1])
+
+    video_path = db.get_generated_video_path(post_id)
+    post = db.get_scheduled_post(post_id)
+
+    if not video_path or not os.path.exists(video_path):
+        await context.bot.send_message(
+            chat_id=TELEGRAM_ADMIN_CHAT_ID,
+            text=f"Video file for post #{post_id} not found. Please regenerate first.",
+            reply_markup=_build_video_keyboard(post_id),
+        )
+        return
+
+    # --- Shared caption (Instagram / TikTok) ---
+    raw_caption = context.bot_data.get(f"video_caption:{post_id}") or (post.get("post_text", "") if post else "")
+    caption = re.sub(r'[*_`~]', '', raw_caption)
+    caption = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', caption)
+    caption = re.sub(r'<[^>]+>', '', caption)
     tags: list[str] = []
     if post:
         post_text_clean = re.sub(r'<[^>]+>', '', post.get("post_text", ""))
         hashtags_list = re.findall(r'#\w+', post_text_clean)
         tags = [h.lstrip("#") for h in hashtags_list]
         hashtags_str = " ".join(hashtags_list)
-        if hashtags_str and hashtags_str not in yt_desc:
+        if hashtags_str and hashtags_str not in caption:
+            caption = caption.rstrip() + "\n\n" + hashtags_str
+    caption = "More news in the telegram channel, link in the bio\n\n" + caption
+
+    # --- YouTube title / description ---
+    raw_title = (post.get("article_title", "") if post else "") or f"Gaming news #{post_id}"
+    yt_title = (await ai_adapter.translate_title_to_english(raw_title))[:100]
+    raw_desc = context.bot_data.get(f"video_caption:{post_id}") or (post.get("post_text", "") if post else "")
+    yt_desc = re.sub(r'[*_`~]', '', raw_desc)
+    yt_desc = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', yt_desc)
+    yt_desc = re.sub(r'<[^>]+>', '', yt_desc)
+    if tags:
+        hashtags_str = " ".join(f"#{t}" for t in tags)
+        if hashtags_str not in yt_desc:
             yt_desc = yt_desc.rstrip() + "\n\n" + hashtags_str
     yt_desc = "More news in the telegram channel, link in the bio\n\n" + yt_desc
 
     status_msg = await context.bot.send_message(
         chat_id=TELEGRAM_ADMIN_CHAT_ID,
-        text=f"Uploading to Instagram & YouTube for post #{post_id}…",
+        text=f"Uploading to all platforms for post #{post_id}…",
     )
 
-    ig_result = ""
-    yt_result = ""
+    # Launch all configured platforms concurrently
+    tasks: dict[str, asyncio.Task] = {}
+    if instagram_publisher.is_configured():
+        tasks["Instagram"] = asyncio.create_task(
+            instagram_publisher.publish_reel(video_path=video_path, caption=caption)
+        )
+    if youtube_publisher.is_configured():
+        tasks["YouTube"] = asyncio.create_task(
+            youtube_publisher.upload_short(video_path=video_path, title=yt_title, description=yt_desc, tags=tags)
+        )
+    if tiktok_publisher.is_configured():
+        tasks["TikTok"] = asyncio.create_task(
+            tiktok_publisher.upload_video(video_path=video_path, caption=caption)
+        )
 
-    # Run both uploads concurrently
-    ig_task = asyncio.create_task(
-        instagram_publisher.publish_reel(video_path=video_path, caption=caption)
-    )
-    yt_task = asyncio.create_task(
-        youtube_publisher.upload_short(video_path=video_path, title=yt_title, description=yt_desc, tags=tags)
-    )
+    results: list[str] = []
+    any_err = False
+    for platform, task in tasks.items():
+        try:
+            result = await task
+            if platform == "YouTube" and isinstance(result, str) and result:
+                results.append(f"\u2705 YouTube: https://youtu.be/{result}")
+            elif platform == "Instagram" and isinstance(result, str) and result:
+                results.append(f"\u2705 Instagram: Media ID {result}")
+            else:
+                results.append(f"\u2705 {platform}: published")
+        except Exception as exc:
+            any_err = True
+            results.append(f"\u274c {platform}: {exc}")
+            logger.error("%s publish failed for post #%d: %s", platform, post_id, exc)
 
-    ig_err = None
-    yt_err = None
-
-    try:
-        media_id = await ig_task
-        ig_result = f"\u2705 Instagram: Media ID {media_id}"
-    except Exception as exc:
-        ig_err = exc
-        ig_result = f"\u274c Instagram: {exc}"
-        logger.error("Instagram publish failed for post #%d: %s", post_id, exc)
-
-    try:
-        video_id = await yt_task
-        yt_result = f"\u2705 YouTube: https://youtu.be/{video_id}"
-    except Exception as exc:
-        yt_err = exc
-        yt_result = f"\u274c YouTube: {exc}"
-        logger.error("YouTube publish failed for post #%d: %s", post_id, exc)
-
-    both_ok = ig_err is None and yt_err is None
     await status_msg.edit_text(
-        f"{ig_result}\n{yt_result}\n\n"
-        + ("Video file kept for further publishing." if not both_ok else "Done!"),
-        reply_markup=_build_video_done_keyboard(post_id) if not both_ok else _build_video_keyboard(post_id),
+        "\n".join(results) + "\n\n"
+        + ("Video file kept for further publishing." if any_err else "Done!"),
+        reply_markup=_build_video_done_keyboard(post_id) if any_err else _build_video_keyboard(post_id),
     )
 
 
@@ -628,5 +679,8 @@ def build_handlers():
         CallbackQueryHandler(handle_create_video,   pattern=r"^create_video:\d+$"),
         CallbackQueryHandler(handle_post_instagram, pattern=r"^post_instagram:\d+$"),
         CallbackQueryHandler(handle_post_youtube,    pattern=r"^post_youtube:\d+$"),
-        CallbackQueryHandler(handle_post_both,        pattern=r"^post_both:\d+$"),
+        CallbackQueryHandler(handle_post_tiktok,     pattern=r"^post_tiktok:\d+$"),
+        CallbackQueryHandler(handle_post_all,        pattern=r"^post_all:\d+$"),
+        # legacy alias kept for in-flight messages
+        CallbackQueryHandler(handle_post_all,        pattern=r"^post_both:\d+$"),
     ]

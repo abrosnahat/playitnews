@@ -10,3 +10,4 @@ playitnews.log
 client_secrets.json
 client_secret_*.json
 youtube_token.json
+tiktok_session/
