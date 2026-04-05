@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -28,6 +29,9 @@ import certifi
 
 import scraper as _scraper
 from config import PIXABAY_API_KEY, VIDEOS_DIR
+
+# Directory with royalty-free background music tracks (mp3/wav/flac/ogg/m4a)
+MUSIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music")
 
 # Use certifi CA bundle — same fix as scraper.py prevents SSL errors on macOS
 SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
@@ -348,22 +352,22 @@ async def _burn_subtitles_pillow(
         return False
 
     def _composite_frame(fname: str) -> None:
-        """Composite subtitle text onto a single frame in-place."""
-        # frame index is 1-based in ffmpeg's image2 muxer
+        """Composite subtitle text onto a single frame."""
         idx = int(fname.replace("frame_", "").replace(".png", ""))
-        t = (idx - 1) / EXTRACT_FPS
+        t   = (idx - 1) / EXTRACT_FPS
 
         text: str | None = None
         for t_start, t_end, cue_text in cues:
             if t_start <= t < t_end:
                 text = cue_text
                 break
+
         if not text:
-            return  # nothing to draw
+            return
 
         fpath = os.path.join(frames_dir, fname)
         try:
-            base = Image.open(fpath).convert("RGBA")
+            base    = Image.open(fpath).convert("RGBA")
             overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
             _render_subtitle_onto(text, overlay)
             combined = Image.alpha_composite(base, overlay).convert("RGB")
@@ -771,6 +775,10 @@ async def _fetch_youtube_clips(
     yt_search = f"ytsearch{fetch_count}:{game_query} gameplay"
 
     # yt-dlp: download best video<=720p, no audio, max 50 MB, no playlist
+    # Randomise the clip start position for visual diversity across videos.
+    # Picks anywhere from YT_CLIP_SKIP to ~90 s into the video to vary the footage.
+    clip_start = random.randint(YT_CLIP_SKIP, YT_CLIP_SKIP + 90)
+
     ydl_args = [
         "yt-dlp",
         "--no-playlist",
@@ -780,9 +788,8 @@ async def _fetch_youtube_clips(
         "--max-filesize", f"{YT_MAX_FILESIZE}M",
         "--max-downloads", str(count + skip),   # download skip+count, discard first skip
         "--output", os.path.join(clips_dir, "%(autonumber)s.%(ext)s"),
-        # Trim: skip first YT_CLIP_SKIP seconds (intros/title cards),
-        # then take YT_CLIP_DURATION seconds of actual gameplay
-        "--download-sections", f"*{YT_CLIP_SKIP}-{YT_CLIP_SKIP + YT_CLIP_DURATION}",
+        # Random start within the video — varies on every generation
+        "--download-sections", f"*{clip_start}-{clip_start + YT_CLIP_DURATION}",
         "--force-keyframes-at-cuts",
         yt_search,
     ]
@@ -940,7 +947,7 @@ def _make_image_segment(img_path: str, duration: float, out_path: str) -> bool:
             "-an",
             out_path,
         ],
-        timeout=90,
+        timeout=120,
     )
 
 
@@ -974,6 +981,68 @@ def _make_video_segment(vid_path: str, duration: float, out_path: str) -> bool:
 # Full video assembly
 # ---------------------------------------------------------------------------
 
+def _find_music_track() -> str | None:
+    """Return a random background music track from the local music/ cache, or None."""
+    if not os.path.isdir(MUSIC_DIR):
+        return None
+    tracks = [
+        os.path.join(MUSIC_DIR, f)
+        for f in os.listdir(MUSIC_DIR)
+        if f.lower().endswith((".mp3", ".wav", ".flac", ".ogg", ".m4a"))
+    ]
+    return random.choice(tracks) if tracks else None
+
+
+async def _fetch_pixabay_music(search_query: str) -> str | None:
+    """
+    Download a royalty-free background music track via yt-dlp.
+    Searches YouTube for "royalty free gaming music no copyright" tracks.
+    Caches in music/ for reuse. Returns local mp3 path or None on failure.
+    """
+    os.makedirs(MUSIC_DIR, exist_ok=True)
+
+    # Reuse cached track if available
+    cached = _find_music_track()
+    if cached:
+        return cached
+
+    search_terms = [
+        f"{search_query} background music no copyright",
+        "gaming background music no copyright free use",
+        "electronic background music no copyright",
+        "lofi gaming music no copyright",
+    ]
+
+    for term in search_terms:
+        track_id = uuid.uuid4().hex[:8]
+        dest = os.path.join(MUSIC_DIR, f"yt_{track_id}.mp3")
+        logger.info("Searching background music: '%s'", term)
+        ok = await _run_async(
+            [
+                "yt-dlp",
+                "--no-warnings", "--quiet",
+                "--no-playlist",
+                "-x", "--audio-format", "mp3", "--audio-quality", "5",
+                "--match-filter", "duration > 30",    # skip very short clips
+                "--max-downloads", "1",
+                "-o", dest,
+                f"ytsearch3:{term}",
+            ],
+            timeout=60,
+        )
+        if ok and os.path.exists(dest):
+            logger.info("Background music cached: %s", os.path.basename(dest))
+            return dest
+        # Clean up partial file if any
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+
+    logger.warning("Could not download background music")
+    return None
+
+
 async def _assemble_video(
     image_paths: list[str],
     video_clip_paths: list[str],
@@ -981,6 +1050,7 @@ async def _assemble_video(
     cues: list[tuple[float, float, str]],
     output_path: str,
     workdir: str,
+    search_query: str = "",
 ) -> bool:
     """
     Assemble portrait video:
@@ -1053,6 +1123,34 @@ async def _assemble_video(
     )
     if not ok:
         return False
+
+    # ── Step 3.5: optional background music ──────────────────────────────────
+    music_track = _find_music_track()  # local music/ folder only
+    if music_track:
+        music_mp4 = os.path.join(workdir, "music_mixed.mp4")
+        music_dur = _get_audio_duration(music_track)
+        music_start = random.uniform(0, max(0.0, music_dur - audio_dur - 1))
+        ok_music = await _run_async(
+            [
+                "ffmpeg", "-y",
+                "-i", mixed_mp4,
+                "-ss", f"{music_start:.3f}",
+                "-stream_loop", "-1",
+                "-i", music_track,
+                "-filter_complex",
+                "[1:a]volume=0.12[bg];[0:a][bg]amix=inputs=2:normalize=0[aout]",
+                "-map", "0:v", "-map", "[aout]",
+                "-c:v", "copy", "-c:a", "aac",
+                "-t", f"{audio_dur:.3f}",
+                music_mp4,
+            ],
+            timeout=120,
+        )
+        if ok_music:
+            mixed_mp4 = music_mp4
+            logger.info("Background music added: %s", os.path.basename(music_track))
+        else:
+            logger.warning("Music mixing failed — continuing without background music")
 
     # ── Step 4: burn subtitles (Pillow PNG → ffmpeg overlay) ───────────────
     # Uses only the always-available `overlay` filter — no libass/libfreetype.
@@ -1153,6 +1251,7 @@ async def create_short_video(
         )
         ok = await _assemble_video(
             all_images, all_clips, audio_path, cues, output_path, workdir,
+            search_query=search_query,
         )
         return output_path if ok else None
 
