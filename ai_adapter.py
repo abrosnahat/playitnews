@@ -84,6 +84,29 @@ async def adapt_article(title: str, body: str) -> str:
         return f"{title}\n\n[AI processing failed. Please edit before publishing.]\n\n#gaming #news"
 
 
+# Keywords that guarantee a title is gaming-related — bypass LLM entirely
+_GAMING_KEYWORDS = [
+    # Игровые термины (RU)
+    "игр", "геймпл", "патч", "обновлени", "длс", "dlc", "моддинг", "мод ",
+    "датамайн", "катсцен", "геймер", "игрок", "игровой", "игровая",
+    "консол", "приставк", "релиз", "анонс", "трейлер", "геймплей",
+    "разработчик", "издател", "студи", "esports", "киберспорт",
+    "стример", "стрим",
+    # Game franchise / engine names (EN, recognizable in RU titles)
+    "fallout", "elder scrolls", "elden ring", "stalker", "s.t.a.l.k.e.r",
+    "cyberpunk", "witcher", "assassin", "call of duty", "battlefield",
+    "resident evil", "silent hill", "final fantasy", "grand theft",
+    "gta", "red dead", "halo", "forza", "minecraft", "roblox",
+    "baldur", "diablo", "starcraft", "warcraft", "world of warcraft",
+    "overwatch", "counter-strike", "half-life", "portal", "dota",
+    "league of legends", "valorant", "fortnite", "apex legends",
+    "death stranding", "god of war", "horizon", "spider-man", "marvel",
+    "souls", "bloodborne", "sekiro", "unreal engine", "re engine",
+    "nintendo", "playstation", "xbox", "steam ", "epic games",
+    "zompiercer", "remake", "remaster", "expansion",
+]
+
+
 async def is_gaming_related(title: str) -> bool:
     """
     Ask Ollama whether a news article title is about video games.
@@ -91,13 +114,23 @@ async def is_gaming_related(title: str) -> bool:
     Returns False → skip it.
     Falls back to True (fail-open) if Ollama is unavailable.
     """
+    title_lower = title.lower()
+    for kw in _GAMING_KEYWORDS:
+        if kw in title_lower:
+            logger.info("AI фильтр [+] (keyword '%s'): '%s'", kw.strip(), title[:70])
+            return True
+
     user_message = (
-        "You are a strict gaming news filter. Answer with a single word only: YES or NO.\n\n"
-        "Is the following Russian news article title about VIDEO GAMES?"
-        " This includes: games, gaming industry, game consoles, esports, game engines, "
-        "GPUs/CPUs/hardware specifically for gaming.\n"
-        "Answer NO for: movies, TV shows, series, anime (unless a game adaptation), "
-        "smartphones, tablets, TVs, or any non-gaming consumer electronics.\n\n"
+        "You are a gaming news filter for a Russian gaming news site. Answer with YES or NO only.\n\n"
+        "Answer YES if the title is about:\n"
+        "- Any video game (known or unknown), game update, patch, DLC, expansion\n"
+        "- Game development news, game engines, studios, publishers\n"
+        "- Game consoles, gaming hardware, peripherals\n"
+        "- Esports, streamers, game mods\n"
+        "- ANY title that could plausibly be a video game name\n\n"
+        "When in doubt — answer YES. Only answer NO if the title is clearly and obviously "
+        "about something unrelated to gaming: a non-gaming movie, TV series, smartphone, "
+        "tablet, or non-gaming consumer product.\n\n"
         f"Title: {title}\n\n"
         "Answer (YES or NO):"
     )
