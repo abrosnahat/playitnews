@@ -25,7 +25,7 @@ from telegram.ext import (
 from telegram.error import TelegramError, TimedOut
 
 import database as db
-from config import TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_CHANNEL_ID
+from config import TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_CHANNEL_ID, TELEGRAM_SECOND_CHANNEL_ID
 from ai_adapter import shorten_post, generate_video_script
 import ai_adapter
 import video_generator
@@ -199,14 +199,22 @@ async def publish_post(bot: Bot, post_id: int) -> bool:
         return False
 
     text = post["post_text"]
+    ru_text = post.get("ru_post_text") or text  # fallback to EN if Russian not available
     image_paths: list[str] = [p for p in post["image_paths"] if os.path.exists(p)]
     video_paths: list[str] = [p for p in post.get("video_paths", []) if os.path.exists(p)]
 
     try:
         await _send_media_post(bot, TELEGRAM_CHANNEL_ID, text, image_paths, video_paths)
+        logger.info("Пост #%d опубликован в %s", post_id, TELEGRAM_CHANNEL_ID)
+
+        if TELEGRAM_SECOND_CHANNEL_ID:
+            try:
+                await _send_media_post(bot, TELEGRAM_SECOND_CHANNEL_ID, ru_text, image_paths, video_paths)
+                logger.info("Пост #%d опубликован в %s", post_id, TELEGRAM_SECOND_CHANNEL_ID)
+            except TelegramError as exc2:
+                logger.error("Ошибка публикации в второй канал #%d: %s", post_id, exc2)
 
         db.update_post_status(post_id, "sent")
-        logger.info("Пост #%d опубликован в %s", post_id, TELEGRAM_CHANNEL_ID)
         return True
     except TimedOut:
         # Telegram принял запрос, но ответ не успел прийти — пост доставлен

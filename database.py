@@ -48,6 +48,11 @@ def init_db() -> None:
             conn.execute("ALTER TABLE scheduled_posts ADD COLUMN yt_skip_count INTEGER DEFAULT 0")
         except Exception:
             pass  # column already exists
+        # Migration: add ru_post_text column
+        try:
+            conn.execute("ALTER TABLE scheduled_posts ADD COLUMN ru_post_text TEXT DEFAULT NULL")
+        except Exception:
+            pass  # column already exists
 
 
 # --- seen articles ---
@@ -75,16 +80,18 @@ def create_scheduled_post(
     image_paths: list[str],
     scheduled_at: datetime,
     video_paths: list[str] | None = None,
+    ru_post_text: str | None = None,
 ) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO scheduled_posts
-               (article_url, article_title, post_text, image_paths, video_paths, scheduled_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               (article_url, article_title, post_text, ru_post_text, image_paths, video_paths, scheduled_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
                 article_url,
                 article_title,
                 post_text,
+                ru_post_text,
                 json.dumps(image_paths),
                 json.dumps(video_paths or []),
                 scheduled_at.isoformat(),

@@ -13,7 +13,7 @@ from telegram.ext import Application
 from telegram.request import HTTPXRequest
 
 import database as db
-from ai_adapter import adapt_article, is_gaming_related
+from ai_adapter import adapt_article, adapt_article_ru, is_gaming_related
 from bot import build_handlers, publish_post, send_admin_notification
 from config import (
     CHECK_INTERVAL_MINUTES,
@@ -65,12 +65,16 @@ async def process_article(app: Application, article_url: str, article_title: str
         if youtube_urls:
             logger.info("YouTube ссылок: %d  [%s]", len(youtube_urls), article_url)
 
-    # Adapt via AI
-    post_text = await adapt_article(article.title, article.text)
+    # Adapt via AI (English for main channel, Russian for second channel)
+    post_text, ru_post_text = await asyncio.gather(
+        adapt_article(article.title, article.text),
+        adapt_article_ru(article.title, article.text),
+    )
 
     # Append YouTube links to post text (after AI adaptation)
     if youtube_urls:
         post_text = post_text + "\n\n" + "\n".join(youtube_urls)
+        ru_post_text = ru_post_text + "\n\n" + "\n".join(youtube_urls)
 
     # Schedule the post (no delay — admin approves to publish immediately)
     scheduled_at = datetime.now(timezone.utc)
@@ -81,6 +85,7 @@ async def process_article(app: Application, article_url: str, article_title: str
         image_paths=image_paths,
         scheduled_at=scheduled_at,
         video_paths=video_paths,
+        ru_post_text=ru_post_text,
     )
     db.mark_article_seen(article_url, article.title)
 

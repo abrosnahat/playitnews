@@ -6,6 +6,7 @@ load_dotenv()
 # Telegram
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHANNEL_ID: str = os.getenv("TELEGRAM_CHANNEL_ID", "@playitnews")
+TELEGRAM_SECOND_CHANNEL_ID: str = os.getenv("TELEGRAM_SECOND_CHANNEL_ID", "@readitgames")
 TELEGRAM_ADMIN_CHAT_ID: int = int(os.getenv("TELEGRAM_ADMIN_CHAT_ID", "0"))
 
 # Ollama (local)

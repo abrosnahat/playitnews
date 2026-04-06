@@ -32,6 +32,60 @@ SYSTEM_PROMPT = (
 )
 
 
+async def adapt_article_ru(title: str, body: str) -> str:
+    """
+    Создаёт русскоязычный Telegram-пост из русской статьи.
+    """
+    user_message = (
+        "Перепиши следующую игровую новость как пост для русскоязычного Telegram-канала.\n"
+        "ВАЖНО: Весь ответ должен быть исключительно на русском языке.\n\n"
+        "Правила форматирования (Telegram HTML):\n"
+        "- Первая строка: <b>цепляющий заголовок жирным</b>\n"
+        "- Затем 2-3 коротких абзаца обычного текста\n"
+        "- Яркую цитату или ключевой факт оберни в <i>курсив</i>\n"
+        "- Последняя строка: 5-8 русских и английских хэштегов через пробел\n"
+        "- Пустая строка между текстом и хэштегами\n"
+        "- Максимум 900 символов включая HTML-теги\n"
+        "- Без эмодзи, не упоминай источник\n\n"
+        "Пример структуры:\n"
+        "<b>Заголовок</b>\n\n"
+        "Первый абзац с главной новостью.\n\n"
+        "Второй абзац с деталями. <i>Ключевая цитата если есть.</i>\n\n"
+        "#тег1 #тег2 #gaming\n\n"
+        f"Заголовок: {title}\n\nТекст:\n{body[:4000]}\n\n"
+        "Напиши Telegram-пост на русском:"
+    )
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {"role": "system", "content": (
+                "Ты опытный редактор игровых новостей. Пишешь живые, увлекательные посты "
+                "для русскоязычной аудитории. Только русский язык в ответе."
+            )},
+            {"role": "user", "content": user_message},
+        ],
+        "stream": False,
+        "options": {"num_predict": 400},
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+                post_text = _md_to_html(data["message"]["content"].strip())
+                logger.info("Gemma (RU) адаптировал статью: '%s' (%d симв.)", title[:60], len(post_text))
+                return post_text
+    except Exception as exc:
+        logger.error("Ошибка Ollama API (RU): %s", exc)
+        return f"{title}\n\n[Ошибка AI обработки]\n\n#игры #новости"
+
+
 async def adapt_article(title: str, body: str) -> str:
     """
     Translate, rephrase, and adapt the Russian article into an English Telegram post.
