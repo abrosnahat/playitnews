@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import re
+import shutil
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -22,11 +23,11 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
 )
-from telegram.error import TelegramError, TimedOut
+from telegram.error import TelegramError, TimedOut, BadRequest
 
 import database as db
 from config import TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_CHANNEL_ID, TELEGRAM_SECOND_CHANNEL_ID
-from ai_adapter import shorten_post, generate_video_script
+from ai_adapter import shorten_post, generate_video_script, generate_video_script_ru
 import ai_adapter
 import video_generator
 import instagram_publisher
@@ -109,10 +110,11 @@ async def _send_media_post(
     text: str,
     image_paths: list[str],
     video_paths: list[str] | None = None,
+    footer: str = "@playitgamesnews",
 ) -> None:
     """Send photos and/or videos with text as caption in a single post."""
     LIMIT = 1024
-    FOOTER = "\n\n@playitnews"
+    FOOTER = f"\n\n{footer}"
 
     # Extract YouTube URLs from the text so they survive AI shortening
     yt_pattern = re.compile(r'\nhttps?://(?:www\.)?youtube\.com/watch\S*', re.MULTILINE)
@@ -199,7 +201,7 @@ async def publish_post(bot: Bot, post_id: int) -> bool:
         return False
 
     text = post["post_text"]
-    ru_text = post.get("ru_post_text") or text  # fallback to EN if Russian not available
+    ru_text = post.get("ru_post_text")
     image_paths: list[str] = [p for p in post["image_paths"] if os.path.exists(p)]
     video_paths: list[str] = [p for p in post.get("video_paths", []) if os.path.exists(p)]
 
@@ -208,11 +210,14 @@ async def publish_post(bot: Bot, post_id: int) -> bool:
         logger.info("Пост #%d опубликован в %s", post_id, TELEGRAM_CHANNEL_ID)
 
         if TELEGRAM_SECOND_CHANNEL_ID:
-            try:
-                await _send_media_post(bot, TELEGRAM_SECOND_CHANNEL_ID, ru_text, image_paths, video_paths)
-                logger.info("Пост #%d опубликован в %s", post_id, TELEGRAM_SECOND_CHANNEL_ID)
-            except TelegramError as exc2:
-                logger.error("Ошибка публикации в второй канал #%d: %s", post_id, exc2)
+            if not ru_text:
+                logger.warning("Пост #%d: нет русского текста, пропускаем %s", post_id, TELEGRAM_SECOND_CHANNEL_ID)
+            else:
+                try:
+                    await _send_media_post(bot, TELEGRAM_SECOND_CHANNEL_ID, ru_text, image_paths, video_paths, footer="@readitgames")
+                    logger.info("Пост #%d опубликован в %s", post_id, TELEGRAM_SECOND_CHANNEL_ID)
+                except TelegramError as exc2:
+                    logger.error("Ошибка публикации в второй канал #%d: %s", post_id, exc2)
 
         db.update_post_status(post_id, "sent")
         return True
@@ -249,7 +254,7 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await publish_post(bot=context.bot, post_id=post_id)
 
     create_video_keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Create video", callback_data=f"create_video:{post_id}"),
+        InlineKeyboardButton("🎬 Create video (EN+RU)", callback_data=f"create_video:{post_id}"),
     ]])
     await context.bot.send_message(
         chat_id=TELEGRAM_ADMIN_CHAT_ID,
@@ -260,7 +265,7 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 def _build_video_keyboard(post_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("Create video", callback_data=f"create_video:{post_id}"),
+        InlineKeyboardButton("🎬 Create video (EN+RU)", callback_data=f"create_video:{post_id}"),
     ]])
 
 
@@ -289,120 +294,136 @@ def _build_video_done_keyboard(post_id: int) -> InlineKeyboardMarkup:
 
 
 async def handle_create_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Generate a TikTok/Reels/Shorts video for the approved article."""
+    """Generate EN and RU TikTok/Reels/Shorts videos simultaneously."""
     query = update.callback_query
-    # Acknowledge the tap without altering the button message — keeps it reusable
     await query.answer("Starting video generation...")
     post_id = int(query.data.split(":")[1])
 
     post = db.get_scheduled_post(post_id)
     if not post:
-        await context.bot.send_message(
-            chat_id=TELEGRAM_ADMIN_CHAT_ID,
-            text=f"Post #{post_id} not found.",
-        )
+        await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=f"Post #{post_id} not found.")
         return
 
     await context.bot.send_message(
         chat_id=TELEGRAM_ADMIN_CHAT_ID,
-        text=f"Generating video for post #{post_id}...\nStep 1/4: Writing TikTok script",
+        text=f"Generating EN + RU videos for post #{post_id}...\nStep 1/4: Writing scripts",
     )
 
-    # 1. Generate narration script via AI
-    script = await generate_video_script(
-        post_text=post["post_text"],
-        article_title=post["article_title"],
+    # 1. Generate both scripts in parallel
+    en_script, ru_script = await asyncio.gather(
+        generate_video_script(post_text=post["post_text"], article_title=post["article_title"]),
+        generate_video_script_ru(post_text=post.get("ru_post_text") or post["post_text"], article_title=post["article_title"]),
     )
+
+    # Fallback if AI returned empty scripts
+    if not en_script or not en_script.strip():
+        en_script = post["post_text"][:300].strip()
+        logger.warning("EN video script was empty, using post_text fallback")
+    if not ru_script or not ru_script.strip():
+        ru_script = (post.get("ru_post_text") or post["post_text"])[:300].strip()
+        logger.warning("RU video script was empty, using post_text fallback")
 
     await context.bot.send_message(
         chat_id=TELEGRAM_ADMIN_CHAT_ID,
-        text=f"Script for post #{post_id}:\n\n{script}",
+        text=f"🇬🇧 EN script:\n{en_script}\n\n🇷🇺 RU script:\n{ru_script}",
     )
 
-    await context.bot.send_message(
-        chat_id=TELEGRAM_ADMIN_CHAT_ID,
-        text="Step 2/4: Synthesizing voice (edge-tts)...",
-    )
+    await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text="Step 2/4: Synthesizing voices...")
 
-    # Build YouTube search query: ask Gemma3 to extract the game name,
-    # fall back to regex (Latin tokens from title) if AI is unavailable.
     title = post.get("article_title", "")
     search_query = await ai_adapter.extract_game_name(title)
     if not search_query:
-        # Regex fallback: split on separators, keep only Latin/digit tokens
         first_chunk = re.split(r"[:–—|]", title)[0].strip()
         latin_tokens = [t for t in first_chunk.split() if re.match(r"^[A-Za-z0-9'&.]+$", t)]
-        search_query = " ".join(latin_tokens).strip() or "gaming gameplay"
+        search_query = " ".join(latin_tokens).strip() or title[:50]
 
     await context.bot.send_message(
         chat_id=TELEGRAM_ADMIN_CHAT_ID,
-        text=f"Step 3/4: Searching YouTube for '{search_query}' gameplay clips...",
+        text=f"Step 3/4: Searching YouTube for '{search_query}'",
     )
 
-    # Each regenerate advances the YouTube search window so clips differ.
-    # Read current skip, then bump it for next time.
     yt_skip = db.increment_yt_skip(post_id, YT_SKIP_STEP) - YT_SKIP_STEP
 
-    # 2. Generate video
-    video_path = await video_generator.create_short_video(
-        post=post,
-        script=script,
-        search_query=search_query,
-        yt_skip=yt_skip,
+    # Download clips once — shared between EN and RU renders
+    article_videos, yt_clips, clips_workdir = await video_generator.fetch_gameplay_clips(
+        post=post, search_query=search_query, yt_skip=yt_skip,
     )
+    shared_clips = article_videos + yt_clips
 
-    if not video_path or not os.path.exists(video_path):
+    # 2. Generate EN and RU videos sequentially to avoid OOM from parallel ffmpeg/Pillow loads
+    try:
+        en_path = await video_generator.create_short_video(post=post, script=en_script, search_query=search_query, yt_skip=yt_skip, lang="en", prefetched_clips=shared_clips, n_article_clips=len(article_videos))
+        ru_path = await video_generator.create_short_video(post=post, script=ru_script, search_query=search_query, yt_skip=yt_skip, lang="ru", prefetched_clips=shared_clips, n_article_clips=len(article_videos))
+    finally:
+        shutil.rmtree(clips_workdir, ignore_errors=True)
+
+    if not en_path and not ru_path:
         await context.bot.send_message(
             chat_id=TELEGRAM_ADMIN_CHAT_ID,
-            text=(
-                f"Video generation failed for post #{post_id}.\n"
-                "Check logs for details. Tap the button below to retry."
-            ),
+            text=f"Video generation failed for post #{post_id}.\nCheck logs. Tap below to retry.",
             reply_markup=_build_video_keyboard(post_id),
         )
         return
 
-    # 3. Send the finished video to admin
-    await context.bot.send_message(
-        chat_id=TELEGRAM_ADMIN_CHAT_ID,
-        text="Step 4/4: Uploading video to Telegram...",
-    )
-    try:
-        file_size = os.path.getsize(video_path)
-        if file_size > 50 * 1024 * 1024:        # Telegram bot limit: 50 MB
+    await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text="Step 4/4: Uploading videos to Telegram...")
+
+    async def _send_video(path: str | None, label: str, script: str) -> None:
+        if not path or not os.path.exists(path):
+            await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=f"{label} video failed.")
+            return
+        file_size = os.path.getsize(path)
+        if file_size > 50 * 1024 * 1024:
             await context.bot.send_message(
                 chat_id=TELEGRAM_ADMIN_CHAT_ID,
-                text=(
-                    f"Video file is too large ({file_size // (1024*1024)} MB > 50 MB).\n"
-                    f"Saved locally at:\n{video_path}"
-                ),
-                reply_markup=_build_video_keyboard(post_id),
+                text=f"{label} video too large ({file_size // (1024*1024)} MB > 50 MB).\nSaved at: {path}",
             )
             return
-        with open(video_path, "rb") as vf:
-            await context.bot.send_document(
-                chat_id=TELEGRAM_ADMIN_CHAT_ID,
-                document=vf,
-                filename=os.path.basename(video_path),
-                caption=f"TikTok/Shorts video for post #{post_id} (no compression)",
-                write_timeout=300,
-                read_timeout=120,
-            )
-        # Keep video on disk and persist path to DB so it survives bot restarts
-        db.set_generated_video_path(post_id, video_path)
-        context.bot_data[f"video_caption:{post_id}"] = script
-        await context.bot.send_message(
-            chat_id=TELEGRAM_ADMIN_CHAT_ID,
-            text=f"Video for post #{post_id} ready.",
-            reply_markup=_build_video_done_keyboard(post_id),
-        )
-    except TelegramError as exc:
-        logger.error("Failed to send video for post #%d: %s", post_id, exc)
-        await context.bot.send_message(
-            chat_id=TELEGRAM_ADMIN_CHAT_ID,
-            text=f"Could not send video: {exc}\nSaved at: {video_path}",
-            reply_markup=_build_video_keyboard(post_id),
-        )
+        try:
+            w, h = _probe_video_dims(path)
+            with open(path, "rb") as vf:
+                await context.bot.send_video(
+                    chat_id=TELEGRAM_ADMIN_CHAT_ID,
+                    video=vf,
+                    caption=f"{label} video for post #{post_id}",
+                    width=w or None, height=h or None,
+                    supports_streaming=True,
+                    write_timeout=300,
+                    read_timeout=120,
+                )
+        except TelegramError as exc:
+            logger.warning("send_video failed (%s), falling back to send_document", exc)
+            try:
+                with open(path, "rb") as vf:
+                    await context.bot.send_document(
+                        chat_id=TELEGRAM_ADMIN_CHAT_ID,
+                        document=vf,
+                        filename=os.path.basename(path),
+                        caption=f"{label} video for post #{post_id}",
+                        write_timeout=300,
+                        read_timeout=120,
+                    )
+            except TelegramError as exc2:
+                logger.error("Failed to send %s video for post #%d: %s", label, post_id, exc2)
+                await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=f"Could not send {label} video: {exc2}")
+
+    await _send_video(en_path, "🇬🇧 EN", en_script)
+    await _send_video(ru_path, "🇷🇺 RU", ru_script)
+
+    # Persist EN video path for publish buttons
+    final_path = en_path or ru_path
+    db.set_generated_video_path(post_id, final_path)
+    context.bot_data[f"video_caption:{post_id}"] = en_script
+
+    await context.bot.send_message(
+        chat_id=TELEGRAM_ADMIN_CHAT_ID,
+        text=f"Videos for post #{post_id} ready.",
+        reply_markup=_build_video_done_keyboard(post_id),
+    )
+
+
+async def handle_create_video_ru(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Legacy handler — redirect to combined EN+RU generation."""
+    await handle_create_video(update, context)
 
 
 async def handle_post_instagram(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -666,7 +687,10 @@ async def handle_post_all(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except BadRequest:
+        pass
     post_id = int(query.data.split(":")[1])
 
     post = db.get_scheduled_post(post_id)
@@ -677,6 +701,19 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ---------------------------------------------------------------------------
+# Global error handler
+# ---------------------------------------------------------------------------
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log errors; ignore expired callback queries silently."""
+    exc = context.error
+    if isinstance(exc, BadRequest) and "query is too old" in str(exc).lower():
+        logger.debug("Ignoring expired callback query: %s", exc)
+        return
+    logger.error("Unhandled exception: %s", exc, exc_info=exc)
+
+
+# ---------------------------------------------------------------------------
 # Build handlers list for Application
 # ---------------------------------------------------------------------------
 
@@ -684,7 +721,8 @@ def build_handlers():
     return [
         CallbackQueryHandler(handle_approve,        pattern=r"^approve:\d+$"),
         CallbackQueryHandler(handle_cancel,         pattern=r"^cancel:\d+$"),
-        CallbackQueryHandler(handle_create_video,   pattern=r"^create_video:\d+$"),
+        CallbackQueryHandler(handle_create_video,    pattern=r"^create_video:\d+$"),
+        CallbackQueryHandler(handle_create_video_ru, pattern=r"^create_video_ru:\d+$"),
         CallbackQueryHandler(handle_post_instagram, pattern=r"^post_instagram:\d+$"),
         CallbackQueryHandler(handle_post_youtube,    pattern=r"^post_youtube:\d+$"),
         CallbackQueryHandler(handle_post_tiktok,     pattern=r"^post_tiktok:\d+$"),

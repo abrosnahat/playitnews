@@ -16,6 +16,25 @@ def _md_to_html(text: str) -> str:
     text = re.sub(r'_(?!_)(.+?)(?<!_)_',    r'<i>\1</i>', text, flags=re.DOTALL)
     return text
 
+
+def _sanitize_telegram_html(text: str) -> str:
+    """Close any unclosed Telegram HTML tags (<b>, <i>) to prevent parse errors."""
+    allowed = ("b", "i")
+    stack: list[str] = []
+    for m in re.finditer(r'<(/?)(\w+)[^>]*>', text):
+        closing, tag = m.group(1), m.group(2).lower()
+        if tag not in allowed:
+            continue
+        if closing:
+            if stack and stack[-1] == tag:
+                stack.pop()
+        else:
+            stack.append(tag)
+    # Close remaining open tags in reverse order
+    for tag in reversed(stack):
+        text += f"</{tag}>"
+    return text
+
 SYSTEM_PROMPT = (
     "You are an expert gaming news editor and social media content creator. "
     "Your task is to transform Russian gaming news articles into engaging English Telegram posts.\n\n"
@@ -66,7 +85,7 @@ async def adapt_article_ru(title: str, body: str) -> str:
             {"role": "user", "content": user_message},
         ],
         "stream": False,
-        "options": {"num_predict": 400},
+        "options": {"num_predict": 900, "num_ctx": 4096},
     }
 
     try:
@@ -74,16 +93,19 @@ async def adapt_article_ru(title: str, body: str) -> str:
             async with session.post(
                 f"{OLLAMA_BASE_URL}/api/chat",
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=120),
+                timeout=aiohttp.ClientTimeout(total=180),
             ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
-                post_text = _md_to_html(data["message"]["content"].strip())
+                post_text = _sanitize_telegram_html(_md_to_html(data["message"]["content"].strip()))
+                if not post_text:
+                    logger.warning("Gemma (RU) вернул пустой ответ для '%s', используем fallback", title[:60])
+                    return f"<b>{title}</b>\n\n#игры #новости #gaming"
                 logger.info("Gemma (RU) адаптировал статью: '%s' (%d симв.)", title[:60], len(post_text))
                 return post_text
     except Exception as exc:
         logger.error("Ошибка Ollama API (RU): %s", exc)
-        return f"{title}\n\n[Ошибка AI обработки]\n\n#игры #новости"
+        return f"<b>{title}</b>\n\n[Ошибка AI обработки]\n\n#игры #новости"
 
 
 async def adapt_article(title: str, body: str) -> str:
@@ -118,7 +140,7 @@ async def adapt_article(title: str, body: str) -> str:
             {"role": "user", "content": user_message},
         ],
         "stream": False,
-        "options": {"num_predict": 400},
+        "options": {"num_predict": 900, "num_ctx": 4096},
     }
 
     try:
@@ -130,7 +152,7 @@ async def adapt_article(title: str, body: str) -> str:
             ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
-                post_text = _md_to_html(data["message"]["content"].strip())
+                post_text = _sanitize_telegram_html(_md_to_html(data["message"]["content"].strip()))
                 logger.info("Gemma адаптировал статью: '%s'  (%d симв.)", title[:60], len(post_text))
                 return post_text
     except Exception as exc:
@@ -240,7 +262,7 @@ async def shorten_post(text: str, target_chars: int = 900) -> str:
             ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
-                shortened = _md_to_html(data["message"]["content"].strip())
+                shortened = _sanitize_telegram_html(_md_to_html(data["message"]["content"].strip()))
                 logger.info("Gemma сократил пост: %d → %d симв.", len(text), len(shortened))
                 return shortened
     except Exception as exc:
@@ -250,21 +272,20 @@ async def shorten_post(text: str, target_chars: int = 900) -> str:
 
 async def extract_game_name(article_title: str) -> str:
     """
-    Ask Ollama to extract just the game title (including part/edition number)
-    from a Russian or English article headline, for use in YouTube search.
-    Returns an English game name string, or empty string on failure.
-
-    Examples:
-      "GTA 6 вступила в решающий этап" → "GTA 6"
-      "Forza Horizon 6: легендарная Acura" → "Forza Horizon 6"
-      "Elden Ring 2 анонсирован" → "Elden Ring 2"
+    Ask Ollama to extract a concise YouTube search query from the article headline.
+    For game news: returns the game title (e.g. "GTA 6", "Elden Ring 2").
+    For other gaming/tech news: returns a short descriptive query suitable for
+    finding relevant YouTube footage (e.g. "PC gaming setup", "game awards ceremony").
+    Returns an English query string, or empty string on failure.
     """
     user_message = (
-        "Extract only the video game title (including its part/sequel number or subtitle "
-        "if present) from the following news headline. "
-        "Return ONLY the game name in English, nothing else — no punctuation, no explanation.\n\n"
+        "Given the following news headline, write a short YouTube search query (2-5 words in English) "
+        "that would find relevant video footage for this story. "
+        "If it's about a specific game, return just the game title. "
+        "If it's general gaming/tech news, describe the topic concisely. "
+        "Return ONLY the search query, nothing else — no punctuation, no explanation.\n\n"
         f"Headline: {article_title}\n\n"
-        "Game title:"
+        "Search query:"
     )
     payload = {
         "model": OLLAMA_MODEL,
@@ -333,8 +354,9 @@ async def generate_video_script(post_text: str, article_title: str) -> str:
     Formula: [What happened] → [Short fact] → [Detail] → [Why it matters] → [Question/conclusion]
     Target: 65-90 words (~35-45 seconds spoken at natural pace).
     """
-    # Strip HTML tags for clean input
+    # Strip HTML tags and markdown symbols for clean plain-text input
     clean_text = re.sub(r"<[^>]+>", "", post_text)
+    clean_text = re.sub(r"[*_`#]", "", clean_text)
 
     user_message = (
         "Write a short spoken video narration script for TikTok/Reels/Shorts based on the gaming news below.\n\n"
@@ -370,7 +392,7 @@ async def generate_video_script(post_text: str, article_title: str) -> str:
             {"role": "user", "content": user_message},
         ],
         "stream": False,
-        "options": {"num_predict": 180},
+        "options": {"num_predict": 300, "num_ctx": 2048},
     }
 
     try:
@@ -392,4 +414,72 @@ async def generate_video_script(post_text: str, article_title: str) -> str:
     except Exception as exc:
         logger.error("Error generating video script: %s", exc)
         # Fallback: use first 350 chars of clean post text
+        return clean_text[:350].strip()
+
+
+async def generate_video_script_ru(post_text: str, article_title: str) -> str:
+    """
+    Генерирует русскоязычный сценарий озвучки для TikTok/Reels/Shorts.
+    Цель: 65–90 слов (~35–45 секунд речи).
+    """
+    # Strip all HTML tags and markdown symbols from input
+    clean_text = re.sub(r"<[^>]+>", "", post_text)
+    clean_text = re.sub(r"[*_`#]", "", clean_text)
+
+    user_message = (
+        "Напиши короткий сценарий озвучки для игровой новости (формат Shorts/Reels).\n\n"
+        "СТРОГИЕ ПРАВИЛА:\n"
+        "- Язык: ТОЛЬКО русский\n"
+        "- Длина: 65–90 слов МАКСИМУМ (35–45 секунд речи)\n"
+        "- Только чистый текст — БЕЗ хэштегов, HTML, эмодзи, markdown\n"
+        "- Стиль: нейтральный, информационный, без сленга, жаргона и бранных слов\n"
+        "- Текст будет зачитан голосовым AI — пиши чёткими литературными предложениями\n"
+        "- Следуй формуле (1-2 предложения на шаг):\n"
+        "  1. [Что произошло] — цепляющее вступительное предложение\n"
+        "  2. [Факт] — одна ключевая цифра, деталь или статистика\n"
+        "  3. [Деталь] — интересная или неожиданная подробность\n"
+        "  4. [Почему важно] — значимость для игрового сообщества\n"
+        "  5. [Вопрос или вывод] — завершающий вопрос или ёмкая фраза\n\n"
+        "- НЕ начинай с 'Сегодня в новостях', 'Привет всем' или шаблонных фраз\n"
+        "- Начинай сразу с главного факта\n"
+        "- ЗАПРЕЩЕНО: мат, сленг, грубые выражения, фамильярное обращение\n\n"
+        f"Заголовок: {article_title}\n\n"
+        f"Текст поста:\n{clean_text[:1800]}\n\n"
+        "Напиши сценарий (нейтральный литературный текст, 65–90 слов):"
+    )
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Ты профессиональный редактор игровых новостей. "
+                    "Пишешь нейтральные, грамотные сценарии озвучки на русском литературном языке. "
+                    "Без сленга, мата и фамильярности. Только чистый информационный текст."
+                ),
+            },
+            {"role": "user", "content": user_message},
+        ],
+        "stream": False,
+        "options": {"num_predict": 300, "num_ctx": 2048},
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+                script = data["message"]["content"].strip()
+                script = re.sub(r"<[^>]+>", "", script)
+                script = re.sub(r"[*_`#]", "", script)
+                script = script.strip()
+                logger.info("RU video script generated: %d words", len(script.split()))
+                return script
+    except Exception as exc:
+        logger.error("Error generating RU video script: %s", exc)
         return clean_text[:350].strip()

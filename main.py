@@ -14,7 +14,7 @@ from telegram.request import HTTPXRequest
 
 import database as db
 from ai_adapter import adapt_article, adapt_article_ru, is_gaming_related
-from bot import build_handlers, publish_post, send_admin_notification
+from bot import build_handlers, error_handler, publish_post, send_admin_notification
 from config import (
     CHECK_INTERVAL_MINUTES,
     TELEGRAM_BOT_TOKEN,
@@ -185,6 +185,7 @@ def main() -> None:
     # Register Telegram bot handlers
     for handler in build_handlers():
         app.add_handler(handler)
+    app.add_error_handler(error_handler)
 
     job_queue = app.job_queue
 

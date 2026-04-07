@@ -47,9 +47,10 @@ logger = logging.getLogger(__name__)
 VID_W = 1080
 VID_H = 1920
 VID_FPS = 30
-TTS_VOICE = "en-US-AndrewMultilingualNeural"  # Warm, authentic, most human-sounding
-TTS_RATE  = "+10%"  # Slightly faster than default → more energetic, TikTok-style
-TTS_PITCH = "-3Hz"  # Slightly lower pitch → warmer tone
+TTS_VOICE    = "en-US-AndrewMultilingualNeural"  # English — warm, authentic
+TTS_VOICE_RU = "ru-RU-DmitryNeural"              # Russian — Microsoft Neural TTS
+TTS_RATE  = "+10%"   # Slightly faster than default → more energetic, TikTok-style
+TTS_PITCH = "-3Hz"   # Slightly lower pitch → warmer tone
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +395,9 @@ async def _burn_subtitles_pillow(
             "-crf", "28",
             "-preset", "fast",
             "-pix_fmt", "yuv420p",
-            "-c:a", "copy",
+            "-c:a", "aac",
+            "-ar", "44100",
+            "-b:a", "192k",
             "-shortest",
             output_mp4,
         ],
@@ -641,12 +644,19 @@ def _detect_word_boundaries_from_audio(
 def _run_whisper_sync(
     audio_path: str,
     sentence_cues: list[tuple[float, float, str]],
+    language: str = "en",
 ) -> list[tuple[float, float, str]]:
     """
     Use Whisper to get acoustic word timing, then map our known script words
-    to that timing by position ratio.  This is immune to Whisper transcription
-    errors because we only use the *timing* from Whisper, not its text.
+    to that timing.
 
+    Mapping strategy (per-sentence):
+      For each VTT sentence boundary [t_start, t_end], collect Whisper word
+      timings that fall inside that window, then map script words → Whisper
+      timings by position ratio **within the window only**.  This bounds any
+      drift to a single sentence (~1-2 s) instead of accumulating globally.
+
+    Model: 'small' for Russian (better Cyrillic recognition), 'tiny' for EN.
     Returns [] if Whisper is unavailable or produces no word segments.
     """
     try:
@@ -657,23 +667,29 @@ def _run_whisper_sync(
     def _clean(word: str) -> str:
         return word.strip(".,!?;:\"'()-\u2013\u2014")
 
-    # Collect script words in order
-    script_words = [
-        _clean(w)
-        for _, _, text in sentence_cues
-        for w in text.split()
-        if _clean(w)
-    ]
-    if not script_words:
+    if not sentence_cues:
         return []
 
-    import warnings
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        model = _whisper.load_model("tiny")
-        result = model.transcribe(audio_path, word_timestamps=True, language="en")
+    model_name = "small"
 
-    # Collect (start, end) timing pairs from Whisper
+    import ssl, certifi
+    import warnings
+    _orig_ctx = ssl._create_default_https_context
+    ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=certifi.where())
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = _whisper.load_model(model_name)
+            result = model.transcribe(
+                audio_path,
+                word_timestamps=True,
+                language=language,
+                condition_on_previous_text=False,
+            )
+    finally:
+        ssl._create_default_https_context = _orig_ctx
+
+    # Collect all Whisper word timings globally
     wh_timings: list[tuple[float, float]] = [
         (float(w["start"]), float(w["end"]))
         for seg in result.get("segments", [])
@@ -683,39 +699,218 @@ def _run_whisper_sync(
     if not wh_timings:
         return []
 
-    n_sc = len(script_words)
-    n_wh = len(wh_timings)
-
     cues: list[tuple[float, float, str]] = []
-    for i, word in enumerate(script_words):
-        # Map script word index → nearest Whisper timing slot by position ratio
-        j = round(i * (n_wh - 1) / max(n_sc - 1, 1)) if n_sc > 1 else 0
-        j = min(j, n_wh - 1)
-        start, end = wh_timings[j]
-        cues.append((start, end, word))
+
+    if language == "ru":
+        # Per-sentence mapping: Whisper timings filtered to each VTT sentence window.
+        # Bounds drift to one sentence — needed because RU VTT has long phrase-level cues.
+        for t_start, t_end, sentence in sentence_cues:
+            script_words = [_clean(w) for w in sentence.split() if _clean(w)]
+            if not script_words:
+                continue
+            window = [
+                (s, e) for s, e in wh_timings
+                if s >= t_start - 0.2 and e <= t_end + 0.2
+            ]
+            if window:
+                n_sc = len(script_words)
+                n_wh = len(window)
+                for i, word in enumerate(script_words):
+                    j = round(i * (n_wh - 1) / max(n_sc - 1, 1)) if n_sc > 1 else 0
+                    j = min(j, n_wh - 1)
+                    start, end = window[j]
+                    cues.append((start, end, word))
+            else:
+                dur = t_end - t_start
+                w_dur = dur / len(script_words)
+                for i, word in enumerate(script_words):
+                    cues.append((t_start + i * w_dur, t_start + (i + 1) * w_dur, word))
+    else:
+        # Global position-ratio mapping for EN: works well because EN VTT cues
+        # are granular and Whisper EN accuracy is high.
+        script_words = [
+            _clean(w)
+            for _, _, text in sentence_cues
+            for w in text.split()
+            if _clean(w)
+        ]
+        n_sc = len(script_words)
+        n_wh = len(wh_timings)
+        for i, word in enumerate(script_words):
+            j = round(i * (n_wh - 1) / max(n_sc - 1, 1)) if n_sc > 1 else 0
+            j = min(j, n_wh - 1)
+            start, end = wh_timings[j]
+            cues.append((start, end, word))
 
     return cues
 
 
+# ---------------------------------------------------------------------------
+# Russian TTS text pre-processing — transliterate English brands/terms
+# ---------------------------------------------------------------------------
+
+# Common gaming brands and terms → Russian phonetic spelling
+_RU_BRAND_MAP: list[tuple[str, str]] = [
+    # Companies
+    ("Activision Blizzard", "Активижн Близзард"),
+    ("Activision", "Активижн"),
+    ("Blizzard", "Близзард"),
+    ("Bethesda", "Бетесда"),
+    ("Ubisoft", "Юбисофт"),
+    ("Capcom", "Капком"),
+    ("Konami", "Конами"),
+    ("Bandai Namco", "Бандай Намко"),
+    ("Bandai", "Бандай"),
+    ("FromSoftware", "Фром Софтвэр"),
+    ("From Software", "Фром Софтвэр"),
+    ("CD Projekt Red", "Си Ди Проджект Рэд"),
+    ("CD Projekt", "Си Ди Проджект"),
+    ("Obsidian", "Обсидиан"),
+    ("Insomniac", "Инсомниак"),
+    ("Naughty Dog", "Наути Дог"),
+    ("Rockstar", "Рокстар"),
+    ("Valve", "Вэлв"),
+    ("Epic Games", "Эпик Геймс"),
+    ("Epic", "Эпик"),
+    ("Nintendo", "Нинтендо"),
+    ("Square Enix", "Сквэр Эникс"),
+    ("Square", "Сквэр"),
+    ("Enix", "Эникс"),
+    ("Bungie", "Банджи"),
+    ("Respawn", "Риспон"),
+    ("DICE", "Дайс"),
+    ("Crytek", "Крайтек"),
+    ("505 Games", "505 Геймс"),
+    ("2K Games", "Ту Кей Геймс"),
+    ("2K", "Ту Кей"),
+    ("THQ Nordic", "ТХК Нордик"),
+    ("Sega", "Сега"),
+    ("Atari", "Атари"),
+    ("id Software", "Ай Ди Софтвэр"),
+    ("Larian Studios", "Ляриан Студиос"),
+    ("Larian", "Ляриан"),
+    ("Paradox", "Парадокс"),
+    ("Warhorse", "Уорхорс"),
+    ("Nacon", "Након"),
+    ("Focus Entertainment", "Фокус Энтертейнмент"),
+    ("Piranha Bytes", "Пираньа Байтс"),
+    ("Deep Silver", "Дип Сильвер"),
+    ("505", "505"),
+    # Platforms / stores
+    ("PlayStation", "ПлейСтэйшн"),
+    ("Xbox", "Иксбокс"),
+    ("Steam", "Стим"),
+    ("Nintendo Switch", "Нинтендо Свитч"),
+    ("Switch", "Свитч"),
+    ("PC", "Пи Си"),
+    ("Game Pass", "Гейм Пасс"),
+    ("Epic Games Store", "Эпик Геймс Стор"),
+    # Common gaming terms
+    ("DLC", "ДЛЦ"),
+    ("RPG", "РПГ"),
+    ("FPS", "ФПС"),
+    ("MMO", "ММО"),
+    ("MMORPG", "ММОRPG"),
+    ("Early Access", "Ёрли Эксесс"),
+    ("Open World", "Опэн Ворлд"),
+    ("Battle Royale", "Батл Рояль"),
+    ("Game Awards", "Гейм Эворс"),
+    ("The Game Awards", "Зе Гейм Эворс"),
+    ("State of Play", "Стейт оф Плей"),
+    ("Xbox Showcase", "Иксбокс Шоукейс"),
+    ("Nintendo Direct", "Нинтендо Директ"),
+    ("Summer Game Fest", "Саммер Гейм Фест"),
+    # Specific game titles often left in English in RU scripts
+    ("Resident Evil", "Резидент Ивл"),
+    ("Devil May Cry", "Дэвил Мэй Край"),
+    ("Dark Souls", "Дарк Соулс"),
+    ("Elden Ring", "Элден Ринг"),
+    ("Hollow Knight", "Холлоу Найт"),
+    ("Ghost of Tsushima", "Гост оф Цусима"),
+    ("Death Stranding", "Дэт Стрэндинг"),
+    ("Red Dead Redemption", "Рэд Дэд Редэмпшн"),
+    ("The Witcher", "Зе Витчер"),
+    ("Cyberpunk", "Сайберпанк"),
+    ("Baldur's Gate", "Балдурс Гейт"),
+    ("Dragon Age", "Дрэгон Эйдж"),
+    ("Mass Effect", "Масс Эффект"),
+    ("Starfield", "Старфилд"),
+    ("Fallout", "Фоллаут"),
+    ("Skyrim", "Скайрим"),
+    ("Oblivion", "Обливион"),
+    ("Morrowind", "Морровинд"),
+    ("S.T.A.L.K.E.R.", "СТАЛКЕР"),
+    ("STALKER", "СТАЛКЕР"),
+    ("Metro", "Метро"),
+    ("Diablo", "Диабло"),
+    ("Overwatch", "Овервотч"),
+    ("World of Warcraft", "Ворлд оф Варкрафт"),
+    ("Warcraft", "Варкрафт"),
+    ("Hearthstone", "Хартстоун"),
+    ("League of Legends", "Лига Легенд"),
+    ("Counter-Strike", "Контер Страйк"),
+    ("Dota", "Дота"),
+    ("Minecraft", "Майнкрафт"),
+    ("Fortnite", "Фортнайт"),
+    ("Apex Legends", "Эпекс Лэджэндс"),
+    ("Call of Duty", "Кол оф Дьюти"),
+    ("Battlefield", "Баттлфилд"),
+    ("Assassin's Creed", "Ассасинс Крид"),
+    ("Far Cry", "Фар Край"),
+    ("Watch Dogs", "Вотч Догс"),
+    ("Rainbow Six", "Рэйнбоу Сикс"),
+    ("God of War", "Год оф Вор"),
+    ("Spider-Man", "Спайдермэн"),
+    ("Horizon", "Хорайзон"),
+    ("The Last of Us", "Зе Ласт оф Ас"),
+    ("Uncharted", "Unchartd"),
+    ("Gran Turismo", "Гран Туризмо"),
+]
+
+# Build compiled pattern once at module load
+_RU_BRAND_RE = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k, _ in _RU_BRAND_MAP) + r")\b",
+    re.IGNORECASE,
+)
+_RU_BRAND_LOOKUP = {k.lower(): v for k, v in _RU_BRAND_MAP}
+
+
+def _transliterate_for_ru_tts(text: str) -> str:
+    """Replace English gaming brands/terms with Russian phonetic spelling."""
+    def _replace(m: re.Match) -> str:
+        return _RU_BRAND_LOOKUP.get(m.group(0).lower(), m.group(0))
+    return _RU_BRAND_RE.sub(_replace, text)
+
+
 async def _synthesize_voice(
-    text: str, workdir: str
+    text: str, workdir: str, voice: str | None = None
 ) -> tuple[str, list[tuple[float, float, str]]]:
     """
-    Generate MP3 audio via edge-tts CLI, then use Whisper to get accurate
-    word-level timestamps from the actual audio signal.
+    Generate audio via edge-tts (EN) or Silero TTS (Russian), then use Whisper
+    to get accurate word-level timestamps from the actual audio signal.
     Falls back to ffmpeg silencedetect if Whisper is unavailable.
     Returns (audio_path, [(start_sec, end_sec, word), ...]).
     """
+    chosen_voice = voice or TTS_VOICE
+
     audio_path = os.path.join(workdir, "voice.mp3")
     vtt_path   = os.path.join(workdir, "subs.vtt")
 
-    try:
+    # Derive Whisper language from voice locale prefix (e.g. "ru-RU-..." → "ru")
+    whisper_lang = chosen_voice.split("-")[0].lower() if chosen_voice else "en"
+    # Apply Russian brand transliteration for Russian-locale voices
+    tts_text = _transliterate_for_ru_tts(text) if whisper_lang == "ru" else text
+
+    if not tts_text or not tts_text.strip():
+        raise RuntimeError("TTS text is empty — cannot synthesize voice")
+
+    async def _run_edge_tts(tts_input: str) -> None:
         proc = await asyncio.create_subprocess_exec(
             "edge-tts",
-            "--voice", TTS_VOICE,
+            "--voice", chosen_voice,
             f"--rate={TTS_RATE}",
             f"--pitch={TTS_PITCH}",
-            "--text",  text,
+            "--text",  tts_input,
             "--write-media",     audio_path,
             "--write-subtitles", vtt_path,
             stdout=asyncio.subprocess.PIPE,
@@ -724,29 +919,57 @@ async def _synthesize_voice(
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
         if proc.returncode != 0:
             raise RuntimeError(f"edge-tts error: {stderr.decode()[:400]}")
+
+    try:
+        await _run_edge_tts(tts_text)
     except FileNotFoundError:
         raise RuntimeError("edge-tts not found. Install with: pip install edge-tts")
+
+    # Validate generated audio — retry with original text if transliteration caused issues
+    if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1024:
+        logger.warning("edge-tts produced invalid audio (size=%d), retrying with original text",
+                       os.path.getsize(audio_path) if os.path.exists(audio_path) else 0)
+        if tts_text != text:
+            await _run_edge_tts(text)
+        if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1024:
+            raise RuntimeError("edge-tts failed to produce valid audio")
 
     if not os.path.exists(vtt_path):
         open(vtt_path, "w").close()
 
-    # Get sentence-level anchors from VTT, then extract word timing from audio.
     sentence_cues = _parse_vtt_cues(vtt_path)
 
-    # Try Whisper first (most accurate — extracts timing directly from audio).
-    word_cues = await asyncio.to_thread(
-        _run_whisper_sync, audio_path, sentence_cues
-    )
-    if word_cues:
-        logger.info("TTS: %d word cues (whisper), audio %.1f s",
-                    len(word_cues), _get_audio_duration(audio_path))
-    else:
-        # Fallback: ffmpeg silencedetect (no ML model required)
+    if whisper_lang == "ru":
+        # Use Whisper 'small' model for Russian — better Cyrillic accuracy.
+        # Mapping is done per-sentence using VTT boundaries as anchors,
+        # so drift is bounded to one sentence even if word counts differ.
         word_cues = await asyncio.to_thread(
-            _detect_word_boundaries_from_audio, audio_path, sentence_cues
+            _run_whisper_sync, audio_path, sentence_cues, whisper_lang
         )
-        logger.info("TTS: %d word cues (silencedetect fallback), audio %.1f s",
-                    len(word_cues), _get_audio_duration(audio_path))
+        if word_cues:
+            logger.info("TTS: %d word cues (whisper/small RU), audio %.1f s",
+                        len(word_cues), _get_audio_duration(audio_path))
+        else:
+            word_cues = await asyncio.to_thread(
+                _detect_word_boundaries_from_audio, audio_path, sentence_cues
+            )
+            logger.info("TTS: %d word cues (silencedetect RU fallback), audio %.1f s",
+                        len(word_cues), _get_audio_duration(audio_path))
+    else:
+        # Try Whisper first (most accurate for EN — extracts timing from audio).
+        word_cues = await asyncio.to_thread(
+            _run_whisper_sync, audio_path, sentence_cues, whisper_lang
+        )
+        if word_cues:
+            logger.info("TTS: %d word cues (whisper), audio %.1f s",
+                        len(word_cues), _get_audio_duration(audio_path))
+        else:
+            # Fallback: ffmpeg silencedetect (no ML model required)
+            word_cues = await asyncio.to_thread(
+                _detect_word_boundaries_from_audio, audio_path, sentence_cues
+            )
+            logger.info("TTS: %d word cues (silencedetect fallback), audio %.1f s",
+                        len(word_cues), _get_audio_duration(audio_path))
 
     return audio_path, word_cues
 
@@ -772,7 +995,7 @@ async def _fetch_youtube_clips(
 
     # Request more results than needed so we can skip the first *skip* entries.
     fetch_count = count + skip + 2
-    yt_search = f"ytsearch{fetch_count}:{game_query} gameplay"
+    yt_search = f"ytsearch{fetch_count}:{game_query}"
 
     # yt-dlp: download best video<=720p, no audio, max 50 MB, no playlist
     # Randomise the clip start position for visual diversity across videos.
@@ -794,7 +1017,7 @@ async def _fetch_youtube_clips(
         yt_search,
     ]
 
-    logger.info("Searching YouTube: '%s gameplay footage' (%d clips, skip=%d)", game_query, count, skip)
+    logger.info("Searching YouTube: '%s' (%d clips, skip=%d)", game_query, count, skip)
     ok = await _run_async(ydl_args, timeout=180)
     if not ok:
         logger.warning("yt-dlp exited with error — checking partial downloads")
@@ -926,20 +1149,78 @@ async def _fetch_pixabay_videos(
 # ffmpeg segment builders
 # ---------------------------------------------------------------------------
 
+def _probe_image_dims(img_path: str) -> tuple[int, int]:
+    """Return (width, height) of an image file via ffprobe."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height",
+             "-of", "default=noprint_wrappers=1", img_path],
+            capture_output=True, text=True, timeout=10,
+        )
+        w, h = VID_W, VID_H
+        for line in r.stdout.splitlines():
+            if line.startswith("width="):
+                w = int(line.split("=")[1])
+            elif line.startswith("height="):
+                h = int(line.split("=")[1])
+        return w, h
+    except Exception:
+        return VID_W, VID_H
+
+
 def _make_image_segment(img_path: str, duration: float, out_path: str) -> bool:
-    """Create a fixed-duration silent video segment from a still image."""
+    """Create a fixed-duration silent video segment from a still image.
+
+    Landscape images (AR ≥ 9:16):
+      – Displayed letterboxed in their native 16:9 ratio (black bars top/bottom).
+      – Scaled so image height ≈ 60% of frame height, then padded to VID_H.
+      – L→R pan reveals the full image width without any cropping or squishing.
+
+    Portrait images (AR < 9:16):
+      – Scaled to fit width=VID_W, centre-cropped vertically.
+    """
+    fps      = VID_FPS
+    n_frames = max(1, round(duration * fps))
+
+    orig_w, orig_h = _probe_image_dims(img_path)
+    img_ar = orig_w / max(orig_h, 1)
+    vid_ar = VID_W / VID_H  # 9/16
+
+    if img_ar >= vid_ar:
+        # Landscape: scale to full frame height, pan L→R to reveal full picture.
+        # Image fills 1920px tall; width grows proportionally (wider than 1080) → pan.
+        pan_h = VID_H
+        pan_w = max(VID_W + 2, (int(pan_h * img_ar + 0.5) // 2) * 2)  # e.g. 3413 for 16:9
+        pan_range  = pan_w - VID_W
+        pan_speed  = pan_range / max(duration, 0.001)  # px/s
+        vf = (
+            f"scale={pan_w}:{pan_h},"
+            # crop window slides from x=0 to x=pan_range using PTS time 't'
+            f"crop={VID_W}:{VID_H}:'min(t*{pan_speed:.4f},{pan_range})':0,"
+            f"setsar=1"
+        )
+    else:
+        # Portrait: fit width, centre-crop height (static)
+        vf = (
+            f"scale={VID_W}:-2,"
+            f"crop={VID_W}:{VID_H}:0:'(ih-{VID_H})/2',"
+            f"setsar=1"
+        )
+    # Feed image as a looped stream at exactly VID_FPS so each output frame comes
+    # from a distinct input tick — this makes zoompan's `on` counter advance
+    # frame-by-frame, enabling the L→R pan expression to work correctly.
+    # d=1 (one output per input frame) avoids the d×input_frames duration explosion.
     return _run(
         [
             "ffmpeg", "-y",
             "-loop", "1",
+            "-r", str(fps),          # input rate for the looped still image
             "-t", f"{duration:.3f}",
             "-i", img_path,
-            "-vf", (
-                f"scale={VID_W}:{VID_H}:force_original_aspect_ratio=increase,"
-                f"crop={VID_W}:{VID_H},"
-                f"setsar=1,"
-                f"fps={VID_FPS}"
-            ),
+            "-vf", vf,
+            "-r", str(fps),
+            "-frames:v", str(n_frames),
             "-c:v", "libx264",
             "-crf", "23",
             "-preset", "fast",
@@ -951,13 +1232,16 @@ def _make_image_segment(img_path: str, duration: float, out_path: str) -> bool:
     )
 
 
-def _make_video_segment(vid_path: str, duration: float, out_path: str) -> bool:
+def _make_video_segment(vid_path: str, duration: float, out_path: str, skip_secs: float = 0.0) -> bool:
     """Trim and scale a video clip to the required portrait format.
-    Uses -stream_loop so source clips shorter than duration are looped."""
+    Uses -stream_loop so source clips shorter than duration are looped.
+    skip_secs: seek into the source before cutting (e.g. to skip intros)."""
+    ss_args = ["-ss", f"{skip_secs:.3f}"] if skip_secs > 0 else []
     return _run(
         [
             "ffmpeg", "-y",
             "-stream_loop", "-1",   # loop input if shorter than -t
+        ] + ss_args + [
             "-i", vid_path,
             "-t", f"{duration:.3f}",
             "-vf", (
@@ -1051,6 +1335,7 @@ async def _assemble_video(
     output_path: str,
     workdir: str,
     search_query: str = "",
+    n_article_clips: int = 0,
 ) -> bool:
     """
     Assemble portrait video:
@@ -1063,8 +1348,19 @@ async def _assemble_video(
     audio_dur = _get_audio_duration(audio_path)
     logger.info("Audio duration: %.1f s", audio_dur)
 
-    all_media = list(image_paths) + list(video_clip_paths)
-    is_image  = [True] * len(image_paths) + [False] * len(video_clip_paths)
+    # Order: first clip → images (pan animation) → remaining clips.
+    # This keeps the video opening with motion footage and returns to gameplay after images.
+    clips  = list(video_clip_paths)
+    images = list(image_paths)
+    if clips and images:
+        all_media = [clips[0]] + images + clips[1:]
+        is_image  = [False] + [True] * len(images) + [False] * len(clips[1:])
+    elif clips:
+        all_media = clips
+        is_image  = [False] * len(clips)
+    else:
+        all_media = images
+        is_image  = [True] * len(images)
 
     if not all_media:
         logger.error("No media available for video assembly")
@@ -1073,11 +1369,18 @@ async def _assemble_video(
     seg_dur = audio_dur / len(all_media)       # equal time per media item
 
     # ── Step 1: build segments ─────────────────────────────────────────────
+    # Article clips are always the first n_article_clips entries in `clips`.
+    # Track which media indices correspond to article clips for skip logic.
+    article_clip_set = set(clips[:n_article_clips])
+
     segments: list[str] = []
     for i, (media, img_flag) in enumerate(zip(all_media, is_image)):
         seg_path = os.path.join(workdir, f"seg_{i:03d}.mp4")
-        fn = _make_image_segment if img_flag else _make_video_segment
-        ok = await asyncio.to_thread(fn, media, seg_dur, seg_path)
+        if img_flag:
+            ok = await asyncio.to_thread(_make_image_segment, media, seg_dur, seg_path)
+        else:
+            skip = YT_CLIP_SKIP if media in article_clip_set else 0.0
+            ok = await asyncio.to_thread(_make_video_segment, media, seg_dur, seg_path, skip)
         if ok:
             segments.append(seg_path)
         else:
@@ -1170,19 +1473,54 @@ async def _assemble_video(
 # Public entry point
 # ---------------------------------------------------------------------------
 
+async def fetch_gameplay_clips(
+    post: dict,
+    search_query: str,
+    yt_skip: int = 0,
+) -> tuple[list[str], list[str], str]:
+    """
+    Download article videos + YouTube gameplay clips once, to be shared
+    between EN and RU renders.
+
+    Returns (article_videos, yt_clips, shared_workdir).
+    Caller is responsible for cleaning up shared_workdir after both renders finish.
+    """
+    workdir = tempfile.mkdtemp(dir=VIDEOS_DIR, prefix="clips_")
+
+    article_videos = [p for p in post.get("video_paths", []) if os.path.exists(p)]
+
+    if not article_videos and post.get("article_url"):
+        try:
+            async with aiohttp.ClientSession() as _sess:
+                article = await _scraper.scrape_article(_sess, post["article_url"])
+                if article and article.pg_embeds:
+                    _, article_videos = await _scraper.download_videos(_sess, article.pg_embeds)
+                    logger.info("Pre-fetched %d article videos", len(article_videos))
+        except Exception as exc:
+            logger.warning("Could not pre-fetch article videos: %s", exc)
+
+    yt_clips = await _fetch_youtube_clips(search_query, YT_MAX_CLIPS, workdir, skip=yt_skip)
+    return article_videos, yt_clips, workdir
+
+
 async def create_short_video(
     post: dict,
     script: str,
     search_query: str,
     yt_skip: int = 0,
+    lang: str = "en",
+    prefetched_clips: list[str] | None = None,
+    n_article_clips: int = 0,
 ) -> Optional[str]:
     """
     Generate a TikTok/Reels/Shorts video for an approved post.
 
     Args:
-        post:         DB post dict (needs id, image_paths, article_title).
-        script:       Pre-generated English narration (~70–90 words, plain text).
-        search_query: English keywords for Pixabay stock media search.
+        post:              DB post dict (needs id, image_paths, article_title).
+        script:            Pre-generated narration (~70–90 words, plain text).
+        search_query:      Keywords for YouTube gameplay clip search.
+        lang:              'en' for English TTS, 'ru' for Russian TTS.
+        prefetched_clips:  Already-downloaded clip paths to reuse (skip download).
 
     Returns:
         Absolute path to the generated .mp4 file, or None on failure.
@@ -1190,10 +1528,12 @@ async def create_short_video(
     workdir = tempfile.mkdtemp(dir=VIDEOS_DIR, prefix="gen_")
     logger.info("Video workdir: %s", workdir)
 
+    tts_voice = TTS_VOICE_RU if lang == "ru" else TTS_VOICE
+
     try:
         # 1. TTS voice + word-level subtitle cues (from WordBoundary events)
-        logger.info("Synthesizing voice with edge-tts...")
-        audio_path, cues = await _synthesize_voice(script, workdir)
+        logger.info("Synthesizing voice with edge-tts (%s)...", tts_voice)
+        audio_path, cues = await _synthesize_voice(script, workdir, voice=tts_voice)
         audio_dur = _get_audio_duration(audio_path)
 
         # 2. Article images — may have been cleaned up after publish; re-fetch from source if needed
@@ -1231,16 +1571,23 @@ async def create_short_video(
 
         # ── Primary: article videos (Playground HLS) ─────────────────────────
         # ── Secondary: YouTube gameplay footage ──────────────────────────────
-        yt_needed = max(0, target_n - len(article_videos))
-        yt_clips = await _fetch_youtube_clips(search_query, min(yt_needed, YT_MAX_CLIPS), workdir, skip=yt_skip)
-
-        # Article videos first, then YouTube clips — no images
-        all_images: list[str] = []
-        all_clips  = article_videos + yt_clips
+        if prefetched_clips is not None:
+            # Reuse already-downloaded clips (shared between EN and RU renders).
+            # prefetched_clips already contains article_videos + yt_clips —
+            # do NOT add article_videos again from post.get("video_paths").
+            all_clips = prefetched_clips
+        else:
+            yt_needed = max(0, target_n - len(article_videos))
+            yt_clips = await _fetch_youtube_clips(search_query, min(yt_needed, YT_MAX_CLIPS), workdir, skip=yt_skip)
+            all_clips = article_videos + yt_clips
 
         if not all_clips:
             logger.error("No video media available for post #%s", post.get("id"))
             return None
+
+        # Images appended after clips so video always starts with motion footage.
+        # article_images is populated above by re-fetch logic if needed.
+        all_images: list[str] = article_images
 
         # 4. Assemble
         out_name    = f"short_{post['id']}_{uuid.uuid4().hex[:6]}.mp4"
@@ -1252,6 +1599,7 @@ async def create_short_video(
         ok = await _assemble_video(
             all_images, all_clips, audio_path, cues, output_path, workdir,
             search_query=search_query,
+            n_article_clips=n_article_clips,
         )
         return output_path if ok else None
 

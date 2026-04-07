@@ -193,7 +193,7 @@ async def _ig_wait_for_container(
     """Step 2: Poll until Instagram has finished processing the video."""
     url = f"{GRAPH_API_BASE}/{container_id}"
     params = {
-        "fields": "status_code,status",
+        "fields": "status_code,status,error_message",
         "access_token": INSTAGRAM_ACCESS_TOKEN,
     }
     elapsed = 0
@@ -207,8 +207,9 @@ async def _ig_wait_for_container(
             if status == "FINISHED":
                 return
             if status == "ERROR":
+                err_msg = data.get("error_message", "no details")
                 raise RuntimeError(
-                    f"Instagram container {container_id} entered ERROR state: {data}"
+                    f"Instagram container {container_id} ERROR: {err_msg} | raw={data}"
                 )
         await asyncio.sleep(_CONTAINER_POLL_INTERVAL)
         elapsed += _CONTAINER_POLL_INTERVAL
