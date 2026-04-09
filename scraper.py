@@ -241,16 +241,21 @@ async def download_videos(
             youtube_urls.append(f"https://www.youtube.com/watch?v={embed['id']}")
 
         elif embed["type"] == "playground":
-            m3u8_url = await _fetch_playground_m3u8(session, embed["id"])
-            if not m3u8_url:
-                logger.warning("Не удалось получить m3u8 для видео %s", embed["id"])
-                continue
-            path = await _download_hls_video(embed["id"], m3u8_url)
-            if path:
-                video_paths.append(path)
-                logger.info("Видео скачано: %s", path)
-            else:
-                logger.warning("Не удалось скачать видео %s", embed["id"])
+            for attempt in range(1, 4):
+                m3u8_url = await _fetch_playground_m3u8(session, embed["id"])
+                if not m3u8_url:
+                    logger.warning("Не удалось получить m3u8 для видео %s (попытка %d/3)", embed["id"], attempt)
+                    if attempt < 3:
+                        await asyncio.sleep(2.0 * attempt)
+                    continue
+                path = await _download_hls_video(embed["id"], m3u8_url)
+                if path:
+                    video_paths.append(path)
+                    logger.info("Видео скачано: %s", path)
+                    break
+                logger.warning("Не удалось скачать видео %s (попытка %d/3)", embed["id"], attempt)
+                if attempt < 3:
+                    await asyncio.sleep(2.0 * attempt)
 
     return youtube_urls, video_paths
 
@@ -303,23 +308,27 @@ async def download_images(session: aiohttp.ClientSession, image_urls: list[str])
 
 
 async def _download_image(session: aiohttp.ClientSession, url: str) -> Optional[str]:
-    try:
-        async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=30), ssl=SSL_CONTEXT) as resp:
-            if resp.status != 200:
-                return None
-            content_type = resp.headers.get("content-type", "")
-            ext = _ext_from_content_type(content_type) or _ext_from_url(url) or "jpg"
-            data = await resp.read()
-            if len(data) < 2048:  # skip tiny images
-                return None
-            name = hashlib.md5(url.encode()).hexdigest() + f".{ext}"
-            path = os.path.join(IMAGES_DIR, name)
-            with open(path, "wb") as f:
-                f.write(data)
-            return path
-    except Exception as exc:
-        logger.warning("Не удалось скачать картинку [%s]: %s", url, exc)
-        return None
+    name = hashlib.md5(url.encode()).hexdigest()
+    for attempt in range(1, 4):
+        try:
+            async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=30), ssl=SSL_CONTEXT) as resp:
+                if resp.status != 200:
+                    logger.warning("Картинка HTTP %s [%s] (попытка %d/3)", resp.status, url, attempt)
+                    break  # non-retriable
+                content_type = resp.headers.get("content-type", "")
+                ext = _ext_from_content_type(content_type) or _ext_from_url(url) or "jpg"
+                data = await resp.read()
+                if len(data) < 2048:  # skip tiny images
+                    return None
+                path = os.path.join(IMAGES_DIR, f"{name}.{ext}")
+                with open(path, "wb") as f:
+                    f.write(data)
+                return path
+        except Exception as exc:
+            logger.warning("Не удалось скачать картинку [%s] (попытка %d/3): %s", url, attempt, exc)
+            if attempt < 3:
+                await asyncio.sleep(1.5 * attempt)
+    return None
 
 
 def _ext_from_content_type(ct: str) -> Optional[str]:

@@ -261,20 +261,36 @@ async def publish_reel(
             "Set INSTAGRAM_USER_ID and INSTAGRAM_ACCESS_TOKEN in .env"
         )
 
-    # 1. Upload video to temporary public host
+    # 1. Upload video to temporary public host (once — reused across retries)
     video_url = await _upload_video(video_path)
 
-    async with _aiohttp_session() as session:
-        # 2. Create container
-        logger.info("Creating Instagram container...")
-        container_id = await _ig_create_container(session, video_url, caption)
-        logger.info("Container ID: %s — waiting for processing...", container_id)
+    last_exc: Exception = RuntimeError("No attempts made")
+    for attempt in range(1, 4):
+        async with _aiohttp_session() as session:
+            try:
+                # 2. Create container
+                logger.info("Creating Instagram container (attempt %d/3)...", attempt)
+                container_id = await _ig_create_container(session, video_url, caption)
+                logger.info("Container ID: %s — waiting for processing...", container_id)
 
-        # 3. Wait for processing
-        await _ig_wait_for_container(session, container_id)
+                # 3. Wait for processing
+                await _ig_wait_for_container(session, container_id)
 
-        # 4. Publish
-        logger.info("Publishing container %s...", container_id)
-        media_id = await _ig_publish_container(session, container_id)
-        logger.info("Published Instagram Reel, media_id=%s", media_id)
-        return media_id
+                # 4. Publish
+                logger.info("Publishing container %s...", container_id)
+                media_id = await _ig_publish_container(session, container_id)
+                logger.info("Published Instagram Reel, media_id=%s", media_id)
+                return media_id
+
+            except RuntimeError as exc:
+                last_exc = exc
+                msg = str(exc).lower()
+                # Retry on transient Meta errors that suggest recreating the container
+                if "something went wrong" in msg or "please retry" in msg or "container" in msg:
+                    logger.warning("Instagram transient error (attempt %d/3): %s", attempt, exc)
+                    if attempt < 3:
+                        await asyncio.sleep(15 * attempt)  # 15s, 30s
+                    continue
+                raise  # non-retriable error (auth, bad video, etc.)
+
+    raise last_exc
