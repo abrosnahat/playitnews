@@ -70,10 +70,10 @@ def _upload_catbox(local_path: str) -> str:
         method="POST",
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
     )
-    with urllib.request.urlopen(req, timeout=300, context=_ssl_ctx()) as resp:
+    with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as resp:
         url = resp.read().decode().strip()
     if not url.startswith("http"):
-        raise RuntimeError(f"catbox.moe unexpected response: {url}")
+        raise RuntimeError(f"catbox.moe unexpected response: {url!r}")
     return url
 
 
@@ -94,7 +94,7 @@ def _upload_0x0(local_path: str) -> str:
         method="POST",
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
     )
-    with urllib.request.urlopen(req, timeout=300, context=_ssl_ctx()) as resp:
+    with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as resp:
         return resp.read().decode().strip()
 
 
@@ -106,7 +106,7 @@ def _upload_transfer_sh(local_path: str) -> str:
             f"https://transfer.sh/{filename}", data=f, method="PUT",
             headers={"Content-Type": "video/mp4", "Max-Days": "1"},
         )
-        with urllib.request.urlopen(req, timeout=300, context=_ssl_ctx()) as resp:
+        with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as resp:
             return resp.read().decode().strip()
 
 
@@ -119,12 +119,65 @@ def _upload_pixeldrain(local_path: str) -> str:
             data=f, method="PUT",
             headers={"Content-Type": "video/mp4"},
         )
-        with urllib.request.urlopen(req, timeout=300, context=_ssl_ctx()) as resp:
+        with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as resp:
             data = json.loads(resp.read())
     file_id = data.get("id")
     if not file_id:
         raise RuntimeError(f"pixeldrain error: {data}")
     return f"https://pixeldrain.com/api/file/{file_id}"
+
+
+def _upload_litterbox(local_path: str) -> str:
+    """litterbox.catbox.moe — free, no account, files expire after 72 h. Direct MP4 link."""
+    boundary = uuid.uuid4().hex
+    filename  = os.path.basename(local_path)
+    with open(local_path, "rb") as f:
+        file_data = f.read()
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="reqtype"\r\n\r\nfileupload\r\n'
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="time"\r\n\r\n72h\r\n'
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="fileToUpload"; filename="{filename}"\r\n'
+        f"Content-Type: video/mp4\r\n\r\n"
+    ).encode() + file_data + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        "https://litterbox.catbox.moe/resources/internals/api.php",
+        data=body,
+        method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as resp:
+        url = resp.read().decode().strip()
+    if not url.startswith("http"):
+        raise RuntimeError(f"litterbox unexpected response: {url!r}")
+    return url
+
+
+def _upload_uguu(local_path: str) -> str:
+    """uguu.se — free, no account, files expire after ~48 h. Direct MP4 link."""
+    boundary = uuid.uuid4().hex
+    filename  = os.path.basename(local_path)
+    with open(local_path, "rb") as f:
+        file_data = f.read()
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="files[]"; filename="{filename}"\r\n'
+        f"Content-Type: video/mp4\r\n\r\n"
+    ).encode() + file_data + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        "https://uguu.se/upload",
+        data=body,
+        method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as resp:
+        data = json.loads(resp.read())
+    files = data.get("files", [])
+    if not files or not files[0].get("url"):
+        raise RuntimeError(f"uguu.se unexpected response: {data}")
+    return files[0]["url"]
 
 
 async def _upload_video(local_path: str) -> str:
@@ -133,10 +186,12 @@ async def _upload_video(local_path: str) -> str:
     Returns a publicly accessible URL Instagram can fetch.
     """
     backends = [
-        ("catbox.moe",    _upload_catbox),
-        ("0x0.st",        _upload_0x0),
-        ("pixeldrain.com",_upload_pixeldrain),
-        ("transfer.sh",   _upload_transfer_sh),
+        ("litterbox.catbox.moe", _upload_litterbox),
+        ("uguu.se",             _upload_uguu),
+        ("catbox.moe",          _upload_catbox),
+        ("pixeldrain.com",      _upload_pixeldrain),
+        ("0x0.st",              _upload_0x0),
+        ("transfer.sh",         _upload_transfer_sh),
     ]
     errors: list[str] = []
     for name, fn in backends:
