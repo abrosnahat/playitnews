@@ -290,14 +290,19 @@ def _build_video_done_keyboard(post_id: int) -> InlineKeyboardMarkup:
         row2.append(InlineKeyboardButton("▶️ YouTube RU",   callback_data=f"post_youtube_ru:{post_id}"))
     row3 = []
     if sum([ig_ok, yt_ok]) >= 2:
-        row3.append(InlineKeyboardButton("🌐 Post to All",    callback_data=f"post_all:{post_id}"))
+        row3.append(InlineKeyboardButton("🌐 Post to All",       callback_data=f"post_all:{post_id}"))
     if sum([ig_ru_ok, yt_ru_ok]) >= 1:
-        row3.append(InlineKeyboardButton("🌐 Post to All RU", callback_data=f"post_all_ru:{post_id}"))
+        row3.append(InlineKeyboardButton("🌐 Post to All RU",    callback_data=f"post_all_ru:{post_id}"))
+    row4 = []
+    if sum([ig_ok, yt_ok]) >= 1 and sum([ig_ru_ok, yt_ru_ok]) >= 1:
+        row4.append(InlineKeyboardButton("🌍 Post to All EN+RU", callback_data=f"post_all_combined:{post_id}"))
     buttons = [row_regen]
     if row2:
         buttons.append(row2)
     if row3:
         buttons.append(row3)
+    if row4:
+        buttons.append(row4)
     return InlineKeyboardMarkup(buttons)
 
 
@@ -926,7 +931,7 @@ async def handle_post_all_ru(update: Update, context: ContextTypes.DEFAULT_TYPE)
         hashtags_str = " ".join(hashtags_list)
         if hashtags_str and hashtags_str not in caption:
             caption = caption.rstrip() + "\n\n" + hashtags_str
-    caption = "Больше новостей в telegram-канале, ссылка в биове\n\n" + caption
+    caption = "Больше новостей в telegram-канале, ссылка в био\n\n" + caption
 
     # --- YouTube RU title / description ---
     raw_title = (post.get("article_title", "") if post else "") or f"Gaming news #{post_id}"
@@ -977,6 +982,127 @@ async def handle_post_all_ru(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+async def handle_post_all_combined(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Upload EN video to EN platforms and RU video to RU platforms simultaneously."""
+    query = update.callback_query
+    await query.answer("Uploading to all EN+RU platforms…")
+    post_id = int(query.data.split(":")[1])
+
+    video_path_en = db.get_generated_video_path(post_id)
+    video_path_ru = db.get_generated_video_path_ru(post_id)
+    post = db.get_scheduled_post(post_id)
+
+    missing: list[str] = []
+    if not video_path_en or not os.path.exists(video_path_en):
+        missing.append("EN")
+    if not video_path_ru or not os.path.exists(video_path_ru):
+        missing.append("RU")
+    if missing:
+        await context.bot.send_message(
+            chat_id=TELEGRAM_ADMIN_CHAT_ID,
+            text=f"Missing video files for post #{post_id}: {', '.join(missing)}. Please regenerate first.",
+            reply_markup=_build_video_keyboard(post_id),
+        )
+        return
+
+    # --- EN caption ---
+    raw_en = context.bot_data.get(f"video_caption:{post_id}") or (post.get("post_text", "") if post else "")
+    caption_en = re.sub(r'[*_`~]', '', raw_en)
+    caption_en = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', caption_en)
+    caption_en = re.sub(r'<[^>]+>', '', caption_en)
+    tags_en: list[str] = []
+    if post:
+        post_text_clean = re.sub(r'<[^>]+>', '', post.get("post_text", ""))
+        hashtags_list = re.findall(r'#\w+', post_text_clean)
+        tags_en = [h.lstrip("#") for h in hashtags_list]
+        hashtags_str = " ".join(hashtags_list)
+        if hashtags_str and hashtags_str not in caption_en:
+            caption_en = caption_en.rstrip() + "\n\n" + hashtags_str
+    caption_en = "More news in the telegram channel, link in the bio\n\n" + caption_en
+
+    # --- EN YouTube title/desc ---
+    raw_title = (post.get("article_title", "") if post else "") or f"Gaming news #{post_id}"
+    yt_title_en = (await ai_adapter.translate_title_to_english(raw_title))[:100]
+    yt_desc_en = re.sub(r'[*_`~]', '', raw_en)
+    yt_desc_en = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', yt_desc_en)
+    yt_desc_en = re.sub(r'<[^>]+>', '', yt_desc_en)
+    if tags_en:
+        hashtags_str = " ".join(f"#{t}" for t in tags_en)
+        if hashtags_str not in yt_desc_en:
+            yt_desc_en = yt_desc_en.rstrip() + "\n\n" + hashtags_str
+    yt_desc_en = "More news in the telegram channel, link in the bio\n\n" + yt_desc_en
+
+    # --- RU caption ---
+    raw_ru = context.bot_data.get(f"ru_video_caption:{post_id}") or (post.get("ru_post_text", "") if post else "")
+    caption_ru = re.sub(r'[*_`~]', '', raw_ru)
+    caption_ru = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', caption_ru)
+    caption_ru = re.sub(r'<[^>]+>', '', caption_ru)
+    tags_ru: list[str] = []
+    if post:
+        post_text_clean_ru = re.sub(r'<[^>]+>', '', post.get("ru_post_text") or post.get("post_text", ""))
+        hashtags_list_ru = re.findall(r'#\w+', post_text_clean_ru)
+        tags_ru = [h.lstrip("#") for h in hashtags_list_ru]
+        hashtags_str_ru = " ".join(hashtags_list_ru)
+        if hashtags_str_ru and hashtags_str_ru not in caption_ru:
+            caption_ru = caption_ru.rstrip() + "\n\n" + hashtags_str_ru
+    caption_ru = "Больше новостей в telegram-канале, ссылка в био\n\n" + caption_ru
+
+    # --- RU YouTube title ---
+    yt_title_ru = raw_title[:100]
+    yt_desc_ru = caption_ru
+
+    status_msg = await context.bot.send_message(
+        chat_id=TELEGRAM_ADMIN_CHAT_ID,
+        text=f"Uploading EN+RU to all platforms for post #{post_id}…",
+    )
+
+    from config import INSTAGRAM_USER_ID_RU, INSTAGRAM_ACCESS_TOKEN_RU
+    tasks: dict[str, asyncio.Task] = {}
+    if instagram_publisher.is_configured():
+        tasks["Instagram"] = asyncio.create_task(
+            instagram_publisher.publish_reel(video_path=video_path_en, caption=caption_en)
+        )
+    if youtube_publisher.is_configured():
+        tasks["YouTube"] = asyncio.create_task(
+            youtube_publisher.upload_short(video_path=video_path_en, title=yt_title_en, description=yt_desc_en, tags=tags_en)
+        )
+    if instagram_publisher.is_configured_ru():
+        tasks["Instagram RU"] = asyncio.create_task(
+            instagram_publisher.publish_reel(
+                video_path=video_path_ru, caption=caption_ru,
+                user_id=INSTAGRAM_USER_ID_RU, access_token=INSTAGRAM_ACCESS_TOKEN_RU,
+            )
+        )
+    if youtube_publisher.is_configured_ru():
+        tasks["YouTube RU"] = asyncio.create_task(
+            youtube_publisher.upload_short_ru(
+                video_path=video_path_ru, title=yt_title_ru, description=yt_desc_ru, tags=tags_ru,
+            )
+        )
+
+    results: list[str] = []
+    any_err = False
+    for platform, task in tasks.items():
+        try:
+            result = await task
+            if "YouTube" in platform and isinstance(result, str) and result:
+                results.append(f"\u2705 {platform}: https://youtu.be/{result}")
+            elif "Instagram" in platform and isinstance(result, str) and result:
+                results.append(f"\u2705 {platform}: Media ID {result}")
+            else:
+                results.append(f"\u2705 {platform}: published")
+        except Exception as exc:
+            any_err = True
+            results.append(f"\u274c {platform}: {exc}")
+            logger.error("%s publish failed for post #%d: %s", platform, post_id, exc)
+
+    await status_msg.edit_text(
+        "\n".join(results) + "\n\n"
+        + ("Video files kept for further publishing." if any_err else "Done!"),
+        reply_markup=_build_video_done_keyboard(post_id) if any_err else _build_video_keyboard(post_id),
+    )
+
+
 async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     try:
@@ -1022,6 +1148,7 @@ def build_handlers():
         CallbackQueryHandler(handle_post_youtube_ru,     pattern=r"^post_youtube_ru:\d+$"),
         CallbackQueryHandler(handle_post_all,            pattern=r"^post_all:\d+$"),
         CallbackQueryHandler(handle_post_all_ru,         pattern=r"^post_all_ru:\d+$"),
+        CallbackQueryHandler(handle_post_all_combined,   pattern=r"^post_all_combined:\d+$"),
         # legacy alias kept for in-flight messages
         CallbackQueryHandler(handle_post_all,            pattern=r"^post_both:\d+$"),
     ]
