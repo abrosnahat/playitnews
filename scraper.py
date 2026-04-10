@@ -148,6 +148,10 @@ async def scrape_article(session: aiohttp.ClientSession, url: str) -> Optional[A
     ):
         tag.decompose()
 
+    # og:image — most reliable source for the main article image
+    og_image = soup.find("meta", property="og:image")
+    og_image_url: str | None = og_image["content"].strip() if og_image and og_image.get("content") else None
+
     # Images — only from article body, not the whole page
     article_scope = (
         soup.select_one("div.post-content")
@@ -158,17 +162,26 @@ async def scrape_article(session: aiohttp.ClientSession, url: str) -> Optional[A
     img_tags = article_scope.select("img")
     image_urls: list[str] = []
     seen_imgs: set[str] = set()
+
+    # Seed with og:image first so it appears at position 0
+    if og_image_url and _is_valid_image_url(og_image_url):
+        norm = og_image_url.split("?")[0]
+        seen_imgs.add(norm)
+        image_urls.append(og_image_url)
+
     for img in img_tags:
-        # If this img is inside an <a href>, prefer the href (full-size) over src (thumbnail)
-        parent_a = img.find_parent("a")
-        if parent_a and parent_a.get("href"):
-            href = parent_a.get("href", "")
-            full = urljoin(url, href)
-        else:
-            src = img.get("src") or img.get("data-src") or img.get("data-lazy-src", "")
-            if not src:
-                continue
+        # Always prefer img src/data-src over parent <a> href
+        # (href usually points to a gallery page, not a direct image)
+        src = img.get("src") or img.get("data-src") or img.get("data-lazy-src", "")
+        if src:
             full = urljoin(url, src)
+        else:
+            # Fall back to parent <a> href only if it looks like an image
+            parent_a = img.find_parent("a")
+            if parent_a and parent_a.get("href"):
+                full = urljoin(url, parent_a.get("href", ""))
+            else:
+                continue
         norm = full.split("?")[0]  # strip query params for dedup
         if norm not in seen_imgs and _is_valid_image_url(full):
             seen_imgs.add(norm)

@@ -32,6 +32,8 @@ import aiohttp
 from config import (
     INSTAGRAM_ACCESS_TOKEN,
     INSTAGRAM_USER_ID,
+    INSTAGRAM_ACCESS_TOKEN_RU,
+    INSTAGRAM_USER_ID_RU,
 )
 
 logger = logging.getLogger(__name__)
@@ -225,14 +227,16 @@ async def _ig_create_container(
     session: aiohttp.ClientSession,
     video_url: str,
     caption: str,
+    user_id: str,
+    access_token: str,
 ) -> str:
     """Step 1: Create a REELS media container. Returns container ID."""
-    url = f"{GRAPH_API_BASE}/{INSTAGRAM_USER_ID}/media"
+    url = f"{GRAPH_API_BASE}/{user_id}/media"
     payload = {
         "media_type": "REELS",
         "video_url": video_url,
         "caption": caption,
-        "access_token": INSTAGRAM_ACCESS_TOKEN,
+        "access_token": access_token,
     }
     async with session.post(url, json=payload) as resp:
         data = await resp.json()
@@ -244,12 +248,13 @@ async def _ig_create_container(
 async def _ig_wait_for_container(
     session: aiohttp.ClientSession,
     container_id: str,
+    access_token: str,
 ) -> None:
     """Step 2: Poll until Instagram has finished processing the video."""
     url = f"{GRAPH_API_BASE}/{container_id}"
     params = {
         "fields": "status_code,status,error_message",
-        "access_token": INSTAGRAM_ACCESS_TOKEN,
+        "access_token": access_token,
     }
     elapsed = 0
     while elapsed < _CONTAINER_POLL_TIMEOUT:
@@ -277,12 +282,14 @@ async def _ig_wait_for_container(
 async def _ig_publish_container(
     session: aiohttp.ClientSession,
     container_id: str,
+    user_id: str,
+    access_token: str,
 ) -> str:
     """Step 3: Publish the container. Returns the new media ID."""
-    url = f"{GRAPH_API_BASE}/{INSTAGRAM_USER_ID}/media_publish"
+    url = f"{GRAPH_API_BASE}/{user_id}/media_publish"
     payload = {
         "creation_id": container_id,
-        "access_token": INSTAGRAM_ACCESS_TOKEN,
+        "access_token": access_token,
     }
     async with session.post(url, json=payload) as resp:
         data = await resp.json()
@@ -296,21 +303,32 @@ async def _ig_publish_container(
 # ---------------------------------------------------------------------------
 
 def is_configured() -> bool:
-    """Return True if Instagram credentials are set (R2 is optional)."""
+    """Return True if English Instagram credentials are set."""
     return bool(INSTAGRAM_USER_ID and INSTAGRAM_ACCESS_TOKEN)
+
+
+def is_configured_ru() -> bool:
+    """Return True if Russian Instagram credentials are set."""
+    return bool(INSTAGRAM_USER_ID_RU and INSTAGRAM_ACCESS_TOKEN_RU)
 
 
 async def publish_reel(
     video_path: str,
     caption: str,
+    *,
+    user_id: str | None = None,
+    access_token: str | None = None,
 ) -> str:
     """
     Upload *video_path*, post as Instagram Reel, then clean up.
-    Uses Cloudflare R2 if configured, otherwise transfer.sh (free).
+    Pass *user_id* / *access_token* to publish to a non-default account;
+    otherwise defaults to INSTAGRAM_USER_ID / INSTAGRAM_ACCESS_TOKEN.
     Returns the published media ID on success.
     Raises RuntimeError / TimeoutError on failure.
     """
-    if not is_configured():
+    uid = user_id or INSTAGRAM_USER_ID
+    tok = access_token or INSTAGRAM_ACCESS_TOKEN
+    if not (uid and tok):
         raise RuntimeError(
             "Instagram credentials not configured. "
             "Set INSTAGRAM_USER_ID and INSTAGRAM_ACCESS_TOKEN in .env"
@@ -325,27 +343,30 @@ async def publish_reel(
             try:
                 # 2. Create container
                 logger.info("Creating Instagram container (attempt %d/3)...", attempt)
-                container_id = await _ig_create_container(session, video_url, caption)
+                container_id = await _ig_create_container(session, video_url, caption, uid, tok)
                 logger.info("Container ID: %s — waiting for processing...", container_id)
 
                 # 3. Wait for processing
-                await _ig_wait_for_container(session, container_id)
+                await _ig_wait_for_container(session, container_id, tok)
 
                 # 4. Publish
                 logger.info("Publishing container %s...", container_id)
-                media_id = await _ig_publish_container(session, container_id)
+                media_id = await _ig_publish_container(session, container_id, uid, tok)
                 logger.info("Published Instagram Reel, media_id=%s", media_id)
                 return media_id
 
             except RuntimeError as exc:
                 last_exc = exc
                 msg = str(exc).lower()
+                # Auth errors are never retriable
+                if "oauthexception" in msg or "access token" in msg or "error_subcode" in msg:
+                    raise
                 # Retry on transient Meta errors that suggest recreating the container
                 if "something went wrong" in msg or "please retry" in msg or "container" in msg:
                     logger.warning("Instagram transient error (attempt %d/3): %s", attempt, exc)
                     if attempt < 3:
                         await asyncio.sleep(15 * attempt)  # 15s, 30s
                     continue
-                raise  # non-retriable error (auth, bad video, etc.)
+                raise  # non-retriable error (bad video, etc.)
 
     raise last_exc

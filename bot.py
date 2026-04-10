@@ -32,7 +32,6 @@ import ai_adapter
 import video_generator
 import instagram_publisher
 import youtube_publisher
-import tiktok_publisher
 
 # How many YouTube results to skip forward on each regenerate
 YT_SKIP_STEP = 3
@@ -258,7 +257,7 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     ]])
     await context.bot.send_message(
         chat_id=TELEGRAM_ADMIN_CHAT_ID,
-        text=f"Post #{post_id} published. Generate a TikTok/Shorts video?",
+        text=f"Post #{post_id} published. Generate a Reels/Shorts video?",
         reply_markup=create_video_keyboard,
     )
 
@@ -271,21 +270,30 @@ def _build_video_keyboard(post_id: int) -> InlineKeyboardMarkup:
 
 def _build_video_done_keyboard(post_id: int) -> InlineKeyboardMarkup:
     """Keyboard shown after a video has been successfully generated."""
-    row1 = [InlineKeyboardButton("🔄 Regenerate", callback_data=f"create_video:{post_id}")]
-    ig_ok = instagram_publisher.is_configured()
-    yt_ok = youtube_publisher.is_configured()
-    tt_ok = tiktok_publisher.is_configured()
+    row_regen = [
+        InlineKeyboardButton("🔄 EN+RU",   callback_data=f"create_video:{post_id}"),
+        InlineKeyboardButton("🇬🇧 EN",      callback_data=f"create_video_en:{post_id}"),
+        InlineKeyboardButton("🇷🇺 RU",      callback_data=f"create_video_ru:{post_id}"),
+    ]
+    ig_ok    = instagram_publisher.is_configured()
+    ig_ru_ok = instagram_publisher.is_configured_ru()
+    yt_ok    = youtube_publisher.is_configured()
+    yt_ru_ok = youtube_publisher.is_configured_ru()
     row2 = []
     if ig_ok:
-        row2.append(InlineKeyboardButton("📲 Instagram", callback_data=f"post_instagram:{post_id}"))
+        row2.append(InlineKeyboardButton("📲 Instagram",    callback_data=f"post_instagram:{post_id}"))
+    if ig_ru_ok:
+        row2.append(InlineKeyboardButton("📲 Instagram RU", callback_data=f"post_instagram_ru:{post_id}"))
     if yt_ok:
-        row2.append(InlineKeyboardButton("▶️ YouTube", callback_data=f"post_youtube:{post_id}"))
-    if tt_ok:
-        row2.append(InlineKeyboardButton("🎵 TikTok", callback_data=f"post_tiktok:{post_id}"))
+        row2.append(InlineKeyboardButton("▶️ YouTube",      callback_data=f"post_youtube:{post_id}"))
+    if yt_ru_ok:
+        row2.append(InlineKeyboardButton("▶️ YouTube RU",   callback_data=f"post_youtube_ru:{post_id}"))
     row3 = []
-    if sum([ig_ok, yt_ok, tt_ok]) >= 2:
-        row3.append(InlineKeyboardButton("🌐 Post to All", callback_data=f"post_all:{post_id}"))
-    buttons = [row1]
+    if sum([ig_ok, yt_ok]) >= 2:
+        row3.append(InlineKeyboardButton("🌐 Post to All",    callback_data=f"post_all:{post_id}"))
+    if sum([ig_ru_ok, yt_ru_ok]) >= 1:
+        row3.append(InlineKeyboardButton("🌐 Post to All RU", callback_data=f"post_all_ru:{post_id}"))
+    buttons = [row_regen]
     if row2:
         buttons.append(row2)
     if row3:
@@ -294,7 +302,7 @@ def _build_video_done_keyboard(post_id: int) -> InlineKeyboardMarkup:
 
 
 async def handle_create_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Generate EN and RU TikTok/Reels/Shorts videos simultaneously."""
+    """Generate EN and RU Reels/Shorts videos simultaneously."""
     query = update.callback_query
     await query.answer("Starting video generation...")
     post_id = int(query.data.split(":")[1])
@@ -413,6 +421,9 @@ async def handle_create_video(update: Update, context: ContextTypes.DEFAULT_TYPE
     final_path = en_path or ru_path
     db.set_generated_video_path(post_id, final_path)
     context.bot_data[f"video_caption:{post_id}"] = en_script
+    if ru_path:
+        db.set_generated_video_path_ru(post_id, ru_path)
+        context.bot_data[f"ru_video_caption:{post_id}"] = ru_script
 
     await context.bot.send_message(
         chat_id=TELEGRAM_ADMIN_CHAT_ID,
@@ -421,9 +432,198 @@ async def handle_create_video(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
+async def handle_create_video_en(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Regenerate EN video only."""
+    query = update.callback_query
+    await query.answer("Generating EN video...")
+    post_id = int(query.data.split(":")[1])
+    await _create_single_video(context, post_id, lang="en")
+
+
 async def handle_create_video_ru(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Legacy handler — redirect to combined EN+RU generation."""
-    await handle_create_video(update, context)
+    """Regenerate RU video only."""
+    query = update.callback_query
+    await query.answer("Generating RU video...")
+    post_id = int(query.data.split(":")[1])
+    await _create_single_video(context, post_id, lang="ru")
+
+
+async def _create_single_video(
+    context: ContextTypes.DEFAULT_TYPE,
+    post_id: int,
+    lang: str,  # "en" or "ru"
+) -> None:
+    """Generate a single-language video and send it to the admin chat."""
+    post = db.get_scheduled_post(post_id)
+    if not post:
+        await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=f"Post #{post_id} not found.")
+        return
+
+    label = "\U0001f1ec\U0001f1e7 EN" if lang == "en" else "\U0001f1f7\U0001f1fa RU"
+    await context.bot.send_message(
+        chat_id=TELEGRAM_ADMIN_CHAT_ID,
+        text=f"Generating {label} video for post #{post_id}...\nStep 1/4: Writing script",
+    )
+
+    if lang == "en":
+        script = await generate_video_script(
+            post_text=post["post_text"], article_title=post["article_title"]
+        )
+        if not script or not script.strip():
+            script = post["post_text"][:300].strip()
+            logger.warning("EN video script was empty, using post_text fallback")
+    else:
+        script = await generate_video_script_ru(
+            post_text=post.get("ru_post_text") or post["post_text"],
+            article_title=post["article_title"],
+        )
+        if not script or not script.strip():
+            script = (post.get("ru_post_text") or post["post_text"])[:300].strip()
+            logger.warning("RU video script was empty, using post_text fallback")
+
+    await context.bot.send_message(
+        chat_id=TELEGRAM_ADMIN_CHAT_ID,
+        text=f"{label} script:\n{script}",
+    )
+    await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text="Step 2/4: Synthesizing voice...")
+
+    title = post.get("article_title", "")
+    search_query = await ai_adapter.extract_game_name(title)
+    if not search_query:
+        first_chunk = re.split(r"[:–—|]", title)[0].strip()
+        latin_tokens = [t for t in first_chunk.split() if re.match(r"^[A-Za-z0-9'&.]+$", t)]
+        search_query = " ".join(latin_tokens).strip() or title[:50]
+
+    await context.bot.send_message(
+        chat_id=TELEGRAM_ADMIN_CHAT_ID,
+        text=f"Step 3/4: Searching YouTube for '{search_query}'",
+    )
+
+    yt_skip = db.increment_yt_skip(post_id, YT_SKIP_STEP) - YT_SKIP_STEP
+    article_videos, yt_clips, clips_workdir = await video_generator.fetch_gameplay_clips(
+        post=post, search_query=search_query, yt_skip=yt_skip,
+    )
+    shared_clips = article_videos + yt_clips
+
+    try:
+        path = await video_generator.create_short_video(
+            post=post, script=script, search_query=search_query,
+            yt_skip=yt_skip, lang=lang,
+            prefetched_clips=shared_clips, n_article_clips=len(article_videos),
+        )
+    finally:
+        shutil.rmtree(clips_workdir, ignore_errors=True)
+
+    if not path:
+        await context.bot.send_message(
+            chat_id=TELEGRAM_ADMIN_CHAT_ID,
+            text=f"{label} video generation failed for post #{post_id}.\nCheck logs. Tap below to retry.",
+            reply_markup=_build_video_done_keyboard(post_id),
+        )
+        return
+
+    await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text="Step 4/4: Uploading video to Telegram...")
+
+    file_size = os.path.getsize(path)
+    if file_size > 50 * 1024 * 1024:
+        await context.bot.send_message(
+            chat_id=TELEGRAM_ADMIN_CHAT_ID,
+            text=f"{label} video too large ({file_size // (1024*1024)} MB > 50 MB).\nSaved at: {path}",
+        )
+    else:
+        try:
+            w, h = _probe_video_dims(path)
+            with open(path, "rb") as vf:
+                await context.bot.send_video(
+                    chat_id=TELEGRAM_ADMIN_CHAT_ID, video=vf,
+                    caption=f"{label} video for post #{post_id}",
+                    width=w or None, height=h or None,
+                    supports_streaming=True, write_timeout=300, read_timeout=120,
+                )
+        except TelegramError as exc:
+            logger.warning("send_video failed (%s), falling back to send_document", exc)
+            try:
+                with open(path, "rb") as vf:
+                    await context.bot.send_document(
+                        chat_id=TELEGRAM_ADMIN_CHAT_ID, document=vf,
+                        filename=os.path.basename(path),
+                        caption=f"{label} video for post #{post_id}",
+                        write_timeout=300, read_timeout=120,
+                    )
+            except TelegramError as exc2:
+                logger.error("Failed to send %s video for post #%d: %s", label, post_id, exc2)
+                await context.bot.send_message(
+                    chat_id=TELEGRAM_ADMIN_CHAT_ID,
+                    text=f"Could not send {label} video: {exc2}",
+                )
+
+    # Persist path and caption
+    if lang == "en":
+        db.set_generated_video_path(post_id, path)
+        context.bot_data[f"video_caption:{post_id}"] = script
+    else:
+        db.set_generated_video_path_ru(post_id, path)
+        context.bot_data[f"ru_video_caption:{post_id}"] = script
+
+    await context.bot.send_message(
+        chat_id=TELEGRAM_ADMIN_CHAT_ID,
+        text=f"{label} video for post #{post_id} ready.",
+        reply_markup=_build_video_done_keyboard(post_id),
+    )
+
+
+async def handle_post_instagram_ru(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Upload the generated RU video to the Russian Instagram account as a Reel."""
+    from config import INSTAGRAM_USER_ID_RU, INSTAGRAM_ACCESS_TOKEN_RU
+    query = update.callback_query
+    await query.answer("Uploading to Instagram RU…")
+    post_id = int(query.data.split(":")[1])
+
+    video_path = db.get_generated_video_path_ru(post_id)
+    post = db.get_scheduled_post(post_id)
+    raw_caption = context.bot_data.get(f"ru_video_caption:{post_id}") or (post.get("ru_post_text", "") if post else "")
+    caption = re.sub(r'[*_`~]', '', raw_caption)
+    caption = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', caption)
+    caption = re.sub(r'<[^>]+>', '', caption)
+    if post:
+        post_text_clean = re.sub(r'<[^>]+>', '', post.get("ru_post_text") or post.get("post_text", ""))
+        hashtags = " ".join(re.findall(r'#\w+', post_text_clean))
+        if hashtags and hashtags not in caption:
+            caption = caption.rstrip() + "\n\n" + hashtags
+    caption = "\u0411\u043e\u043b\u044c\u0448\u0435 \u043d\u043e\u0432\u043e\u0441\u0442\u0435\u0439 \u0432 telegram-\u043a\u0430\u043d\u0430\u043b\u0435, \u0441\u0441\u044b\u043b\u043a\u0430 \u0432 \u0431\u0438\u043e\n\n" + caption
+
+    if not video_path or not os.path.exists(video_path):
+        await context.bot.send_message(
+            chat_id=TELEGRAM_ADMIN_CHAT_ID,
+            text=f"RU video file for post #{post_id} not found. Please regenerate first.",
+            reply_markup=_build_video_keyboard(post_id),
+        )
+        return
+
+    status_msg = await context.bot.send_message(
+        chat_id=TELEGRAM_ADMIN_CHAT_ID,
+        text=f"Uploading RU Reel for post #{post_id} to Instagram RU\u2026",
+    )
+    try:
+        media_id = await instagram_publisher.publish_reel(
+            video_path=video_path,
+            caption=caption,
+            user_id=INSTAGRAM_USER_ID_RU,
+            access_token=INSTAGRAM_ACCESS_TOKEN_RU,
+        )
+        await status_msg.edit_text(
+            f"\u2705 Reel published to Instagram RU for post #{post_id}\n"
+            f"Media ID: {media_id}\n\n"
+            f"Video file kept for further publishing.",
+            reply_markup=_build_video_done_keyboard(post_id),
+        )
+    except Exception as exc:
+        logger.error("Instagram RU publish failed for post #%d: %s", post_id, exc)
+        await status_msg.edit_text(
+            f"\u274c Instagram RU publish failed for post #{post_id}:\n{exc}\n\n"
+            f"Video file is still available locally.",
+            reply_markup=_build_video_done_keyboard(post_id),
+        )
 
 
 async def handle_post_instagram(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -549,56 +749,72 @@ async def handle_post_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
 
-async def handle_post_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Upload the generated video to TikTok."""
+async def handle_post_youtube_ru(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Upload the generated RU video to the Russian YouTube channel."""
     query = update.callback_query
-    await query.answer("Uploading to TikTok…")
+    await query.answer("Uploading to YouTube RU…")
     post_id = int(query.data.split(":")[1])
 
-    video_path = db.get_generated_video_path(post_id)
+    video_path = db.get_generated_video_path_ru(post_id)
     post = db.get_scheduled_post(post_id)
 
     if not video_path or not os.path.exists(video_path):
         await context.bot.send_message(
             chat_id=TELEGRAM_ADMIN_CHAT_ID,
-            text=f"Video file for post #{post_id} not found. Please regenerate first.",
+            text=f"RU video file for post #{post_id} not found. Please regenerate first.",
             reply_markup=_build_video_keyboard(post_id),
         )
         return
 
-    raw_caption = context.bot_data.get(f"video_caption:{post_id}") or (post.get("post_text", "") if post else "")
-    caption = re.sub(r'[*_`~]', '', raw_caption)
-    caption = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', caption)
-    caption = re.sub(r'<[^>]+>', '', caption)
+    raw_title = (post.get("article_title", "") if post else "") or f"Gaming news #{post_id}"
+    title = raw_title[:100]  # Keep original Russian title for RU channel
+
+    raw_desc = context.bot_data.get(f"ru_video_caption:{post_id}") or (post.get("ru_post_text", "") if post else "")
+    desc = re.sub(r'[*_`~]', '', raw_desc)
+    desc = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', desc)
+    desc = re.sub(r'<[^>]+>', '', desc)
     if post:
-        post_text_clean = re.sub(r'<[^>]+>', '', post.get("post_text", ""))
+        post_text_clean = re.sub(r'<[^>]+>', '', post.get("ru_post_text") or post.get("post_text", ""))
         hashtags = " ".join(re.findall(r'#\w+', post_text_clean))
-        if hashtags and hashtags not in caption:
-            caption = caption.rstrip() + "\n\n" + hashtags
-    caption = "More news in the telegram channel, link in the bio\n\n" + caption
+        if hashtags and hashtags not in desc:
+            desc = desc.rstrip() + "\n\n" + hashtags
+    desc = "\u0411\u043e\u043b\u044c\u0448\u0435 \u043d\u043e\u0432\u043e\u0441\u0442\u0435\u0439 \u0432 telegram-\u043a\u0430\u043d\u0430\u043b\u0435, \u0441\u0441\u044b\u043b\u043a\u0430 \u0432 \u0431\u0438\u043e\u0432\u0435\n\n" + desc
+
+    tags: list[str] = []
+    if post:
+        post_text_clean = re.sub(r'<[^>]+>', '', post.get("ru_post_text") or post.get("post_text", ""))
+        tags = [h.lstrip("#") for h in re.findall(r'#\w+', post_text_clean)]
 
     status_msg = await context.bot.send_message(
         chat_id=TELEGRAM_ADMIN_CHAT_ID,
-        text=f"Uploading to TikTok for post #{post_id}…",
+        text=f"Uploading RU Short for post #{post_id} to YouTube RU…",
     )
     try:
-        await tiktok_publisher.upload_video(video_path=video_path, caption=caption)
+        video_id = await youtube_publisher.upload_short_ru(
+            video_path=video_path,
+            title=title,
+            description=desc,
+            tags=tags,
+        )
         await status_msg.edit_text(
-            f"\u2705 TikTok video published for post #{post_id}\n\n"
+            f"\u2705 YouTube RU Short published for post #{post_id}\n"
+            f"https://youtu.be/{video_id}\n\n"
             f"Video file kept for further publishing.",
             reply_markup=_build_video_done_keyboard(post_id),
         )
     except Exception as exc:
-        logger.error("TikTok publish failed for post #%d: %s", post_id, exc)
+        logger.error("YouTube RU publish failed for post #%d: %s", post_id, exc)
         await status_msg.edit_text(
-            f"\u274c TikTok publish failed for post #{post_id}:\n{exc}\n\n"
+            f"\u274c YouTube RU publish failed for post #{post_id}:\n{exc}\n\n"
             f"Video file is still available locally.",
             reply_markup=_build_video_done_keyboard(post_id),
         )
 
 
+
+
 async def handle_post_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Upload the generated video to all configured platforms simultaneously."""
+    """Upload the generated EN video to all configured EN platforms simultaneously."""
     query = update.callback_query
     await query.answer("Uploading to all platforms…")
     post_id = int(query.data.split(":")[1])
@@ -614,7 +830,7 @@ async def handle_post_all(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    # --- Shared caption (Instagram / TikTok) ---
+    # --- Shared caption (Instagram) ---
     raw_caption = context.bot_data.get(f"video_caption:{post_id}") or (post.get("post_text", "") if post else "")
     caption = re.sub(r'[*_`~]', '', raw_caption)
     caption = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', caption)
@@ -657,11 +873,6 @@ async def handle_post_all(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         tasks["YouTube"] = asyncio.create_task(
             youtube_publisher.upload_short(video_path=video_path, title=yt_title, description=yt_desc, tags=tags)
         )
-    if tiktok_publisher.is_configured():
-        tasks["TikTok"] = asyncio.create_task(
-            tiktok_publisher.upload_video(video_path=video_path, caption=caption)
-        )
-
     results: list[str] = []
     any_err = False
     for platform, task in tasks.items():
@@ -671,6 +882,87 @@ async def handle_post_all(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 results.append(f"\u2705 YouTube: https://youtu.be/{result}")
             elif platform == "Instagram" and isinstance(result, str) and result:
                 results.append(f"\u2705 Instagram: Media ID {result}")
+            else:
+                results.append(f"\u2705 {platform}: published")
+        except Exception as exc:
+            any_err = True
+            results.append(f"\u274c {platform}: {exc}")
+            logger.error("%s publish failed for post #%d: %s", platform, post_id, exc)
+
+    await status_msg.edit_text(
+        "\n".join(results) + "\n\n"
+        + ("Video file kept for further publishing." if any_err else "Done!"),
+        reply_markup=_build_video_done_keyboard(post_id) if any_err else _build_video_keyboard(post_id),
+    )
+
+
+async def handle_post_all_ru(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Upload the generated RU video to all configured RU platforms simultaneously."""
+    query = update.callback_query
+    await query.answer("Uploading RU to all platforms…")
+    post_id = int(query.data.split(":")[1])
+
+    video_path = db.get_generated_video_path_ru(post_id)
+    post = db.get_scheduled_post(post_id)
+
+    if not video_path or not os.path.exists(video_path):
+        await context.bot.send_message(
+            chat_id=TELEGRAM_ADMIN_CHAT_ID,
+            text=f"RU video file for post #{post_id} not found. Please regenerate first.",
+            reply_markup=_build_video_keyboard(post_id),
+        )
+        return
+
+    # --- Shared caption (Instagram RU) ---
+    raw_caption = context.bot_data.get(f"ru_video_caption:{post_id}") or (post.get("ru_post_text", "") if post else "")
+    caption = re.sub(r'[*_`~]', '', raw_caption)
+    caption = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', caption)
+    caption = re.sub(r'<[^>]+>', '', caption)
+    tags: list[str] = []
+    if post:
+        post_text_clean = re.sub(r'<[^>]+>', '', post.get("ru_post_text") or post.get("post_text", ""))
+        hashtags_list = re.findall(r'#\w+', post_text_clean)
+        tags = [h.lstrip("#") for h in hashtags_list]
+        hashtags_str = " ".join(hashtags_list)
+        if hashtags_str and hashtags_str not in caption:
+            caption = caption.rstrip() + "\n\n" + hashtags_str
+    caption = "Больше новостей в telegram-канале, ссылка в биове\n\n" + caption
+
+    # --- YouTube RU title / description ---
+    raw_title = (post.get("article_title", "") if post else "") or f"Gaming news #{post_id}"
+    yt_title = raw_title[:100]  # Keep Russian title for RU channel
+    yt_desc = caption  # reuse caption built above
+
+    status_msg = await context.bot.send_message(
+        chat_id=TELEGRAM_ADMIN_CHAT_ID,
+        text=f"Uploading RU to all platforms for post #{post_id}…",
+    )
+
+    from config import INSTAGRAM_USER_ID_RU, INSTAGRAM_ACCESS_TOKEN_RU
+    tasks: dict[str, asyncio.Task] = {}
+    if instagram_publisher.is_configured_ru():
+        tasks["Instagram RU"] = asyncio.create_task(
+            instagram_publisher.publish_reel(
+                video_path=video_path, caption=caption,
+                user_id=INSTAGRAM_USER_ID_RU, access_token=INSTAGRAM_ACCESS_TOKEN_RU,
+            )
+        )
+    if youtube_publisher.is_configured_ru():
+        tasks["YouTube RU"] = asyncio.create_task(
+            youtube_publisher.upload_short_ru(
+                video_path=video_path, title=yt_title, description=yt_desc, tags=tags,
+            )
+        )
+
+    results: list[str] = []
+    any_err = False
+    for platform, task in tasks.items():
+        try:
+            result = await task
+            if "YouTube" in platform and isinstance(result, str) and result:
+                results.append(f"\u2705 {platform}: https://youtu.be/{result}")
+            elif "Instagram" in platform and isinstance(result, str) and result:
+                results.append(f"\u2705 {platform}: Media ID {result}")
             else:
                 results.append(f"\u2705 {platform}: published")
         except Exception as exc:
@@ -719,14 +1011,17 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def build_handlers():
     return [
-        CallbackQueryHandler(handle_approve,        pattern=r"^approve:\d+$"),
-        CallbackQueryHandler(handle_cancel,         pattern=r"^cancel:\d+$"),
-        CallbackQueryHandler(handle_create_video,    pattern=r"^create_video:\d+$"),
-        CallbackQueryHandler(handle_create_video_ru, pattern=r"^create_video_ru:\d+$"),
-        CallbackQueryHandler(handle_post_instagram, pattern=r"^post_instagram:\d+$"),
-        CallbackQueryHandler(handle_post_youtube,    pattern=r"^post_youtube:\d+$"),
-        CallbackQueryHandler(handle_post_tiktok,     pattern=r"^post_tiktok:\d+$"),
-        CallbackQueryHandler(handle_post_all,        pattern=r"^post_all:\d+$"),
+        CallbackQueryHandler(handle_approve,            pattern=r"^approve:\d+$"),
+        CallbackQueryHandler(handle_cancel,             pattern=r"^cancel:\d+$"),
+        CallbackQueryHandler(handle_create_video,        pattern=r"^create_video:\d+$"),
+        CallbackQueryHandler(handle_create_video_en,     pattern=r"^create_video_en:\d+$"),
+        CallbackQueryHandler(handle_create_video_ru,     pattern=r"^create_video_ru:\d+$"),
+        CallbackQueryHandler(handle_post_instagram,      pattern=r"^post_instagram:\d+$"),
+        CallbackQueryHandler(handle_post_instagram_ru,   pattern=r"^post_instagram_ru:\d+$"),
+        CallbackQueryHandler(handle_post_youtube,        pattern=r"^post_youtube:\d+$"),
+        CallbackQueryHandler(handle_post_youtube_ru,     pattern=r"^post_youtube_ru:\d+$"),
+        CallbackQueryHandler(handle_post_all,            pattern=r"^post_all:\d+$"),
+        CallbackQueryHandler(handle_post_all_ru,         pattern=r"^post_all_ru:\d+$"),
         # legacy alias kept for in-flight messages
-        CallbackQueryHandler(handle_post_all,        pattern=r"^post_both:\d+$"),
+        CallbackQueryHandler(handle_post_all,            pattern=r"^post_both:\d+$"),
     ]

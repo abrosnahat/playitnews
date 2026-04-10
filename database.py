@@ -53,6 +53,11 @@ def init_db() -> None:
             conn.execute("ALTER TABLE scheduled_posts ADD COLUMN ru_post_text TEXT DEFAULT NULL")
         except Exception:
             pass  # column already exists
+        # Migration: add generated_video_path_ru column
+        try:
+            conn.execute("ALTER TABLE scheduled_posts ADD COLUMN generated_video_path_ru TEXT DEFAULT NULL")
+        except Exception:
+            pass  # column already exists
 
 
 # --- seen articles ---
@@ -140,6 +145,23 @@ def get_generated_video_path(post_id: int) -> str | None:
     with get_conn() as conn:
         row = conn.execute(
             "SELECT generated_video_path FROM scheduled_posts WHERE id = ?",
+            (post_id,),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def set_generated_video_path_ru(post_id: int, path: str | None) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE scheduled_posts SET generated_video_path_ru = ? WHERE id = ?",
+            (path, post_id),
+        )
+
+
+def get_generated_video_path_ru(post_id: int) -> str | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT generated_video_path_ru FROM scheduled_posts WHERE id = ?",
             (post_id,),
         ).fetchone()
     return row[0] if row else None

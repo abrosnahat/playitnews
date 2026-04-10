@@ -18,17 +18,22 @@ import asyncio
 import logging
 import os
 
-from config import YOUTUBE_CATEGORY_ID, YOUTUBE_CLIENT_SECRETS, YOUTUBE_TOKEN_FILE
+from config import YOUTUBE_CATEGORY_ID, YOUTUBE_CLIENT_SECRETS, YOUTUBE_TOKEN_FILE, YOUTUBE_TOKEN_FILE_RU
 
 logger = logging.getLogger(__name__)
 
 
 def is_configured() -> bool:
-    """Return True if token file exists (client_secrets needed only for first-time auth)."""
+    """Return True if EN token file exists."""
     return os.path.exists(YOUTUBE_TOKEN_FILE)
 
 
-def _build_youtube_client():
+def is_configured_ru() -> bool:
+    """Return True if RU token file exists."""
+    return os.path.exists(YOUTUBE_TOKEN_FILE_RU)
+
+
+def _build_youtube_client(token_file: str = YOUTUBE_TOKEN_FILE):
     """Build an authenticated YouTube API client. Blocking."""
     try:
         from google.oauth2.credentials import Credentials
@@ -39,14 +44,14 @@ def _build_youtube_client():
             "pip install google-auth-oauthlib google-api-python-client"
         ) from exc
 
-    if not os.path.exists(YOUTUBE_TOKEN_FILE):
+    if not os.path.exists(token_file):
         raise RuntimeError(
-            f"YouTube token not found: {YOUTUBE_TOKEN_FILE}\n"
+            f"YouTube token not found: {token_file}\n"
             "Run:  python get_youtube_token.py"
         )
 
     creds = Credentials.from_authorized_user_file(
-        YOUTUBE_TOKEN_FILE,
+        token_file,
         scopes=["https://www.googleapis.com/auth/youtube.upload"],
     )
     # Refresh if expired
@@ -60,9 +65,9 @@ def _build_youtube_client():
                     "Re-run:  python get_youtube_token.py"
                 ) from exc
             raise
-        with open(YOUTUBE_TOKEN_FILE, "w") as f:
+        with open(token_file, "w") as f:
             f.write(creds.to_json())
-        logger.info("YouTube token refreshed")
+        logger.info("YouTube token refreshed (%s)", token_file)
 
     return build("youtube", "v3", credentials=creds, cache_discovery=False)
 
@@ -72,11 +77,12 @@ def _upload_blocking(
     title: str,
     description: str,
     tags: list[str],
+    token_file: str = YOUTUBE_TOKEN_FILE,
 ) -> str:
     """Upload video to YouTube. Returns video ID. Blocking — run in thread."""
     from googleapiclient.http import MediaFileUpload
 
-    youtube = _build_youtube_client()
+    youtube = _build_youtube_client(token_file)
 
     body = {
         "snippet": {
@@ -122,16 +128,33 @@ async def upload_short(
     title: str,
     description: str,
     tags: list[str] | None = None,
+    token_file: str = YOUTUBE_TOKEN_FILE,
 ) -> str:
     """
     Upload *video_path* as a YouTube Short.
     Returns the YouTube video ID (e.g. 'dQw4w9WgXcQ').
     Raises RuntimeError if credentials are missing or upload fails.
     """
-    if not is_configured():
+    if not os.path.exists(token_file):
         raise RuntimeError(
-            "YouTube token not found. Run:  python get_youtube_token.py"
+            f"YouTube token not found: {token_file}. Run:  python get_youtube_token.py"
         )
     return await asyncio.to_thread(
-        _upload_blocking, video_path, title, description, tags or []
+        _upload_blocking, video_path, title, description, tags or [], token_file
+    )
+
+
+async def upload_short_ru(
+    video_path: str,
+    title: str,
+    description: str,
+    tags: list[str] | None = None,
+) -> str:
+    """Convenience wrapper that uploads to the RU YouTube channel."""
+    return await upload_short(
+        video_path=video_path,
+        title=title,
+        description=description,
+        tags=tags,
+        token_file=YOUTUBE_TOKEN_FILE_RU,
     )

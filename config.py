@@ -26,11 +26,15 @@ DB_PATH = os.path.join(BASE_DIR, "data.db")
 # Get a free API key at https://pixabay.com/api/docs/
 PIXABAY_API_KEY: str = os.getenv("PIXABAY_API_KEY", "")
 
-# Instagram Graph API
+# Instagram Graph API — English account
 # Required: Business/Creator account connected to a Facebook Page
 # Graph API app must have instagram_content_publish permission
 INSTAGRAM_USER_ID: str = os.getenv("INSTAGRAM_USER_ID", "")
 INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
+
+# Instagram Graph API — Russian account (separate channel)
+INSTAGRAM_USER_ID_RU: str = os.getenv("INSTAGRAM_USER_ID_RU", "")
+INSTAGRAM_ACCESS_TOKEN_RU: str = os.getenv("INSTAGRAM_ACCESS_TOKEN_RU", "")
 
 # YouTube Data API v3
 # client_secrets.json path (downloaded from Google Cloud Console)
@@ -39,6 +43,10 @@ YOUTUBE_CLIENT_SECRETS: str = os.getenv("YOUTUBE_CLIENT_SECRETS", os.path.join(B
 YOUTUBE_TOKEN_FILE: str = os.getenv("YOUTUBE_TOKEN_FILE", os.path.join(BASE_DIR, "youtube_token.json"))
 # Category ID: 20 = Gaming
 YOUTUBE_CATEGORY_ID: str = os.getenv("YOUTUBE_CATEGORY_ID", "20")
+
+# YouTube — Russian channel (separate Google account / channel)
+# Run get_youtube_token.py once logged in as the RU account, then point this variable at the saved token.
+YOUTUBE_TOKEN_FILE_RU: str = os.getenv("YOUTUBE_TOKEN_FILE_RU", os.path.join(BASE_DIR, "youtube_token_ru.json"))
 
 # TikTok browser session (persistent Chromium profile, created by get_tiktok_session.py)
 TIKTOK_SESSION_DIR: str = os.getenv("TIKTOK_SESSION_DIR", os.path.join(BASE_DIR, "tiktok_session"))
