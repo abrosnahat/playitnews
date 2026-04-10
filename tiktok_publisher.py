@@ -163,6 +163,20 @@ async def _do_upload(video_path: str, caption: str) -> None:
 
             await page.wait_for_timeout(2_000)
 
+            # Check for upload failure before proceeding
+            upload_failed = await page.evaluate("""
+                () => {
+                    const texts = ['upload failed', 'couldn\'t upload', 'upload error'];
+                    const body = document.body.innerText.toLowerCase();
+                    return texts.some(t => body.includes(t));
+                }
+            """)
+            if upload_failed:
+                raise RuntimeError(
+                    "TikTok rejected the video file (\"Upload failed\"). "
+                    "Check file format, size, or duration."
+                )
+
             # Dismiss onboarding/tutorial overlay if present (react-joyride)
             await _dismiss_overlay(page)
 
@@ -240,6 +254,20 @@ async def _do_upload(video_path: str, caption: str) -> None:
                 # Some versions just redirect to profile — give it a few seconds
                 await page.wait_for_timeout(6_000)
 
+            # Check for post-click error dialog
+            post_error = await page.evaluate("""
+                () => {
+                    const texts = ["couldn't upload", 'upload failed', 'something went wrong'];
+                    const body = document.body.innerText.toLowerCase();
+                    return texts.find(t => body.includes(t)) || null;
+                }
+            """)
+            if post_error:
+                raise RuntimeError(
+                    f'TikTok post failed: "{post_error}" dialog appeared after clicking Post. '
+                    'Check the tiktok_post_click.png screenshot for details.'
+                )
+
             logger.info("TikTok: upload complete")
 
         except Exception:
@@ -255,13 +283,25 @@ async def _do_upload(video_path: str, caption: str) -> None:
             await ctx.close()
 
 
-async def upload_video(video_path: str, caption: str) -> None:
+async def upload_video(video_path: str, caption: str, retries: int = 2) -> None:
     """
     Upload *video_path* to TikTok with *caption*.
-    Raises RuntimeError on failure.
+    Retries up to *retries* times on failure before raising.
     """
     if not is_configured():
         raise RuntimeError(
             "TikTok session not found.\nRun: python get_tiktok_session.py"
         )
-    await _do_upload(video_path, caption)
+    last_exc: Exception = RuntimeError("No attempts made")
+    for attempt in range(1, retries + 2):
+        try:
+            if attempt > 1:
+                wait = 30 * attempt
+                logger.info("TikTok: retry %d/%d in %ds...", attempt - 1, retries, wait)
+                await asyncio.sleep(wait)
+            await _do_upload(video_path, caption)
+            return
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("TikTok attempt %d failed: %s", attempt, exc)
+    raise last_exc

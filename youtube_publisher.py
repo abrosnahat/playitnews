@@ -51,7 +51,15 @@ def _build_youtube_client():
     )
     # Refresh if expired
     if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
+        try:
+            creds.refresh(Request())
+        except Exception as exc:
+            if "invalid_grant" in str(exc):
+                raise RuntimeError(
+                    "YouTube refresh token has been revoked or expired (invalid_grant). "
+                    "Re-run:  python get_youtube_token.py"
+                ) from exc
+            raise
         with open(YOUTUBE_TOKEN_FILE, "w") as f:
             f.write(creds.to_json())
         logger.info("YouTube token refreshed")
