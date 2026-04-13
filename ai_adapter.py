@@ -392,7 +392,7 @@ async def generate_video_script(post_text: str, article_title: str) -> str:
             {"role": "user", "content": user_message},
         ],
         "stream": False,
-        "options": {"num_predict": 300, "num_ctx": 2048},
+        "options": {"num_predict": 500, "num_ctx": 2048},
     }
 
     try:
@@ -462,7 +462,7 @@ async def generate_video_script_ru(post_text: str, article_title: str) -> str:
             {"role": "user", "content": user_message},
         ],
         "stream": False,
-        "options": {"num_predict": 300, "num_ctx": 2048},
+        "options": {"num_predict": 500, "num_ctx": 2048},
     }
 
     try:

@@ -189,6 +189,21 @@ def set_notification_message_id(post_id: int, message_id: int) -> None:
         )
 
 
+def get_all_pending_posts() -> list[dict]:
+    """Return all posts with status 'pending'."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM scheduled_posts WHERE status = 'pending' ORDER BY id"
+        ).fetchall()
+        result = []
+        for row in rows:
+            d = dict(row)
+            d["image_paths"] = json.loads(d["image_paths"])
+            d["video_paths"] = json.loads(d.get("video_paths") or "[]")
+            result.append(d)
+        return result
+
+
 def get_pending_posts_due(now: datetime) -> list[dict]:
     """Return pending posts whose scheduled_at <= now."""
     with get_conn() as conn:

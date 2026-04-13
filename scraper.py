@@ -163,11 +163,23 @@ async def scrape_article(session: aiohttp.ClientSession, url: str) -> Optional[A
     image_urls: list[str] = []
     seen_imgs: set[str] = set()
 
+    def _img_dedup_key(img_url: str) -> str:
+        """Return a normalised key for deduplication.
+        For i.playground.ru the same image may appear under /e/ and /p/ paths
+        but shares the same filename hash, so we key on filename only."""
+        base = img_url.split("?")[0]
+        filename = base.rsplit("/", 1)[-1]
+        if "i.playground.ru" in base:
+            return filename
+        return base
+
     # Seed with og:image first so it appears at position 0
     if og_image_url and _is_valid_image_url(og_image_url):
-        norm = og_image_url.split("?")[0]
+        norm = _img_dedup_key(og_image_url)
         seen_imgs.add(norm)
         image_urls.append(og_image_url)
+
+    _dim_re = re.compile(r'^\d+x\d+$')
 
     for img in img_tags:
         # Always prefer img src/data-src over parent <a> href
@@ -175,6 +187,12 @@ async def scrape_article(session: aiohttp.ClientSession, url: str) -> Optional[A
         src = img.get("src") or img.get("data-src") or img.get("data-lazy-src", "")
         if src:
             full = urljoin(url, src)
+            # Strip ?NxM resize query params to get full-resolution image
+            # e.g. https://i.playground.ru/p/xyz.png?255x255 → .../xyz.png
+            if "?" in full:
+                base, qs = full.split("?", 1)
+                if _dim_re.match(qs):
+                    full = base
         else:
             # Fall back to parent <a> href only if it looks like an image
             parent_a = img.find_parent("a")
@@ -182,7 +200,7 @@ async def scrape_article(session: aiohttp.ClientSession, url: str) -> Optional[A
                 full = urljoin(url, parent_a.get("href", ""))
             else:
                 continue
-        norm = full.split("?")[0]  # strip query params for dedup
+        norm = _img_dedup_key(full)  # dedup by filename for i.playground.ru
         if norm not in seen_imgs and _is_valid_image_url(full):
             seen_imgs.add(norm)
             image_urls.append(full)
@@ -193,7 +211,7 @@ async def scrape_article(session: aiohttp.ClientSession, url: str) -> Optional[A
             continue
         href = a.get("href", "")
         full = urljoin(url, href)
-        norm = full.split("?")[0]
+        norm = _img_dedup_key(full)
         if norm not in seen_imgs and _is_valid_image_url(full):
             seen_imgs.add(norm)
             image_urls.append(full)
@@ -214,7 +232,7 @@ def _extract_pg_embeds(scope) -> list[dict]:
     for tag in scope.find_all("pg-embed"):
         embed_type = tag.get("type", "")
         embed_id = tag.get("src", "").strip()
-        if embed_type in ("youtube", "playground") and embed_id:
+        if embed_type in ("youtube", "playground", "vk") and embed_id:
             embeds.append({"type": embed_type, "id": embed_id})
     return embeds
 
@@ -252,6 +270,14 @@ async def download_videos(
     for embed in pg_embeds:
         if embed["type"] == "youtube":
             youtube_urls.append(f"https://www.youtube.com/watch?v={embed['id']}")
+
+        elif embed["type"] == "vk":
+            # src is a query string like "oid=-231353027&id=456239049"
+            params = dict(p.split("=") for p in embed["id"].split("&") if "=" in p)
+            oid = params.get("oid", "")
+            vid = params.get("id", "")
+            if oid and vid:
+                youtube_urls.append(f"https://vk.com/video{oid}_{vid}")
 
         elif embed["type"] == "playground":
             for attempt in range(1, 4):
@@ -312,7 +338,14 @@ def _is_valid_image_url(url: str) -> bool:
 async def download_images(session: aiohttp.ClientSession, image_urls: list[str]) -> list[str]:
     """Download images and return local file paths (max 10)."""
     paths: list[str] = []
-    tasks = [_download_image(session, url) for url in image_urls[:10]]
+    # Limit to 2 concurrent downloads to avoid rate-limiting from i.playground.ru
+    sem = asyncio.Semaphore(2)
+
+    async def _guarded(url):
+        async with sem:
+            return await _download_image(session, url)
+
+    tasks = [_guarded(url) for url in image_urls[:10]]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for r in results:
         if isinstance(r, str):
@@ -324,7 +357,7 @@ async def _download_image(session: aiohttp.ClientSession, url: str) -> Optional[
     name = hashlib.md5(url.encode()).hexdigest()
     for attempt in range(1, 4):
         try:
-            async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=30), ssl=SSL_CONTEXT) as resp:
+            async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=160), ssl=SSL_CONTEXT) as resp:
                 if resp.status != 200:
                     logger.warning("Картинка HTTP %s [%s] (попытка %d/3)", resp.status, url, attempt)
                     break  # non-retriable
@@ -340,7 +373,7 @@ async def _download_image(session: aiohttp.ClientSession, url: str) -> Optional[
         except Exception as exc:
             logger.warning("Не удалось скачать картинку [%s] (попытка %d/3): %s", url, attempt, exc)
             if attempt < 3:
-                await asyncio.sleep(1.5 * attempt)
+                await asyncio.sleep(3.0 * attempt)
     return None
 
 

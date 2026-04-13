@@ -2,6 +2,7 @@
 Telegram bot handlers and post-sending logic.
 """
 import asyncio
+import html
 import logging
 import os
 import re
@@ -32,6 +33,28 @@ import ai_adapter
 import video_generator
 import instagram_publisher
 import youtube_publisher
+
+# Telegram HTML subset: only these tags are allowed
+_TG_ALLOWED = {"b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+               "code", "pre", "a", "tg-spoiler"}
+# Only match tags where the name is immediately followed by >, />, or whitespace
+_TAG_RE = re.compile(r'<(/?)([a-zA-Z][a-zA-Z0-9-]*)(\s[^>]*)?>',  re.DOTALL)
+
+
+def _sanitize_telegram_html(text: str) -> str:
+    """Remove HTML tags not in Telegram's allowed set; escape bare < and > in plain text."""
+    result = []
+    pos = 0
+    for m in _TAG_RE.finditer(text):
+        start, end = m.start(), m.end()
+        # Escape only < and > in literal text before this tag (don't touch &entities;)
+        result.append(text[pos:start].replace("<", "&lt;").replace(">", "&gt;"))
+        tag_name = m.group(2).lower()
+        if tag_name in _TG_ALLOWED:
+            result.append(m.group(0))
+        pos = end
+    result.append(text[pos:].replace("<", "&lt;").replace(">", "&gt;"))
+    return "".join(result)
 
 # How many YouTube results to skip forward on each regenerate
 YT_SKIP_STEP = 3
@@ -127,11 +150,28 @@ async def _send_media_post(
         body = await shorten_post(body, target_chars=LIMIT - len(suffix))
 
     text = body.rstrip() + suffix
+    text = _sanitize_telegram_html(text)
     caption = text[:LIMIT]
+    # Fallback plain text (all HTML tags stripped) used if Telegram rejects the HTML
+    plain_text = re.sub(r'<[^>]+>', '', text)
+    plain_caption = plain_text[:LIMIT]
     all_media_paths = list(image_paths[:10]) + list((video_paths or [])[:max(0, 10 - len(image_paths))])
 
+    async def _send_with_fallback(make_html, make_plain):
+        try:
+            await make_html()
+        except TelegramError as exc:
+            if "parse entities" in str(exc).lower() or "can't parse" in str(exc).lower():
+                logger.warning("HTML parse error, retrying as plain text: %s", exc)
+                await make_plain()
+            else:
+                raise
+
     if not all_media_paths:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
+        await _send_with_fallback(
+            lambda: bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=False),
+            lambda: bot.send_message(chat_id=chat_id, text=plain_text, parse_mode=None, disable_web_page_preview=False),
+        )
         return
 
     if len(all_media_paths) == 1:
@@ -139,29 +179,41 @@ async def _send_media_post(
         with open(path, "rb") as f:
             data = f.read()
         if path in image_paths:
-            await bot.send_photo(chat_id=chat_id, photo=data, caption=caption, parse_mode=ParseMode.HTML)
+            await _send_with_fallback(
+                lambda: bot.send_photo(chat_id=chat_id, photo=data, caption=caption, parse_mode=ParseMode.HTML),
+                lambda: bot.send_photo(chat_id=chat_id, photo=data, caption=plain_caption, parse_mode=None),
+            )
         else:
             w, h = _probe_video_dims(path)
-            await bot.send_video(
-                chat_id=chat_id, video=data, caption=caption, parse_mode=ParseMode.HTML,
-                width=w or None, height=h or None, supports_streaming=True,
+            await _send_with_fallback(
+                lambda: bot.send_video(chat_id=chat_id, video=data, caption=caption, parse_mode=ParseMode.HTML,
+                               width=w or None, height=h or None, supports_streaming=True),
+                lambda: bot.send_video(chat_id=chat_id, video=data, caption=plain_caption, parse_mode=None,
+                               width=w or None, height=h or None, supports_streaming=True),
             )
         return
 
-    media = []
-    for i, path in enumerate(all_media_paths):
-        with open(path, "rb") as f:
-            data = f.read()
-        cap = caption if i == 0 else None
-        if path in image_paths:
-            media.append(InputMediaPhoto(media=data, caption=cap, parse_mode=ParseMode.HTML if cap else None))
-        else:
-            w, h = _probe_video_dims(path)
-            media.append(InputMediaVideo(
-                media=data, caption=cap, parse_mode=ParseMode.HTML if cap else None,
-                width=w or None, height=h or None, supports_streaming=True,
-            ))
-    await bot.send_media_group(chat_id=chat_id, media=media)
+    def _build_media(cap):
+        items = []
+        for i, path in enumerate(all_media_paths):
+            with open(path, "rb") as f:
+                data = f.read()
+            c = cap if i == 0 else None
+            pm = ParseMode.HTML if c else None
+            if path in image_paths:
+                items.append(InputMediaPhoto(media=data, caption=c, parse_mode=pm))
+            else:
+                w, h = _probe_video_dims(path)
+                items.append(InputMediaVideo(
+                    media=data, caption=c, parse_mode=pm,
+                    width=w or None, height=h or None, supports_streaming=True,
+                ))
+        return items
+
+    await _send_with_fallback(
+        lambda: bot.send_media_group(chat_id=chat_id, media=_build_media(caption)),
+        lambda: bot.send_media_group(chat_id=chat_id, media=_build_media(plain_caption)),
+    )
 
 
 async def _send_preview_with_images(bot: Bot, chat_id, text: str, image_paths: list[str]) -> None:
@@ -328,17 +380,32 @@ async def handle_create_video(update: Update, context: ContextTypes.DEFAULT_TYPE
         generate_video_script_ru(post_text=post.get("ru_post_text") or post["post_text"], article_title=post["article_title"]),
     )
 
-    # Fallback if AI returned empty scripts
-    if not en_script or not en_script.strip():
-        en_script = post["post_text"][:300].strip()
-        logger.warning("EN video script was empty, using post_text fallback")
-    if not ru_script or not ru_script.strip():
-        ru_script = (post.get("ru_post_text") or post["post_text"])[:300].strip()
-        logger.warning("RU video script was empty, using post_text fallback")
+    # Fallback if AI returned empty or too-short scripts (< 20 words = model failure)
+    en_clean = post["post_text"][:350].strip()
+    ru_clean = (post.get("ru_post_text") or post["post_text"])[:350].strip()
 
+    if not en_script or len(re.sub(r'<[^>]+>', '', en_script).split()) < 20:
+        logger.warning("EN video script too short (%s), using post_text fallback",
+                       repr(en_script[:60]) if en_script else "empty")
+        en_script = re.sub(r'<[^>]+>', '', en_clean).strip()
+    else:
+        en_script = re.sub(r'<[^>]+>', '', en_script).strip()
+
+    if not ru_script or len(re.sub(r'<[^>]+>', '', ru_script).split()) < 20:
+        logger.warning("RU video script too short (%s), using post_text fallback",
+                       repr(ru_script[:60]) if ru_script else "empty")
+        ru_script = re.sub(r'<[^>]+>', '', ru_clean).strip()
+    else:
+        ru_script = re.sub(r'<[^>]+>', '', ru_script).strip()
+
+    # Send scripts as separate messages to avoid 4096-char Telegram limit
     await context.bot.send_message(
         chat_id=TELEGRAM_ADMIN_CHAT_ID,
-        text=f"🇬🇧 EN script:\n{en_script}\n\n🇷🇺 RU script:\n{ru_script}",
+        text=f"🇬🇧 EN script:\n{en_script}",
+    )
+    await context.bot.send_message(
+        chat_id=TELEGRAM_ADMIN_CHAT_ID,
+        text=f"🇷🇺 RU script:\n{ru_script}",
     )
 
     await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text="Step 2/4: Synthesizing voices...")
@@ -474,17 +541,19 @@ async def _create_single_video(
         script = await generate_video_script(
             post_text=post["post_text"], article_title=post["article_title"]
         )
-        if not script or not script.strip():
-            script = post["post_text"][:300].strip()
-            logger.warning("EN video script was empty, using post_text fallback")
+        fallback = re.sub(r'<[^>]+>', '', post["post_text"][:350]).strip()
     else:
         script = await generate_video_script_ru(
             post_text=post.get("ru_post_text") or post["post_text"],
             article_title=post["article_title"],
         )
-        if not script or not script.strip():
-            script = (post.get("ru_post_text") or post["post_text"])[:300].strip()
-            logger.warning("RU video script was empty, using post_text fallback")
+        fallback = re.sub(r'<[^>]+>', '', (post.get("ru_post_text") or post["post_text"])[:350]).strip()
+
+    script = re.sub(r'<[^>]+>', '', script or '').strip()
+    if len(script.split()) < 20:
+        logger.warning("%s video script too short (%s), using post_text fallback",
+                       lang.upper(), repr(script[:60]))
+        script = fallback
 
     await context.bot.send_message(
         chat_id=TELEGRAM_ADMIN_CHAT_ID,

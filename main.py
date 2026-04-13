@@ -148,6 +148,31 @@ async def job_check_news(context) -> None:
     await check_news(context.application)
 
 
+async def resend_pending_notifications(app: Application) -> None:
+    """On startup, resend admin notifications for all posts still in 'pending' state."""
+    pending = db.get_all_pending_posts()
+    if not pending:
+        return
+    logger.info("Pending posts at startup: %d — resending notifications", len(pending))
+    for post in pending:
+        try:
+            scheduled_at = datetime.fromisoformat(post["scheduled_at"])
+            await send_admin_notification(
+                bot=app.bot,
+                post_id=post["id"],
+                article_title=post.get("article_title", ""),
+                article_url=post.get("article_url", ""),
+                post_text=post.get("post_text", ""),
+                image_paths=post.get("image_paths", []),
+                video_paths=post.get("video_paths", []),
+                scheduled_at=scheduled_at,
+            )
+            logger.info("Resent notification for pending post #%d", post["id"])
+            await asyncio.sleep(1)  # avoid Telegram flood limits
+        except Exception as exc:
+            logger.error("Failed to resend notification for post #%d: %s", post["id"], exc)
+
+
 # ---------------------------------------------------------------------------
 # Application bootstrap
 # ---------------------------------------------------------------------------
@@ -188,6 +213,12 @@ def main() -> None:
     app.add_error_handler(error_handler)
 
     job_queue = app.job_queue
+
+    # On startup: resend notifications for pending posts
+    job_queue.run_once(
+        lambda ctx: resend_pending_notifications(ctx.application),
+        when=5,  # 5 seconds after start
+    )
 
     # Check news every CHECK_INTERVAL_MINUTES
     job_queue.run_repeating(
