@@ -36,18 +36,8 @@ def _sanitize_telegram_html(text: str) -> str:
     return text
 
 SYSTEM_PROMPT = (
-    "You are an expert gaming news editor and social media content creator. "
-    "Your task is to transform Russian gaming news articles into engaging English Telegram posts.\n\n"
-    "Rules:\n"
-    "- Translate from Russian to English accurately.\n"
-    "- Rephrase in a dynamic, engaging tone suited for a gaming audience.\n"
-    "- Use Telegram HTML formatting: <b>bold</b> for the headline, <i>italic</i> for key details.\n"
-    "- Keep it concise: 2-3 short paragraphs.\n"
-    "- Add 5-8 relevant English hashtags at the end.\n"
-    "- Do NOT include any emojis.\n"
-    "- Do NOT mention playground.ru or the source.\n"
-    "- Start directly with the news hook.\n"
-    "- End with the hashtag block on a new line."
+    "You are an expert gaming news editor writing for a Telegram channel. "
+    "Transform Russian gaming news into punchy, engaging English Telegram posts."
 )
 
 
@@ -58,19 +48,17 @@ async def adapt_article_ru(title: str, body: str) -> str:
     user_message = (
         "Перепиши следующую игровую новость как пост для русскоязычного Telegram-канала.\n"
         "ВАЖНО: Весь ответ должен быть исключительно на русском языке.\n\n"
-        "Правила форматирования (Telegram HTML):\n"
-        "- Первая строка: <b>цепляющий заголовок жирным</b>\n"
-        "- Затем 2-3 коротких абзаца обычного текста\n"
-        "- Яркую цитату или ключевой факт оберни в <i>курсив</i>\n"
-        "- Последняя строка: 5-8 русских и английских хэштегов через пробел\n"
-        "- Пустая строка между текстом и хэштегами\n"
-        "- Максимум 900 символов включая HTML-теги\n"
-        "- Без эмодзи, не упоминай источник\n\n"
-        "Пример структуры:\n"
-        "<b>Заголовок</b>\n\n"
-        "Первый абзац с главной новостью.\n\n"
-        "Второй абзац с деталями. <i>Ключевая цитата если есть.</i>\n\n"
-        "#тег1 #тег2 #gaming\n\n"
+        "Структура поста (строго в таком порядке):\n"
+        "1. <b>Заголовок</b> — цепляющий, с сутью новости. Можно добавить 1 эмодзи в конец заголовка.\n"
+        "2. Лид — 1–2 строки: что произошло и почему важно.\n"
+        "3. Детали списком через тире (—): что добавили/показали, дата, механики, платформы — только то что есть в статье.\n"
+        "4. Реакции/факты (если есть): что заметили игроки, реакция комьюнити, утечки.\n"
+        "5. Итог — 1 строка с ожиданиями или выводом.\n"
+        "6. Пустая строка, затем 5–8 хэштегов через пробел.\n\n"
+        "Правила:\n"
+        "- Telegram HTML: <b>жирный</b> только для заголовка, <i>курсив</i> для одной ключевой детали\n"
+        "- Максимум 900 символов включая теги\n"
+        "- Без упоминания источника\n\n"
         f"Заголовок: {title}\n\nТекст:\n{body[:4000]}\n\n"
         "Напиши Telegram-пост на русском:"
     )
@@ -85,7 +73,7 @@ async def adapt_article_ru(title: str, body: str) -> str:
             {"role": "user", "content": user_message},
         ],
         "stream": False,
-        "options": {"num_predict": 900, "num_ctx": 4096},
+        "options": {"num_predict": 1500, "num_ctx": 4096},
     }
 
     try:
@@ -98,37 +86,59 @@ async def adapt_article_ru(title: str, body: str) -> str:
                 resp.raise_for_status()
                 data = await resp.json()
                 post_text = _sanitize_telegram_html(_md_to_html(data["message"]["content"].strip()))
-                if not post_text:
-                    logger.warning("Gemma (RU) вернул пустой ответ для '%s', используем fallback", title[:60])
-                    return f"<b>{title}</b>\n\n#игры #новости #gaming"
+                # Validate: must have more than just a headline + hashtags (>150 chars body)
+                body_only = re.sub(r'<[^>]+>', '', post_text).strip()
+                body_only = re.sub(r'#\S+', '', body_only).strip()
+                if not post_text or len(body_only) < 100:
+                    logger.warning("Gemma (RU) вернул только заголовок (%d симв.), повтор с упрощённым промптом", len(post_text))
+                    raise ValueError("too short")
                 logger.info("Gemma (RU) адаптировал статью: '%s' (%d симв.)", title[:60], len(post_text))
                 return post_text
-    except Exception as exc:
-        logger.error("Ошибка Ollama API (RU): %s", exc)
-        return f"<b>{title}</b>\n\n[Ошибка AI обработки]\n\n#игры #новости"
+    except ValueError:
+        # Retry with a simpler prompt that the model can't misinterpret
+        simple_prompt = (
+            f"Напиши Telegram-пост об этой игровой новости на русском языке.\n"
+            f"Начни с <b>заголовка</b>, затем 3–4 предложения о сути новости, затем хэштеги.\n\n"
+            f"Заголовок: {title}\n\nТекст: {body[:2000]}\n\nПост:"
+        )
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{OLLAMA_BASE_URL}/api/chat",
+                    json={"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": simple_prompt}],
+                          "stream": False, "options": {"num_predict": 900, "num_ctx": 4096}},
+                    timeout=aiohttp.ClientTimeout(total=180),
+                ) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    post_text = _sanitize_telegram_html(_md_to_html(data["message"]["content"].strip()))
+                    if post_text:
+                        logger.info("Gemma (RU) retry OK: '%s' (%d симв.)", title[:60], len(post_text))
+                        return post_text
+        except Exception as exc2:
+            logger.error("Gemma (RU) retry failed: %s", exc2)
+        return f"<b>{title}</b>\n\n#игры #новости #gaming"
 
 
 async def adapt_article(title: str, body: str) -> str:
     """
     Translate, rephrase, and adapt the Russian article into an English Telegram post.
-    Uses local Ollama (llama3.2) — no API key required.
+    Uses local Ollama — no API key required.
     """
     user_message = (
-        "Transform the following Russian gaming news article into a Telegram post.\n"
+        "Transform the following Russian gaming news into an English Telegram post.\n"
         "IMPORTANT: Your entire response must be in English only.\n\n"
-        "Format rules (use Telegram HTML):\n"
-        "- First line: <b>catchy headline in bold</b>\n"
-        "- Then 2-3 short paragraphs of plain text (no tags)\n"
-        "- If there is a notable quote or key stat, wrap it in <i>italic</i>\n"
-        "- Last line: 5-8 hashtags separated by spaces, NO tags around them\n"
-        "- One blank line between the text and the hashtag line\n"
-        "- Maximum 900 characters total including HTML tags\n"
-        "- No emojis, do not mention the source website\n\n"
-        "Example structure:\n"
-        "<b>Headline Here</b>\n\n"
-        "Paragraph one with the main news.\n\n"
-        "Paragraph two with details. <i>Key quote or stat if any.</i>\n\n"
-        "#tag1 #tag2 #tag3\n\n"
+        "Post structure (follow this order):\n"
+        "1. <b>Headline</b> — punchy, captures the news. You may add 1 emoji at the end of the headline.\n"
+        "2. Lead — 1–2 lines: what happened and why it matters.\n"
+        "3. Details as a bullet list with em-dashes (—): what was shown/added, release date, mechanics, platforms — only facts from the article.\n"
+        "4. Reactions/facts (if available): what fans noticed, community reaction, leaks.\n"
+        "5. Conclusion — 1 line with takeaway or expectations.\n"
+        "6. Blank line, then 5–8 hashtags separated by spaces.\n\n"
+        "Rules:\n"
+        "- Telegram HTML: <b>bold</b> for headline only, <i>italic</i> for one key detail\n"
+        "- Maximum 900 characters total including tags\n"
+        "- No emojis except in the headline. Do not mention the source website.\n\n"
         f"Title: {title}\n\nBody:\n{body[:4000]}\n\n"
         "Write the Telegram post now:"
     )
@@ -140,7 +150,7 @@ async def adapt_article(title: str, body: str) -> str:
             {"role": "user", "content": user_message},
         ],
         "stream": False,
-        "options": {"num_predict": 900, "num_ctx": 4096},
+        "options": {"num_predict": 1500, "num_ctx": 4096},
     }
 
     try:
@@ -153,10 +163,36 @@ async def adapt_article(title: str, body: str) -> str:
                 resp.raise_for_status()
                 data = await resp.json()
                 post_text = _sanitize_telegram_html(_md_to_html(data["message"]["content"].strip()))
+                # Validate: must have more than just a headline + hashtags (>150 chars body)
+                body_only = re.sub(r'<[^>]+>', '', post_text).strip()
+                body_only = re.sub(r'#\S+', '', body_only).strip()
+                if not post_text or len(body_only) < 100:
+                    logger.warning("Gemma (EN) вернул только заголовок (%d симв.), повтор с упрощённым промптом", len(post_text))
+                    raise ValueError("too short")
                 logger.info("Gemma адаптировал статью: '%s'  (%d симв.)", title[:60], len(post_text))
                 return post_text
-    except Exception as exc:
-        logger.error("Ошибка Ollama API: %s", exc)
+    except ValueError:
+        simple_prompt = (
+            f"Write a Telegram post in English about this gaming news.\n"
+            f"Start with <b>headline in bold</b>, then 3–4 sentences about the news, then hashtags.\n\n"
+            f"Title: {title}\n\nBody: {body[:2000]}\n\nPost:"
+        )
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{OLLAMA_BASE_URL}/api/chat",
+                    json={"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": simple_prompt}],
+                          "stream": False, "options": {"num_predict": 1500, "num_ctx": 4096}},
+                    timeout=aiohttp.ClientTimeout(total=120),
+                ) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    post_text = _sanitize_telegram_html(_md_to_html(data["message"]["content"].strip()))
+                    if post_text:
+                        logger.info("Gemma (EN) retry OK: '%s' (%d симв.)", title[:60], len(post_text))
+                        return post_text
+        except Exception as exc2:
+            logger.error("Gemma (EN) retry failed: %s", exc2)
         return f"{title}\n\n[AI processing failed. Please edit before publishing.]\n\n#gaming #news"
 
 
@@ -251,7 +287,7 @@ async def shorten_post(text: str, target_chars: int = 900) -> str:
             {"role": "user", "content": user_message},
         ],
         "stream": False,
-        "options": {"num_predict": 350},
+        "options": {"num_predict": 1500},
     }
     try:
         async with aiohttp.ClientSession() as session:
@@ -263,11 +299,26 @@ async def shorten_post(text: str, target_chars: int = 900) -> str:
                 resp.raise_for_status()
                 data = await resp.json()
                 shortened = _sanitize_telegram_html(_md_to_html(data["message"]["content"].strip()))
+                if len(shortened) < 50:
+                    logger.warning("shorten_post returned too-short result (%d chars), hard-truncating", len(shortened))
+                    return _hard_truncate(text, target_chars)
                 logger.info("Gemma сократил пост: %d → %d симв.", len(text), len(shortened))
                 return shortened
     except Exception as exc:
         logger.error("Ошибка Ollama shorten API: %s", exc)
-        return text  # fallback: return original
+        return _hard_truncate(text, target_chars)
+
+
+def _hard_truncate(text: str, limit: int) -> str:
+    """Truncate text to limit chars at a word boundary, closing any open HTML tags."""
+    if len(text) <= limit:
+        return text
+    truncated = text[:limit - 1].rstrip()
+    # Don't cut mid-tag
+    last_open = truncated.rfind("<")
+    if last_open != -1 and ">" not in truncated[last_open:]:
+        truncated = truncated[:last_open].rstrip()
+    return _sanitize_telegram_html(truncated)
 
 
 async def extract_game_name(article_title: str) -> str:
@@ -280,10 +331,12 @@ async def extract_game_name(article_title: str) -> str:
     """
     user_message = (
         "Given the following news headline, write a short YouTube search query (2-5 words in English) "
-        "that would find relevant video footage for this story. "
-        "If it's about a specific game, return just the game title. "
-        "If it's general gaming/tech news, describe the topic concisely. "
-        "Return ONLY the search query, nothing else — no punctuation, no explanation.\n\n"
+        "that would find relevant video footage for this story.\n\n"
+        "PRIORITY RULES (follow in order):\n"
+        "1. If the headline mentions a specific game title — return ONLY the game title (e.g. 'GTA 6', 'Silent Hill 2', 'Elden Ring'). "
+        "Ignore any journalist names, company names, or studio names — the game title is always the priority.\n"
+        "2. If there is no specific game title but there are gaming/tech topics — return a short descriptive query.\n"
+        "3. Return ONLY the search query, nothing else — no punctuation, no explanation, no names of people or studios.\n\n"
         f"Headline: {article_title}\n\n"
         "Search query:"
     )
@@ -354,9 +407,13 @@ async def generate_video_script(post_text: str, article_title: str) -> str:
     Formula: [What happened] → [Short fact] → [Detail] → [Why it matters] → [Question/conclusion]
     Target: 65-90 words (~35-45 seconds spoken at natural pace).
     """
-    # Strip HTML tags and markdown symbols for clean plain-text input
+    # Strip HTML tags, markdown symbols, URLs and emojis for clean plain-text input
     clean_text = re.sub(r"<[^>]+>", "", post_text)
+    clean_text = re.sub(r"https?://\S+", "", clean_text)
     clean_text = re.sub(r"[*_`#]", "", clean_text)
+    # Remove emoji (unicode ranges covering most emoji blocks)
+    clean_text = re.sub(r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0000FE00-\U0000FEFF]", "", clean_text)
+    clean_text = re.sub(r"\s{2,}", " ", clean_text).strip()
 
     user_message = (
         "Write a short spoken video narration script for TikTok/Reels/Shorts based on the gaming news below.\n\n"
@@ -392,7 +449,7 @@ async def generate_video_script(post_text: str, article_title: str) -> str:
             {"role": "user", "content": user_message},
         ],
         "stream": False,
-        "options": {"num_predict": 500, "num_ctx": 2048},
+        "options": {"num_predict": 1500, "num_ctx": 2048},
     }
 
     try:
@@ -422,9 +479,13 @@ async def generate_video_script_ru(post_text: str, article_title: str) -> str:
     Генерирует русскоязычный сценарий озвучки для TikTok/Reels/Shorts.
     Цель: 65–90 слов (~35–45 секунд речи).
     """
-    # Strip all HTML tags and markdown symbols from input
+    # Strip HTML tags, markdown symbols, URLs and emojis from input
     clean_text = re.sub(r"<[^>]+>", "", post_text)
+    clean_text = re.sub(r"https?://\S+", "", clean_text)
     clean_text = re.sub(r"[*_`#]", "", clean_text)
+    # Remove emoji
+    clean_text = re.sub(r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0000FE00-\U0000FEFF]", "", clean_text)
+    clean_text = re.sub(r"\s{2,}", " ", clean_text).strip()
 
     user_message = (
         "Напиши короткий сценарий озвучки для игровой новости (формат Shorts/Reels).\n\n"
@@ -462,7 +523,7 @@ async def generate_video_script_ru(post_text: str, article_title: str) -> str:
             {"role": "user", "content": user_message},
         ],
         "stream": False,
-        "options": {"num_predict": 500, "num_ctx": 2048},
+        "options": {"num_predict": 1500, "num_ctx": 2048},
     }
 
     try:

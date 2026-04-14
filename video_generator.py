@@ -11,6 +11,7 @@ Output: 1080 × 1920 portrait video (~30–45 s).
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import random
@@ -376,10 +377,13 @@ async def _burn_subtitles_pillow(
         except Exception as exc:
             logger.debug("Frame composite error %s: %s", fname, exc)
 
-    # Run compositing in a thread pool (Pillow is CPU-bound)
-    await asyncio.to_thread(
-        lambda: [_composite_frame(f) for f in frame_files]
-    )
+    # Run compositing in a thread pool (Pillow is CPU-bound) — parallel across all cores
+    loop = asyncio.get_event_loop()
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        await loop.run_in_executor(
+            pool,
+            lambda: list(pool.map(_composite_frame, frame_files)),
+        )
 
     # 3. Re-encode frames + original audio, force portrait dimensions
     ok = await _run_async(
@@ -1368,23 +1372,27 @@ async def _assemble_video(
 
     seg_dur = audio_dur / len(all_media)       # equal time per media item
 
-    # ── Step 1: build segments ─────────────────────────────────────────────
+    # ── Step 1: build segments (parallel) ────────────────────────────────
     # Article clips are always the first n_article_clips entries in `clips`.
     # Track which media indices correspond to article clips for skip logic.
     article_clip_set = set(clips[:n_article_clips])
 
-    segments: list[str] = []
-    for i, (media, img_flag) in enumerate(zip(all_media, is_image)):
+    async def _build_segment(i, media, img_flag):
         seg_path = os.path.join(workdir, f"seg_{i:03d}.mp4")
         if img_flag:
             ok = await asyncio.to_thread(_make_image_segment, media, seg_dur, seg_path)
         else:
             skip = YT_CLIP_SKIP if media in article_clip_set else 0.0
             ok = await asyncio.to_thread(_make_video_segment, media, seg_dur, seg_path, skip)
-        if ok:
-            segments.append(seg_path)
-        else:
-            logger.warning("Skipping failed segment %d: %s", i, media)
+        return seg_path if ok else None
+
+    seg_results = await asyncio.gather(
+        *[_build_segment(i, media, img_flag) for i, (media, img_flag) in enumerate(zip(all_media, is_image))]
+    )
+    segments = [p for p in seg_results if p is not None]
+    for i, p in enumerate(seg_results):
+        if p is None:
+            logger.warning("Skipping failed segment %d", i)
 
     if not segments:
         logger.error("All segments failed — cannot build video")

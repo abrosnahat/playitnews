@@ -138,18 +138,28 @@ async def _send_media_post(
     LIMIT = 1024
     FOOTER = f"\n\n{footer}"
 
-    # Extract YouTube URLs from the text so they survive AI shortening
-    yt_pattern = re.compile(r'\nhttps?://(?:www\.)?youtube\.com/watch\S*', re.MULTILINE)
+    # Extract YouTube/VK URLs from the text so they survive truncation
+    yt_pattern = re.compile(r'\nhttps?://(?:www\.)?(?:youtube\.com/watch|vk\.com/video)\S*', re.MULTILINE)
     yt_links = "".join(yt_pattern.findall(text.rstrip()))
     body = yt_pattern.sub("", text.rstrip()).rstrip()
 
-    suffix = yt_links + FOOTER  # e.g. \nhttps://youtu...\nhttps://youtu...\n\n@playitnews
+    suffix = yt_links + FOOTER  # e.g. \nhttps://youtu...\n\n@playitnews
 
-    # If body + suffix exceeds the caption limit, ask AI to rewrite shorter
-    if len(body) + len(suffix) > LIMIT:
-        body = await shorten_post(body, target_chars=LIMIT - len(suffix))
+    # Hard-truncate body to fit the caption limit (Telegram = 1024 chars for media captions)
+    max_body = LIMIT - len(suffix)
+    if len(body) > max_body:
+        body = body[:max_body].rstrip()
+        # Don't cut mid-tag — strip any partial opening tag at the end
+        last_open = body.rfind("<")
+        if last_open != -1 and ">" not in body[last_open:]:
+            body = body[:last_open].rstrip()
+        # Close any open <b>/<i> tags
+        for tag in ("i", "b"):
+            opens  = body.count(f"<{tag}>")
+            closes = body.count(f"</{tag}>")
+            body += f"</{tag}>" * max(0, opens - closes)
 
-    text = body.rstrip() + suffix
+    text = body + suffix
     text = _sanitize_telegram_html(text)
     caption = text[:LIMIT]
     # Fallback plain text (all HTML tags stripped) used if Telegram rejects the HTML
@@ -374,9 +384,10 @@ async def handle_create_video(update: Update, context: ContextTypes.DEFAULT_TYPE
         text=f"Generating EN + RU videos for post #{post_id}...\nStep 1/4: Writing scripts",
     )
 
-    # 1. Generate both scripts in parallel
+    # 1. Generate both scripts in parallel (translate title to EN first for the EN script)
+    en_article_title = await ai_adapter.translate_title_to_english(post["article_title"])
     en_script, ru_script = await asyncio.gather(
-        generate_video_script(post_text=post["post_text"], article_title=post["article_title"]),
+        generate_video_script(post_text=post["post_text"], article_title=en_article_title),
         generate_video_script_ru(post_text=post.get("ru_post_text") or post["post_text"], article_title=post["article_title"]),
     )
 
@@ -538,8 +549,9 @@ async def _create_single_video(
     )
 
     if lang == "en":
+        en_article_title = await ai_adapter.translate_title_to_english(post["article_title"])
         script = await generate_video_script(
-            post_text=post["post_text"], article_title=post["article_title"]
+            post_text=post["post_text"], article_title=en_article_title
         )
         fallback = re.sub(r'<[^>]+>', '', post["post_text"][:350]).strip()
     else:
