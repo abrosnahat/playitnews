@@ -29,19 +29,13 @@ import aiohttp
 import certifi
 
 import scraper as _scraper
-from config import PIXABAY_API_KEY, VIDEOS_DIR
+from config import PIXABAY_API_KEY, VIDEOS_DIR, YT_CLIP_DURATION, YT_CLIP_SKIP, YT_MAX_CLIPS, YT_MAX_FILESIZE
 
 # Directory with royalty-free background music tracks (mp3/wav/flac/ogg/m4a)
 MUSIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music")
 
 # Use certifi CA bundle — same fix as scraper.py prevents SSL errors on macOS
 SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
-
-# Clip settings for YouTube footage
-YT_CLIP_DURATION = 8       # seconds to cut from each YouTube video
-YT_CLIP_SKIP     = 15      # skip first N seconds to avoid intros/title cards
-YT_MAX_CLIPS     = 5       # max clips to download
-YT_MAX_FILESIZE  = 50      # MB per clip (yt-dlp limit)
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +77,7 @@ def _run(args: list[str], cwd: str | None = None, timeout: int = 120) -> bool:
         return False
 
 
-async def _run_async(args: list[str], cwd: str | None = None, timeout: int = 120) -> bool:
+async def _run_async(args: list[str], cwd: str | None = None, timeout: int = 160) -> bool:
     """Async wrapper for _run (runs in thread pool to not block the event loop)."""
     return await asyncio.to_thread(_run, args, cwd, timeout)
 

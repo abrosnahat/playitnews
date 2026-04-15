@@ -19,6 +19,7 @@ from config import (
     CHECK_INTERVAL_MINUTES,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_ADMIN_CHAT_ID,
+    setup_dirs,
 )
 from scraper import download_images, download_videos, get_latest_article_links, scrape_article
 
@@ -191,6 +192,7 @@ def validate_config() -> None:
 
 def main() -> None:
     validate_config()
+    setup_dirs()
     db.init_db()
     logger.info("База данных инициализирована")
 

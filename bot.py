@@ -28,7 +28,7 @@ from telegram.error import TelegramError, TimedOut, BadRequest
 
 import database as db
 from config import TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_CHANNEL_ID, TELEGRAM_SECOND_CHANNEL_ID
-from ai_adapter import shorten_post, generate_video_script, generate_video_script_ru
+from ai_adapter import shorten_post, generate_video_script
 import ai_adapter
 import video_generator
 import instagram_publisher
@@ -248,11 +248,6 @@ async def _send_media_post(
     )
 
 
-async def _send_preview_with_images(bot: Bot, chat_id, text: str, image_paths: list[str]) -> None:
-    """Backwards-compat wrapper."""
-    await _send_media_post(bot, chat_id, text, image_paths)
-
-
 # ---------------------------------------------------------------------------
 # Media cleanup
 # ---------------------------------------------------------------------------
@@ -266,6 +261,46 @@ def _cleanup_media_files(image_paths: list[str], video_paths: list[str]) -> None
                 logger.debug("Удалён медиафайл: %s", path)
         except OSError as exc:
             logger.warning("Не удалось удалить файл %s: %s", path, exc)
+
+
+async def _send_video_to_admin(bot: Bot, path: str | None, label: str, post_id: int) -> None:
+    """Send a generated video file to the admin chat.
+    Falls back to send_document if send_video is rejected by Telegram."""
+    if not path or not os.path.exists(path):
+        await bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=f"{label} video failed.")
+        return
+    file_size = os.path.getsize(path)
+    if file_size > 50 * 1024 * 1024:
+        await bot.send_message(
+            chat_id=TELEGRAM_ADMIN_CHAT_ID,
+            text=f"{label} video too large ({file_size // (1024 * 1024)} MB > 50 MB).\nSaved at: {path}",
+        )
+        return
+    try:
+        w, h = _probe_video_dims(path)
+        with open(path, "rb") as vf:
+            await bot.send_video(
+                chat_id=TELEGRAM_ADMIN_CHAT_ID, video=vf,
+                caption=f"{label} video for post #{post_id}",
+                width=w or None, height=h or None,
+                supports_streaming=True, write_timeout=300, read_timeout=120,
+            )
+    except TelegramError as exc:
+        logger.warning("send_video failed (%s), falling back to send_document", exc)
+        try:
+            with open(path, "rb") as vf:
+                await bot.send_document(
+                    chat_id=TELEGRAM_ADMIN_CHAT_ID, document=vf,
+                    filename=os.path.basename(path),
+                    caption=f"{label} video for post #{post_id}",
+                    write_timeout=300, read_timeout=120,
+                )
+        except TelegramError as exc2:
+            logger.error("Failed to send %s video for post #%d: %s", label, post_id, exc2)
+            await bot.send_message(
+                chat_id=TELEGRAM_ADMIN_CHAT_ID,
+                text=f"Could not send {label} video: {exc2}",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -314,11 +349,6 @@ async def publish_post(bot: Bot, post_id: int) -> bool:
         return False
 
 
-async def _send_with_images(bot: Bot, text: str, image_paths: list[str]) -> None:
-    """Backwards-compat wrapper."""
-    await _send_media_post(bot, TELEGRAM_CHANNEL_ID, text, image_paths)
-
-
 # ---------------------------------------------------------------------------
 # Callback query handlers
 # ---------------------------------------------------------------------------
@@ -326,7 +356,7 @@ async def _send_with_images(bot: Bot, text: str, image_paths: list[str]) -> None
 async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    post_id = int(query.data.split(":")[1])
+    post_id = int(query.data.split(":", 1)[1])
 
     post = db.get_scheduled_post(post_id)
     if not post or post["status"] != "pending":
@@ -336,13 +366,10 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.edit_message_text(f"Post #{post_id} approved. Publishing now...")
     await publish_post(bot=context.bot, post_id=post_id)
 
-    create_video_keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🎬 Create video (EN+RU)", callback_data=f"create_video:{post_id}"),
-    ]])
     await context.bot.send_message(
         chat_id=TELEGRAM_ADMIN_CHAT_ID,
         text=f"Post #{post_id} published. Generate a Reels/Shorts video?",
-        reply_markup=create_video_keyboard,
+        reply_markup=_build_video_keyboard(post_id),
     )
 
 
@@ -394,7 +421,7 @@ async def handle_create_video(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Generate EN and RU Reels/Shorts videos simultaneously."""
     query = update.callback_query
     await query.answer("Starting video generation...")
-    post_id = int(query.data.split(":")[1])
+    post_id = int(query.data.split(":", 1)[1])
 
     post = db.get_scheduled_post(post_id)
     if not post:
@@ -409,8 +436,8 @@ async def handle_create_video(update: Update, context: ContextTypes.DEFAULT_TYPE
     # 1. Generate both scripts in parallel (translate title to EN first for the EN script)
     en_article_title = await ai_adapter.translate_title_to_english(post["article_title"])
     en_script, ru_script = await asyncio.gather(
-        generate_video_script(post_text=post["post_text"], article_title=en_article_title),
-        generate_video_script_ru(post_text=post.get("ru_post_text") or post["post_text"], article_title=post["article_title"]),
+        generate_video_script(post_text=post["post_text"], article_title=en_article_title, lang="en"),
+        generate_video_script(post_text=post.get("ru_post_text") or post["post_text"], article_title=post["article_title"], lang="ru"),
     )
 
     # Fallback if AI returned empty or too-short scripts (< 20 words = model failure)
@@ -480,47 +507,8 @@ async def handle_create_video(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text="Step 4/4: Uploading videos to Telegram...")
 
-    async def _send_video(path: str | None, label: str, script: str) -> None:
-        if not path or not os.path.exists(path):
-            await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=f"{label} video failed.")
-            return
-        file_size = os.path.getsize(path)
-        if file_size > 50 * 1024 * 1024:
-            await context.bot.send_message(
-                chat_id=TELEGRAM_ADMIN_CHAT_ID,
-                text=f"{label} video too large ({file_size // (1024*1024)} MB > 50 MB).\nSaved at: {path}",
-            )
-            return
-        try:
-            w, h = _probe_video_dims(path)
-            with open(path, "rb") as vf:
-                await context.bot.send_video(
-                    chat_id=TELEGRAM_ADMIN_CHAT_ID,
-                    video=vf,
-                    caption=f"{label} video for post #{post_id}",
-                    width=w or None, height=h or None,
-                    supports_streaming=True,
-                    write_timeout=300,
-                    read_timeout=120,
-                )
-        except TelegramError as exc:
-            logger.warning("send_video failed (%s), falling back to send_document", exc)
-            try:
-                with open(path, "rb") as vf:
-                    await context.bot.send_document(
-                        chat_id=TELEGRAM_ADMIN_CHAT_ID,
-                        document=vf,
-                        filename=os.path.basename(path),
-                        caption=f"{label} video for post #{post_id}",
-                        write_timeout=300,
-                        read_timeout=120,
-                    )
-            except TelegramError as exc2:
-                logger.error("Failed to send %s video for post #%d: %s", label, post_id, exc2)
-                await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=f"Could not send {label} video: {exc2}")
-
-    await _send_video(en_path, "🇬🇧 EN", en_script)
-    await _send_video(ru_path, "🇷🇺 RU", ru_script)
+    await _send_video_to_admin(context.bot, en_path, "🇬🇧 EN", post_id)
+    await _send_video_to_admin(context.bot, ru_path, "🇷🇺 RU", post_id)
 
     # Persist EN video path for publish buttons
     final_path = en_path or ru_path
@@ -541,7 +529,7 @@ async def handle_create_video_en(update: Update, context: ContextTypes.DEFAULT_T
     """Regenerate EN video only."""
     query = update.callback_query
     await query.answer("Generating EN video...")
-    post_id = int(query.data.split(":")[1])
+    post_id = int(query.data.split(":", 1)[1])
     await _create_single_video(context, post_id, lang="en")
 
 
@@ -549,7 +537,7 @@ async def handle_create_video_ru(update: Update, context: ContextTypes.DEFAULT_T
     """Regenerate RU video only."""
     query = update.callback_query
     await query.answer("Generating RU video...")
-    post_id = int(query.data.split(":")[1])
+    post_id = int(query.data.split(":", 1)[1])
     await _create_single_video(context, post_id, lang="ru")
 
 
@@ -573,13 +561,14 @@ async def _create_single_video(
     if lang == "en":
         en_article_title = await ai_adapter.translate_title_to_english(post["article_title"])
         script = await generate_video_script(
-            post_text=post["post_text"], article_title=en_article_title
+            post_text=post["post_text"], article_title=en_article_title, lang="en"
         )
         fallback = re.sub(r'<[^>]+>', '', post["post_text"][:350]).strip()
     else:
-        script = await generate_video_script_ru(
+        script = await generate_video_script(
             post_text=post.get("ru_post_text") or post["post_text"],
             article_title=post["article_title"],
+            lang="ru",
         )
         fallback = re.sub(r'<[^>]+>', '', (post.get("ru_post_text") or post["post_text"])[:350]).strip()
 
@@ -632,38 +621,7 @@ async def _create_single_video(
 
     await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text="Step 4/4: Uploading video to Telegram...")
 
-    file_size = os.path.getsize(path)
-    if file_size > 50 * 1024 * 1024:
-        await context.bot.send_message(
-            chat_id=TELEGRAM_ADMIN_CHAT_ID,
-            text=f"{label} video too large ({file_size // (1024*1024)} MB > 50 MB).\nSaved at: {path}",
-        )
-    else:
-        try:
-            w, h = _probe_video_dims(path)
-            with open(path, "rb") as vf:
-                await context.bot.send_video(
-                    chat_id=TELEGRAM_ADMIN_CHAT_ID, video=vf,
-                    caption=f"{label} video for post #{post_id}",
-                    width=w or None, height=h or None,
-                    supports_streaming=True, write_timeout=300, read_timeout=120,
-                )
-        except TelegramError as exc:
-            logger.warning("send_video failed (%s), falling back to send_document", exc)
-            try:
-                with open(path, "rb") as vf:
-                    await context.bot.send_document(
-                        chat_id=TELEGRAM_ADMIN_CHAT_ID, document=vf,
-                        filename=os.path.basename(path),
-                        caption=f"{label} video for post #{post_id}",
-                        write_timeout=300, read_timeout=120,
-                    )
-            except TelegramError as exc2:
-                logger.error("Failed to send %s video for post #%d: %s", label, post_id, exc2)
-                await context.bot.send_message(
-                    chat_id=TELEGRAM_ADMIN_CHAT_ID,
-                    text=f"Could not send {label} video: {exc2}",
-                )
+    await _send_video_to_admin(context.bot, path, label, post_id)
 
     # Persist path and caption
     if lang == "en":
@@ -685,7 +643,7 @@ async def handle_post_instagram_ru(update: Update, context: ContextTypes.DEFAULT
     from config import INSTAGRAM_USER_ID_RU, INSTAGRAM_ACCESS_TOKEN_RU
     query = update.callback_query
     await query.answer("Uploading to Instagram RU…")
-    post_id = int(query.data.split(":")[1])
+    post_id = int(query.data.split(":", 1)[1])
 
     video_path = db.get_generated_video_path_ru(post_id)
     post = db.get_scheduled_post(post_id)
@@ -741,7 +699,7 @@ async def handle_post_instagram(update: Update, context: ContextTypes.DEFAULT_TY
     """Upload the generated video to Instagram as a Reel."""
     query = update.callback_query
     await query.answer("Uploading to Instagram…")
-    post_id = int(query.data.split(":")[1])
+    post_id = int(query.data.split(":", 1)[1])
 
     video_path = db.get_generated_video_path(post_id)
     post       = db.get_scheduled_post(post_id)
@@ -803,7 +761,7 @@ async def handle_post_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Upload the generated video to YouTube Shorts."""
     query = update.callback_query
     await query.answer("Uploading to YouTube…")
-    post_id = int(query.data.split(":")[1])
+    post_id = int(query.data.split(":", 1)[1])
 
     video_path = db.get_generated_video_path(post_id)
     post = db.get_scheduled_post(post_id)
@@ -873,7 +831,7 @@ async def handle_post_youtube_ru(update: Update, context: ContextTypes.DEFAULT_T
     """Upload the generated RU video to the Russian YouTube channel."""
     query = update.callback_query
     await query.answer("Uploading to YouTube RU…")
-    post_id = int(query.data.split(":")[1])
+    post_id = int(query.data.split(":", 1)[1])
 
     video_path = db.get_generated_video_path_ru(post_id)
     post = db.get_scheduled_post(post_id)
@@ -940,7 +898,7 @@ async def handle_post_all(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Upload the generated EN video to all configured EN platforms simultaneously."""
     query = update.callback_query
     await query.answer("Uploading to all platforms…")
-    post_id = int(query.data.split(":")[1])
+    post_id = int(query.data.split(":", 1)[1])
 
     video_path = db.get_generated_video_path(post_id)
     post = db.get_scheduled_post(post_id)
@@ -1025,7 +983,7 @@ async def handle_post_all_ru(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Upload the generated RU video to all configured RU platforms simultaneously."""
     query = update.callback_query
     await query.answer("Uploading RU to all platforms…")
-    post_id = int(query.data.split(":")[1])
+    post_id = int(query.data.split(":", 1)[1])
 
     video_path = db.get_generated_video_path_ru(post_id)
     post = db.get_scheduled_post(post_id)
@@ -1110,7 +1068,7 @@ async def handle_post_all_combined(update: Update, context: ContextTypes.DEFAULT
     """Upload EN video to EN platforms and RU video to RU platforms simultaneously."""
     query = update.callback_query
     await query.answer("Uploading to all EN+RU platforms…")
-    post_id = int(query.data.split(":")[1])
+    post_id = int(query.data.split(":", 1)[1])
 
     video_path_en = db.get_generated_video_path(post_id)
     video_path_ru = db.get_generated_video_path_ru(post_id)
@@ -1238,7 +1196,7 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.answer()
     except BadRequest:
         pass
-    post_id = int(query.data.split(":")[1])
+    post_id = int(query.data.split(":", 1)[1])
 
     post = db.get_scheduled_post(post_id)
     db.update_post_status(post_id, "cancelled")

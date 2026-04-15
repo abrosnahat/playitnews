@@ -126,31 +126,13 @@ def _upload_blocking(
     logger.info("YouTube upload complete: https://youtu.be/%s", video_id)
 
     # Set custom thumbnail if provided (requires a verified YouTube channel).
-    # YouTube Shorts get re-processed ~30-90s after upload which resets the thumbnail,
-    # so we set it immediately and then retry after a delay.
-    def _set_thumbnail(vid: str, path: str) -> None:
-        youtube.thumbnails().set(
-            videoId=vid,
-            media_body=MediaFileUpload(path, mimetype="image/jpeg"),
-        ).execute()
-
+    # YouTube Shorts get re-processed ~30-90s after upload which resets the thumbnail.
+    # A single attempt after 120s avoids both the reset and the rate-limit from double uploads.
     if thumbnail_path and os.path.exists(thumbnail_path):
-        # First attempt — immediately after upload
-        try:
-            _set_thumbnail(video_id, thumbnail_path)
-            logger.info("YouTube thumbnail set (attempt 1) for %s", video_id)
-        except Exception as exc:
-            logger.error(
-                "YouTube thumbnail set FAILED (attempt 1) for video %s: %s\n"
-                "Fix: verify your channel at https://www.youtube.com/verify\n"
-                "Then regenerate tokens: python get_youtube_token.py",
-                video_id, exc,
-            )
+        import threading, time
 
-        # Second attempt — after 90s to survive Shorts re-processing
-        def _delayed_thumbnail_set(vid: str, path: str, delay: int = 90) -> None:
-            import time
-            logger.info("YouTube thumbnail retry in %ds for %s…", delay, vid)
+        def _delayed_thumbnail_set(vid: str, path: str, delay: int = 120) -> None:
+            logger.info("YouTube thumbnail will be set in %ds for %s…", delay, vid)
             time.sleep(delay)
             try:
                 yt2 = _build_youtube_client(token_file)
@@ -158,11 +140,15 @@ def _upload_blocking(
                     videoId=vid,
                     media_body=MediaFileUpload(path, mimetype="image/jpeg"),
                 ).execute()
-                logger.info("YouTube thumbnail set (retry after %ds) for %s", delay, vid)
-            except Exception as exc2:
-                logger.error("YouTube thumbnail retry FAILED for %s: %s", vid, exc2)
+                logger.info("YouTube thumbnail set for %s", vid)
+            except Exception as exc:
+                logger.error(
+                    "YouTube thumbnail set FAILED for video %s: %s\n"
+                    "Fix: verify your channel at https://www.youtube.com/verify\n"
+                    "Then regenerate tokens: python get_youtube_token.py",
+                    vid, exc,
+                )
 
-        import threading
         threading.Thread(
             target=_delayed_thumbnail_set,
             args=(video_id, thumbnail_path),

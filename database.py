@@ -33,31 +33,19 @@ def init_db() -> None:
                 created_at TEXT DEFAULT (datetime('now'))
             );
         """)
-        # Migration: add video_paths column to existing databases
-        try:
-            conn.execute("ALTER TABLE scheduled_posts ADD COLUMN video_paths TEXT DEFAULT '[]'")
-        except Exception:
-            pass  # column already exists
-        # Migration: add generated_video_path column
-        try:
-            conn.execute("ALTER TABLE scheduled_posts ADD COLUMN generated_video_path TEXT DEFAULT NULL")
-        except Exception:
-            pass  # column already exists
-        # Migration: add yt_skip_count column
-        try:
-            conn.execute("ALTER TABLE scheduled_posts ADD COLUMN yt_skip_count INTEGER DEFAULT 0")
-        except Exception:
-            pass  # column already exists
-        # Migration: add ru_post_text column
-        try:
-            conn.execute("ALTER TABLE scheduled_posts ADD COLUMN ru_post_text TEXT DEFAULT NULL")
-        except Exception:
-            pass  # column already exists
-        # Migration: add generated_video_path_ru column
-        try:
-            conn.execute("ALTER TABLE scheduled_posts ADD COLUMN generated_video_path_ru TEXT DEFAULT NULL")
-        except Exception:
-            pass  # column already exists
+        # Migrations: add columns that may not exist in older databases
+        _migrations = [
+            "ALTER TABLE scheduled_posts ADD COLUMN video_paths TEXT DEFAULT '[]'",
+            "ALTER TABLE scheduled_posts ADD COLUMN generated_video_path TEXT DEFAULT NULL",
+            "ALTER TABLE scheduled_posts ADD COLUMN yt_skip_count INTEGER DEFAULT 0",
+            "ALTER TABLE scheduled_posts ADD COLUMN ru_post_text TEXT DEFAULT NULL",
+            "ALTER TABLE scheduled_posts ADD COLUMN generated_video_path_ru TEXT DEFAULT NULL",
+        ]
+        for _sql in _migrations:
+            try:
+                conn.execute(_sql)
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
 
 # --- seen articles ---
@@ -189,19 +177,21 @@ def set_notification_message_id(post_id: int, message_id: int) -> None:
         )
 
 
+def _row_to_post(row) -> dict:
+    """Convert a sqlite3.Row from scheduled_posts to a plain dict with deserialized JSON fields."""
+    d = dict(row)
+    d["image_paths"] = json.loads(d.get("image_paths") or "[]")
+    d["video_paths"] = json.loads(d.get("video_paths") or "[]")
+    return d
+
+
 def get_all_pending_posts() -> list[dict]:
     """Return all posts with status 'pending'."""
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM scheduled_posts WHERE status = 'pending' ORDER BY id"
         ).fetchall()
-        result = []
-        for row in rows:
-            d = dict(row)
-            d["image_paths"] = json.loads(d["image_paths"])
-            d["video_paths"] = json.loads(d.get("video_paths") or "[]")
-            result.append(d)
-        return result
+        return [_row_to_post(row) for row in rows]
 
 
 def get_pending_posts_due(now: datetime) -> list[dict]:
@@ -212,9 +202,4 @@ def get_pending_posts_due(now: datetime) -> list[dict]:
                WHERE status = 'pending' AND scheduled_at <= ?""",
             (now.isoformat(),),
         ).fetchall()
-        result = []
-        for row in rows:
-            d = dict(row)
-            d["image_paths"] = json.loads(d["image_paths"])
-            result.append(d)
-        return result
+        return [_row_to_post(row) for row in rows]
