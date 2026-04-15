@@ -401,6 +401,55 @@ async def translate_title_to_english(article_title: str) -> str:
     return article_title
 
 
+async def generate_thumbnail_hook(article_title: str, lang: str = "ru") -> str:
+    """
+    Generate a short, punchy, clickable thumbnail caption (2–4 words, ALL CAPS).
+    lang: "ru" → Russian output, "en" → English output.
+    Falls back to the original title on failure.
+    """
+    lang_instruction = (
+        "Write the caption in RUSSIAN only. Use Cyrillic letters."
+        if lang == "ru" else
+        "Write the caption in ENGLISH only."
+    )
+    user_message = (
+        "You are writing text for a gaming news video thumbnail.\n"
+        "Create a SHORT, PUNCHY caption (2–3 words) that creates curiosity or urgency "
+        "and fits the topic of the news headline below.\n"
+        "Rules:\n"
+        "- Maximum 4 words\n"
+        f"- {lang_instruction}\n"
+        "- No punctuation except ! or ?\n"
+        "- Write in normal case (the system will uppercase it automatically)\n"
+        "- Return ONLY the caption text, nothing else\n\n"
+        f"Headline: {article_title}\n\n"
+        "Caption:"
+    )
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [{"role": "user", "content": user_message}],
+        "stream": False,
+        "options": {"num_predict": 20},
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+                hook = data["message"]["content"].strip().strip('"\'').upper()
+                # Validate: non-empty, reasonably short, no line-breaks
+                if hook and len(hook) <= 60 and "\n" not in hook:
+                    logger.info("Thumbnail hook: '%s' ← '%s'", hook, article_title[:60])
+                    return hook
+    except Exception as exc:
+        logger.warning("generate_thumbnail_hook failed: %s", exc)
+    return article_title
+
+
 async def generate_video_script(post_text: str, article_title: str) -> str:
     """
     Generate a spoken narration script for TikTok/Reels/Shorts.

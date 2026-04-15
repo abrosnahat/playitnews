@@ -229,6 +229,7 @@ async def _ig_create_container(
     caption: str,
     user_id: str,
     access_token: str,
+    cover_url: str | None = None,
 ) -> str:
     """Step 1: Create a REELS media container. Returns container ID."""
     url = f"{GRAPH_API_BASE}/{user_id}/media"
@@ -238,6 +239,8 @@ async def _ig_create_container(
         "caption": caption,
         "access_token": access_token,
     }
+    if cover_url:
+        payload["cover_url"] = cover_url
     async with session.post(url, json=payload) as resp:
         data = await resp.json()
         if "error" in data:
@@ -318,11 +321,13 @@ async def publish_reel(
     *,
     user_id: str | None = None,
     access_token: str | None = None,
+    cover_image_path: str | None = None,
 ) -> str:
     """
     Upload *video_path*, post as Instagram Reel, then clean up.
     Pass *user_id* / *access_token* to publish to a non-default account;
     otherwise defaults to INSTAGRAM_USER_ID / INSTAGRAM_ACCESS_TOKEN.
+    Pass *cover_image_path* to set a custom Reels cover (thumbnail).
     Returns the published media ID on success.
     Raises RuntimeError / TimeoutError on failure.
     """
@@ -337,13 +342,22 @@ async def publish_reel(
     # 1. Upload video to temporary public host (once — reused across retries)
     video_url = await _upload_video(video_path)
 
+    # 1b. Upload cover image if provided
+    cover_url: str | None = None
+    if cover_image_path and os.path.exists(cover_image_path):
+        try:
+            cover_url = await _upload_video(cover_image_path)  # same backends work for images
+            logger.info("Cover image uploaded: %s", cover_url)
+        except Exception as exc:
+            logger.warning("Cover image upload failed (continuing without cover): %s", exc)
+
     last_exc: Exception = RuntimeError("No attempts made")
     for attempt in range(1, 4):
         async with _aiohttp_session() as session:
             try:
                 # 2. Create container
                 logger.info("Creating Instagram container (attempt %d/3)...", attempt)
-                container_id = await _ig_create_container(session, video_url, caption, uid, tok)
+                container_id = await _ig_create_container(session, video_url, caption, uid, tok, cover_url)
                 logger.info("Container ID: %s — waiting for processing...", container_id)
 
                 # 3. Wait for processing

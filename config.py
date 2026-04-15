@@ -11,7 +11,7 @@ TELEGRAM_ADMIN_CHAT_ID: int = int(os.getenv("TELEGRAM_ADMIN_CHAT_ID", "0"))
 
 # Ollama (local)
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.2")
+OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "gemma4:e4b")
 
 # Monitoring
 CHECK_INTERVAL_MINUTES: int = int(os.getenv("CHECK_INTERVAL_MINUTES", "30"))

@@ -16,7 +16,10 @@ import sys
 
 SECRETS_FILE = os.getenv("YOUTUBE_CLIENT_SECRETS", os.path.join(os.path.dirname(__file__), "client_secrets.json"))
 TOKEN_FILE   = os.getenv("YOUTUBE_TOKEN_FILE",    os.path.join(os.path.dirname(__file__), "youtube_token.json"))
-SCOPES       = ["https://www.googleapis.com/auth/youtube.upload"]
+SCOPES       = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.force-ssl",
+]
 
 
 def main():
