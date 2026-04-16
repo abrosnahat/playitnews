@@ -65,7 +65,7 @@ BLOCKED_URL_CATEGORIES: list[str] = [
 YT_CLIP_DURATION: int = int(os.getenv("YT_CLIP_DURATION", "8"))    # seconds per clip
 YT_CLIP_SKIP: int = int(os.getenv("YT_CLIP_SKIP", "15"))            # skip intro seconds
 YT_MAX_CLIPS: int = int(os.getenv("YT_MAX_CLIPS", "5"))             # max clips to download
-YT_MAX_FILESIZE: int = int(os.getenv("YT_MAX_FILESIZE", "50"))      # MB per clip (yt-dlp limit)
+YT_MAX_FILESIZE: int = int(os.getenv("YT_MAX_FILESIZE", "1500"))      # MB per clip (yt-dlp limit)
 
 
 def setup_dirs() -> None:

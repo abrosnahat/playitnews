@@ -81,7 +81,6 @@ def _upload_blocking(
     description: str,
     tags: list[str],
     token_file: str = YOUTUBE_TOKEN_FILE,
-    thumbnail_path: str | None = None,
 ) -> str:
     """Upload video to YouTube. Returns video ID. Blocking — run in thread."""
     from googleapiclient.http import MediaFileUpload
@@ -124,40 +123,6 @@ def _upload_blocking(
 
     video_id = response["id"]
     logger.info("YouTube upload complete: https://youtu.be/%s", video_id)
-
-    # Set custom thumbnail if provided (requires a verified YouTube channel).
-    # YouTube Shorts get re-processed ~30-90s after upload which resets the thumbnail.
-    # A single attempt after 120s avoids both the reset and the rate-limit from double uploads.
-    if thumbnail_path and os.path.exists(thumbnail_path):
-        import threading, time
-
-        def _delayed_thumbnail_set(vid: str, path: str, delay: int = 120) -> None:
-            logger.info("YouTube thumbnail will be set in %ds for %s…", delay, vid)
-            time.sleep(delay)
-            try:
-                yt2 = _build_youtube_client(token_file)
-                yt2.thumbnails().set(
-                    videoId=vid,
-                    media_body=MediaFileUpload(path, mimetype="image/jpeg"),
-                ).execute()
-                logger.info("YouTube thumbnail set for %s", vid)
-            except Exception as exc:
-                logger.error(
-                    "YouTube thumbnail set FAILED for video %s: %s\n"
-                    "Fix: verify your channel at https://www.youtube.com/verify\n"
-                    "Then regenerate tokens: python get_youtube_token.py",
-                    vid, exc,
-                )
-
-        threading.Thread(
-            target=_delayed_thumbnail_set,
-            args=(video_id, thumbnail_path),
-            daemon=True,
-        ).start()
-
-    elif thumbnail_path:
-        logger.warning("Thumbnail path does not exist, skipping: %s", thumbnail_path)
-
     return video_id
 
 
@@ -167,7 +132,6 @@ async def upload_short(
     description: str,
     tags: list[str] | None = None,
     token_file: str = YOUTUBE_TOKEN_FILE,
-    thumbnail_path: str | None = None,
 ) -> str:
     """
     Upload *video_path* as a YouTube Short.
@@ -179,7 +143,7 @@ async def upload_short(
             f"YouTube token not found: {token_file}. Run:  python get_youtube_token.py"
         )
     return await asyncio.to_thread(
-        _upload_blocking, video_path, title, description, tags or [], token_file, thumbnail_path
+        _upload_blocking, video_path, title, description, tags or [], token_file
     )
 
 
@@ -188,7 +152,6 @@ async def upload_short_ru(
     title: str,
     description: str,
     tags: list[str] | None = None,
-    thumbnail_path: str | None = None,
 ) -> str:
     """Convenience wrapper that uploads to the RU YouTube channel."""
     return await upload_short(
@@ -197,5 +160,4 @@ async def upload_short_ru(
         description=description,
         tags=tags,
         token_file=YOUTUBE_TOKEN_FILE_RU,
-        thumbnail_path=thumbnail_path,
     )

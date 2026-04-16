@@ -10,8 +10,8 @@ import textwrap
 
 logger = logging.getLogger(__name__)
 
-# Thumbnail size: 1080×1920 (9:16) — used for both YouTube Shorts and Instagram Reels
-THUMB_W, THUMB_H = 1080, 1920
+# Thumbnail size: 1080×1920 (9:16) — used for Instagram Reels
+IG_W, IG_H = 1080, 1920
 
 _FONT_CANDIDATES = [
     "/System/Library/Fonts/Supplemental/Impact.ttf",
@@ -172,13 +172,22 @@ def _render_thumbnail(
         return False
 
 
+def generate_instagram_thumbnail(
+    source_image_path: str,
+    title: str,
+    out_path: str,
+) -> bool:
+    """Generate a 1080×1920 thumbnail for Instagram Reels (9:16). Returns True on success."""
+    return _render_thumbnail(source_image_path, title, out_path, IG_W, IG_H)
+
+
 def generate_thumbnail(
     source_image_path: str,
     title: str,
     out_path: str,
 ) -> bool:
-    """Generate a 1080×1920 thumbnail for YouTube Shorts / Instagram Reels. Returns True on success."""
-    return _render_thumbnail(source_image_path, title, out_path, THUMB_W, THUMB_H)
+    """Alias for generate_instagram_thumbnail (1080×1920). Returns True on success."""
+    return _render_thumbnail(source_image_path, title, out_path, IG_W, IG_H)
 
 
 # ---------------------------------------------------------------------------
@@ -231,21 +240,21 @@ if __name__ == "__main__":
     hook_ru = asyncio.run(_ai.generate_thumbnail_hook(title_ru, lang="ru"))
     print(f"RU hook: {hook_ru}")
 
-    # --- RU thumbnail ---
-    out_ru = "/tmp/thumb_test_ru.jpg"
-    if generate_thumbnail(source, hook_ru, out_ru):
-        print(f"RU thumbnail (1080×1920): {out_ru}")
-        subprocess.run(["open", out_ru])
+    # --- RU thumbnail (IG 1080×1920) ---
+    out_ru_ig = "/tmp/thumb_test_ru_ig.jpg"
+    if generate_instagram_thumbnail(source, hook_ru, out_ru_ig):
+        print(f"RU Instagram thumbnail (1080×1920): {out_ru_ig}")
+        subprocess.run(["open", out_ru_ig])
     else:
-        print("RU thumbnail FAILED")
+        print("RU Instagram thumbnail FAILED")
 
     # --- EN thumbnail (only when title_en is available) ---
     if title_en:
         hook_en = asyncio.run(_ai.generate_thumbnail_hook(title_en, lang="en"))
         print(f"EN hook: {hook_en}")
-        out_en = "/tmp/thumb_test_en.jpg"
-        if generate_thumbnail(source, hook_en, out_en):
-            print(f"EN thumbnail (1080×1920): {out_en}")
-            subprocess.run(["open", out_en])
+        out_en_ig = "/tmp/thumb_test_en_ig.jpg"
+        if generate_instagram_thumbnail(source, hook_en, out_en_ig):
+            print(f"EN Instagram thumbnail (1080×1920): {out_en_ig}")
+            subprocess.run(["open", out_en_ig])
         else:
-            print("EN thumbnail FAILED")
+            print("EN Instagram thumbnail FAILED")

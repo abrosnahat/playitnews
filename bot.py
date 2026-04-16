@@ -58,15 +58,19 @@ def _sanitize_telegram_html(text: str) -> str:
     return "".join(result)
 
 # How many YouTube results to skip forward on each regenerate
-YT_SKIP_STEP = 3
+YT_SKIP_STEP = 1
 
 logger = logging.getLogger(__name__)
 
 
-async def _make_thumbnail(post: dict, video_path: str, title: str | None = None, lang: str = "ru") -> str | None:
+async def _make_thumbnail(
+    post: dict,
+    video_path: str,
+    title: str | None = None,
+    lang: str = "ru",
+) -> str | None:
     """
-    Generate a single 1080×1920 thumbnail (used for both YouTube Shorts and Instagram).
-    Pass *title* to override the article_title (e.g. EN translation).
+    Generate a 1080×1920 Instagram thumbnail.
     Uses AI to create a short clickable hook for the thumbnail text.
     Returns the path to the thumbnail JPEG, or None if generation failed.
     """
@@ -76,11 +80,17 @@ async def _make_thumbnail(post: dict, video_path: str, title: str | None = None,
 
     source = image_paths[0]
     raw_title = title or post.get("article_title", "")
+    # If English output is requested but no pre-translated title was supplied,
+    # translate the article title first so the hook generator receives English input.
+    if lang == "en" and not title:
+        translated = await ai_adapter.translate_title_to_english(raw_title)
+        if translated:
+            raw_title = translated
     hook = await ai_adapter.generate_thumbnail_hook(raw_title, lang=lang)
-    base   = os.path.splitext(video_path)[0]
-    out_path = base + "_thumb.jpg"
+    base = os.path.splitext(video_path)[0]
+    out_path = f"{base}_thumb_{lang}.jpg"
 
-    ok = thumbnail_generator.generate_thumbnail(source, hook, out_path)
+    ok = thumbnail_generator.generate_instagram_thumbnail(source, hook, out_path)
     return out_path if ok else None
 
 
@@ -666,7 +676,7 @@ async def handle_post_instagram_ru(update: Update, context: ContextTypes.DEFAULT
         )
         return
 
-    thumb = await _make_thumbnail(post, video_path) if post else None
+    thumb = await _make_thumbnail(post, video_path, lang="ru") if post else None
 
     status_msg = await context.bot.send_message(
         chat_id=TELEGRAM_ADMIN_CHAT_ID,
@@ -797,8 +807,6 @@ async def handle_post_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
         post_text_clean = re.sub(r'<[^>]+>', '', post.get("post_text", ""))
         tags = [h.lstrip("#") for h in re.findall(r'#\w+', post_text_clean)]
 
-    thumb = await _make_thumbnail(post, video_path, title=title, lang="en") if post else None
-
     status_msg = await context.bot.send_message(
         chat_id=TELEGRAM_ADMIN_CHAT_ID,
         text=f"Uploading Short for post #{post_id} to YouTube…",
@@ -810,7 +818,6 @@ async def handle_post_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
             title=title,
             description=desc,
             tags=tags,
-            thumbnail_path=thumb,
         )
         await status_msg.edit_text(
             f"\u2705 YouTube Short published for post #{post_id}\n"
@@ -863,8 +870,6 @@ async def handle_post_youtube_ru(update: Update, context: ContextTypes.DEFAULT_T
         post_text_clean = re.sub(r'<[^>]+>', '', post.get("ru_post_text") or post.get("post_text", ""))
         tags = [h.lstrip("#") for h in re.findall(r'#\w+', post_text_clean)]
 
-    thumb = await _make_thumbnail(post, video_path, title=title, lang="ru") if post else None
-
     status_msg = await context.bot.send_message(
         chat_id=TELEGRAM_ADMIN_CHAT_ID,
         text=f"Uploading RU Short for post #{post_id} to YouTube RU…",
@@ -875,7 +880,6 @@ async def handle_post_youtube_ru(update: Update, context: ContextTypes.DEFAULT_T
             title=title,
             description=desc,
             tags=tags,
-            thumbnail_path=thumb,
         )
         await status_msg.edit_text(
             f"\u2705 YouTube RU Short published for post #{post_id}\n"
@@ -954,7 +958,7 @@ async def handle_post_all(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
     if youtube_publisher.is_configured():
         tasks["YouTube"] = asyncio.create_task(
-            youtube_publisher.upload_short(video_path=video_path, title=yt_title, description=yt_desc, tags=tags, thumbnail_path=thumb)
+            youtube_publisher.upload_short(video_path=video_path, title=yt_title, description=yt_desc, tags=tags)
         )
     results: list[str] = []
     any_err = False
@@ -1037,7 +1041,6 @@ async def handle_post_all_ru(update: Update, context: ContextTypes.DEFAULT_TYPE)
         tasks["YouTube RU"] = asyncio.create_task(
             youtube_publisher.upload_short_ru(
                 video_path=video_path, title=yt_title, description=yt_desc, tags=tags,
-                thumbnail_path=thumb,
             )
         )
 
@@ -1149,7 +1152,7 @@ async def handle_post_all_combined(update: Update, context: ContextTypes.DEFAULT
         )
     if youtube_publisher.is_configured():
         tasks["YouTube"] = asyncio.create_task(
-            youtube_publisher.upload_short(video_path=video_path_en, title=yt_title_en, description=yt_desc_en, tags=tags_en, thumbnail_path=thumb_en)
+            youtube_publisher.upload_short(video_path=video_path_en, title=yt_title_en, description=yt_desc_en, tags=tags_en)
         )
     if instagram_publisher.is_configured_ru():
         tasks["Instagram RU"] = asyncio.create_task(
@@ -1163,7 +1166,6 @@ async def handle_post_all_combined(update: Update, context: ContextTypes.DEFAULT
         tasks["YouTube RU"] = asyncio.create_task(
             youtube_publisher.upload_short_ru(
                 video_path=video_path_ru, title=yt_title_ru, description=yt_desc_ru, tags=tags_ru,
-                thumbnail_path=thumb_ru,
             )
         )
 
