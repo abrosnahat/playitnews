@@ -1,4 +1,5 @@
 python-telegram-bot[job-queue]==21.9
+flask>=3.0.0
 aiohttp>=3.9.0
 certifi>=2024.0.0
 beautifulsoup4>=4.12.0
