@@ -238,20 +238,20 @@ def _extract_pg_embeds(scope) -> list[dict]:
 
 
 async def _fetch_playground_m3u8(session: aiohttp.ClientSession, video_id: str) -> Optional[str]:
-    """Fetch the iframe page for a playground video and return the lowest-quality m3u8 URL."""
+    """Fetch the iframe page for a playground video and return the highest-quality m3u8 URL."""
     iframe_url = f"https://www.playground.ru/video/iframe/{video_id}/"
     html = await fetch(session, iframe_url)
     if not html:
         return None
-    # Extract all m3u8 URLs — last one tends to be the lowest quality (360p)
+    # Extract all m3u8 URLs — first one tends to be the highest quality
     matches = re.findall(r'file:\s*"(https://video\.playground\.ru/[^"]+\.m3u8)"', html)
     if not matches:
         return None
-    # Prefer 360p label if available, otherwise take the last (lowest bitrate)
-    for m in matches:
-        if "m-100" in m:  # 360p
-            return m
-    return matches[-1]
+    # Pick the stream with the highest "m-NNN" bitrate marker; fall back to first match
+    def _bitrate_key(url: str) -> int:
+        m = re.search(r'm-(\d+)', url)
+        return int(m.group(1)) if m else 0
+    return max(matches, key=_bitrate_key)
 
 
 async def download_videos(

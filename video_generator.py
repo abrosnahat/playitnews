@@ -390,7 +390,7 @@ async def _burn_subtitles_pillow(
             "-map", "1:a",
             "-vf", f"scale={VID_W}:{VID_H},setsar=1",
             "-c:v", "libx264",
-            "-crf", "28",
+            "-crf", "20",
             "-preset", "fast",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
@@ -1005,7 +1005,7 @@ async def _fetch_youtube_clips(
         "--no-playlist",
         "--no-warnings",
         "--quiet",
-        "--format", "bestvideo[height=720][ext=mp4]/bestvideo[height=720]/bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]",
+        "--format", "bestvideo[height=1080][ext=mp4]/bestvideo[height=1080]/bestvideo[height<=1080][ext=mp4]/bestvideo[height<=720]",
         "--max-filesize", f"{YT_MAX_FILESIZE}M",
         "--max-downloads", str(count + skip),   # download skip+count, discard first skip
         "--output", os.path.join(clips_dir, "%(autonumber)s.%(ext)s"),
@@ -1049,7 +1049,7 @@ async def _download_full_yt_video(
         ydl_args = [
             "yt-dlp",
             "--no-playlist", "--no-warnings", "--quiet",
-            "--format", "bestvideo[height=720][ext=mp4]/bestvideo[height=720]/bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]",
+            "--format", "bestvideo[height=1080][ext=mp4]/bestvideo[height=1080]/bestvideo[height<=1080][ext=mp4]/bestvideo[height<=720]",
             "--max-filesize", f"{YT_MAX_FILESIZE}M",
             "--output", os.path.join(clips_dir, "source.%(ext)s"),
             url_or_search,
@@ -1060,7 +1060,7 @@ async def _download_full_yt_video(
         ydl_args = [
             "yt-dlp",
             "--no-playlist", "--no-warnings", "--quiet",
-            "--format", "bestvideo[height=720][ext=mp4]/bestvideo[height=720]/bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]",
+            "--format", "bestvideo[height=1080][ext=mp4]/bestvideo[height=1080]/bestvideo[height<=1080][ext=mp4]/bestvideo[height<=720]",
             "--max-filesize", f"{YT_MAX_FILESIZE}M",
             "--max-downloads", str(skip + 1),
             "--output", os.path.join(clips_dir, "%(autonumber)s.%(ext)s"),
