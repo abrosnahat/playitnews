@@ -1031,6 +1031,126 @@ async def _fetch_youtube_clips(
     return result
 
 
+async def _download_full_yt_video(
+    url_or_search: str,
+    workdir: str,
+    skip: int = 0,
+    is_url: bool = False,
+) -> str | None:
+    """
+    Download a single full YouTube video (no time slicing).
+    For search queries, picks the (skip+1)-th result for regeneration diversity.
+    Returns local .mp4/.mkv path or None on failure.
+    """
+    clips_dir = os.path.join(workdir, "yt_clips")
+    os.makedirs(clips_dir, exist_ok=True)
+
+    if is_url:
+        ydl_args = [
+            "yt-dlp",
+            "--no-playlist", "--no-warnings", "--quiet",
+            "--format", "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]",
+            "--max-filesize", f"{YT_MAX_FILESIZE}M",
+            "--output", os.path.join(clips_dir, "source.%(ext)s"),
+            url_or_search,
+        ]
+    else:
+        # Download skip+1 results; the last file (highest autonumber) is the skip-th result.
+        fetch_count = skip + 3  # slight buffer in case some are filtered by max-filesize
+        ydl_args = [
+            "yt-dlp",
+            "--no-playlist", "--no-warnings", "--quiet",
+            "--format", "bestvideo[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]",
+            "--max-filesize", f"{YT_MAX_FILESIZE}M",
+            "--max-downloads", str(skip + 1),
+            "--output", os.path.join(clips_dir, "%(autonumber)s.%(ext)s"),
+            f"ytsearch{fetch_count}:{url_or_search}",
+        ]
+
+    logger.info(
+        "Downloading full YT video: '%s' (is_url=%s, skip=%d)",
+        url_or_search[:80], is_url, skip,
+    )
+    ok = await _run_async(ydl_args, timeout=360)
+    if not ok:
+        logger.warning("yt-dlp finished with error — checking partial downloads")
+
+    all_paths = sorted(
+        os.path.join(clips_dir, f)
+        for f in os.listdir(clips_dir)
+        if f.endswith((".mp4", ".webm", ".mkv")) and not f.endswith(".part")
+    )
+    if not all_paths:
+        logger.warning("No video file found after yt-dlp for '%s'", url_or_search[:60])
+        return None
+
+    # For search with skip, the last downloaded file = the skip-th search result
+    chosen = all_paths[-1]
+    if os.path.getsize(chosen) < 10 * 1024:  # < 10 KB → probably broken
+        logger.warning("Downloaded video too small: %s", chosen)
+        return None
+
+    logger.info(
+        "Full YT video ready: %s (%.1f MB)",
+        os.path.basename(chosen), os.path.getsize(chosen) / 1024 / 1024,
+    )
+    return chosen
+
+
+def _cut_clips_from_video(
+    video_path: str,
+    n_clips: int,
+    workdir: str,
+    intro_skip: float = 15.0,
+) -> list[str]:
+    """
+    Cut n_clips sequential segments from video_path, skipping the opening.
+    Each clip is stream-copied (no re-encode) for speed; _make_video_segment
+    handles scaling/transcoding during final assembly.
+    """
+    clips_dir = os.path.join(workdir, "yt_clips")
+    os.makedirs(clips_dir, exist_ok=True)
+
+    duration = _get_audio_duration(video_path)  # ffprobe works on video too
+    available = max(0.0, duration - intro_skip)
+    if available < 4.0:
+        # Video too short after intro skip — start from the very beginning
+        intro_skip = 0.0
+        available = duration
+
+    if available < 1.0:
+        logger.warning("Video too short to cut clips: %.1f s", duration)
+        return []
+
+    clip_dur = min(float(YT_CLIP_DURATION), available / n_clips)
+    result: list[str] = []
+
+    for i in range(n_clips):
+        start = intro_skip + i * clip_dur
+        if start + clip_dur > duration + 0.5:
+            break
+        out_path = os.path.join(clips_dir, f"clip_{i:02d}.mp4")
+        ok = _run(
+            [
+                "ffmpeg", "-y",
+                "-ss", f"{start:.3f}",
+                "-i", video_path,
+                "-t", f"{clip_dur:.3f}",
+                "-c", "copy",
+                out_path,
+            ],
+            timeout=60,
+        )
+        if ok and os.path.exists(out_path) and os.path.getsize(out_path) > 1024:
+            result.append(out_path)
+
+    logger.info(
+        "Cut %d clips from %s (intro_skip=%.1fs, clip_dur=%.1fs each)",
+        len(result), os.path.basename(video_path), intro_skip, clip_dur,
+    )
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Pixabay stock media (images only — used as fallback fill)
 # ---------------------------------------------------------------------------
@@ -1481,28 +1601,72 @@ async def fetch_gameplay_clips(
     yt_skip: int = 0,
 ) -> tuple[list[str], list[str], str]:
     """
-    Download article videos + YouTube gameplay clips once, to be shared
-    between EN and RU renders.
+    Find one source video (article embed or YouTube search), cut 3-4 clips
+    from it skipping the opening, and return them ready for assembly.
 
-    Returns (article_videos, yt_clips, shared_workdir).
+    Priority:
+      1. Playground HLS video embedded in the article (already downloaded).
+      2. YouTube video embedded in the article (<pg-embed type="youtube">).
+      3. First (or yt_skip-th) YouTube search result for *search_query*.
+
+    Returns ([], pre_cut_clips, shared_workdir).
+    article_videos is always [] so n_article_clips=0 in the callers —
+    no additional intro-skip is applied during assembly (clips are pre-cut).
     Caller is responsible for cleaning up shared_workdir after both renders finish.
     """
     workdir = tempfile.mkdtemp(dir=VIDEOS_DIR, prefix="clips_")
+    n_clips = 4
+    source_video: str | None = None
 
-    article_videos = [p for p in post.get("video_paths", []) if os.path.exists(p)]
+    # ── 1. Playground HLS video already on disk ───────────────────────────
+    article_hls = [p for p in post.get("video_paths", []) if os.path.exists(p)]
+    if article_hls:
+        source_video = article_hls[0]
+        logger.info("Using article Playground video as source: %s", source_video)
 
-    if not article_videos and post.get("article_url"):
+    # ── 2. Re-fetch article embeds if nothing on disk ─────────────────────
+    if not source_video and post.get("article_url"):
         try:
             async with aiohttp.ClientSession() as _sess:
                 article = await _scraper.scrape_article(_sess, post["article_url"])
                 if article and article.pg_embeds:
-                    _, article_videos = await _scraper.download_videos(_sess, article.pg_embeds)
-                    logger.info("Pre-fetched %d article videos", len(article_videos))
+                    # Try Playground HLS download first
+                    _, hls_paths = await _scraper.download_videos(_sess, article.pg_embeds)
+                    if hls_paths:
+                        source_video = hls_paths[0]
+                        logger.info("Downloaded article Playground video: %s", source_video)
+                    else:
+                        # Fall back to first YouTube embed in the article
+                        yt_embeds = [e for e in article.pg_embeds if e["type"] == "youtube"]
+                        if yt_embeds:
+                            yt_url = f"https://www.youtube.com/watch?v={yt_embeds[0]['id']}"
+                            logger.info("Downloading article YouTube embed: %s", yt_url)
+                            source_video = await _download_full_yt_video(
+                                yt_url, workdir, is_url=True
+                            )
         except Exception as exc:
-            logger.warning("Could not pre-fetch article videos: %s", exc)
+            logger.warning("Could not fetch article embeds: %s", exc)
 
-    yt_clips = await _fetch_youtube_clips(search_query, YT_MAX_CLIPS, workdir, skip=yt_skip)
-    return article_videos, yt_clips, workdir
+    # ── 3. Search YouTube — pick (yt_skip+1)-th result for regen diversity ─
+    if not source_video:
+        logger.info(
+            "No article video found — searching YouTube for '%s' (skip=%d)",
+            search_query, yt_skip,
+        )
+        source_video = await _download_full_yt_video(
+            search_query, workdir, skip=yt_skip
+        )
+
+    if not source_video:
+        logger.warning("No source video available for '%s'", search_query)
+        return [], [], workdir
+
+    # ── 4. Cut 3-4 sequential clips, skipping intro ───────────────────────
+    clips = await asyncio.to_thread(
+        _cut_clips_from_video, source_video, n_clips, workdir, float(YT_CLIP_SKIP)
+    )
+    logger.info("Prepared %d clips from source video for '%s'", len(clips), search_query)
+    return [], clips, workdir
 
 
 async def create_short_video(

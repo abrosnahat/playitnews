@@ -392,7 +392,7 @@ async def translate_title_to_english(article_title: str) -> str:
 
 async def generate_thumbnail_hook(article_title: str, lang: str = "ru") -> str:
     """
-    Generate a short, punchy, clickable thumbnail caption (2–4 words, ALL CAPS).
+    Generate a short, punchy, clickable thumbnail caption (2–3 words, ALL CAPS).
     lang: "ru" → Russian output, "en" → English output.
     Falls back to the original title on failure.
     """
@@ -406,7 +406,7 @@ async def generate_thumbnail_hook(article_title: str, lang: str = "ru") -> str:
         "Create a SHORT, PUNCHY caption (2–3 words) that creates curiosity or urgency "
         "and fits the topic of the news headline below.\n"
         "Rules:\n"
-        "- Maximum 4 words\n"
+        "- Maximum 3 words\n"
         f"- {lang_instruction}\n"
         "- No punctuation except ! or ?\n"
         "- Write in normal case (the system will uppercase it automatically)\n"
