@@ -35,6 +35,27 @@ def _sanitize_telegram_html(text: str) -> str:
         text += f"</{tag}>"
     return text
 
+
+# Telegram caption limit minus buffer for footer (\n\n@readitgames ~15 chars) and HTML tag overhead
+_CAPTION_BODY_LIMIT = 900
+
+
+def _trim_post_text(text: str, limit: int = _CAPTION_BODY_LIMIT) -> str:
+    """
+    Hard-trim generated post text so its total length (including HTML tags)
+    stays within `limit` characters.  Trims at the last complete line that
+    fits, then re-closes any open HTML tags.
+    """
+    if len(text) <= limit:
+        return text
+    # Try to trim at the last newline boundary that still fits
+    cut = text[:limit]
+    last_nl = cut.rfind("\n")
+    if last_nl > limit // 2:
+        cut = cut[:last_nl]
+    # Re-sanitize to close any tags split by the cut
+    return _sanitize_telegram_html(cut.rstrip())
+
 SYSTEM_PROMPT = (
     "You are an expert gaming news editor writing for a Telegram channel. "
     "Transform Russian gaming news into punchy, engaging English Telegram posts."
@@ -57,7 +78,7 @@ async def adapt_article_ru(title: str, body: str) -> str:
         "6. Пустая строка, затем 5–8 хэштегов через пробел.\n\n"
         "Правила:\n"
         "- Telegram HTML: <b>жирный</b> только для заголовка, <i>курсив</i> для одной ключевой детали\n"
-        "- Максимум 900 символов включая теги\n"
+        "- Максимум 750 символов включая теги (будет добавлен футер, итого не более 900)\n"
         "- Без упоминания источника\n\n"
         f"Заголовок: {title}\n\nТекст:\n{body[:4000]}\n\n"
         "Напиши Telegram-пост на русском:"
@@ -85,7 +106,7 @@ async def adapt_article_ru(title: str, body: str) -> str:
             ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
-                post_text = _sanitize_telegram_html(_md_to_html(data["message"]["content"].strip()))
+                post_text = _trim_post_text(_sanitize_telegram_html(_md_to_html(data["message"]["content"].strip())))
                 # Validate: must have more than just a headline + hashtags (>150 chars body)
                 body_only = re.sub(r'<[^>]+>', '', post_text).strip()
                 body_only = re.sub(r'#\S+', '', body_only).strip()
@@ -111,7 +132,7 @@ async def adapt_article_ru(title: str, body: str) -> str:
                 ) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
-                    post_text = _sanitize_telegram_html(_md_to_html(data["message"]["content"].strip()))
+                    post_text = _trim_post_text(_sanitize_telegram_html(_md_to_html(data["message"]["content"].strip())))
                     if post_text:
                         logger.info("Gemma (RU) retry OK: '%s' (%d симв.)", title[:60], len(post_text))
                         return post_text
@@ -137,7 +158,7 @@ async def adapt_article(title: str, body: str) -> str:
         "6. Blank line, then 5–8 hashtags separated by spaces.\n\n"
         "Rules:\n"
         "- Telegram HTML: <b>bold</b> for headline only, <i>italic</i> for one key detail\n"
-        "- Maximum 900 characters total including tags\n"
+        "- Maximum 750 characters total including tags (a footer will be appended, total must stay under 900)\n"
         "- No emojis except in the headline. Do not mention the source website.\n\n"
         f"Title: {title}\n\nBody:\n{body[:4000]}\n\n"
         "Write the Telegram post now:"
@@ -162,7 +183,7 @@ async def adapt_article(title: str, body: str) -> str:
             ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
-                post_text = _sanitize_telegram_html(_md_to_html(data["message"]["content"].strip()))
+                post_text = _trim_post_text(_sanitize_telegram_html(_md_to_html(data["message"]["content"].strip())))
                 # Validate: must have more than just a headline + hashtags (>150 chars body)
                 body_only = re.sub(r'<[^>]+>', '', post_text).strip()
                 body_only = re.sub(r'#\S+', '', body_only).strip()
@@ -187,7 +208,7 @@ async def adapt_article(title: str, body: str) -> str:
                 ) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
-                    post_text = _sanitize_telegram_html(_md_to_html(data["message"]["content"].strip()))
+                    post_text = _trim_post_text(_sanitize_telegram_html(_md_to_html(data["message"]["content"].strip())))
                     if post_text:
                         logger.info("Gemma (EN) retry OK: '%s' (%d симв.)", title[:60], len(post_text))
                         return post_text

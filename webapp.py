@@ -19,10 +19,13 @@ import mimetypes
 import database as db
 import ai_adapter
 import video_generator
+import thumbnail_generator
 import instagram_publisher
 import youtube_publisher
 from config import (
     TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHANNEL_ID,
+    TELEGRAM_SECOND_CHANNEL_ID,
     INSTAGRAM_USER_ID_RU,
     INSTAGRAM_ACCESS_TOKEN_RU,
 )
@@ -51,6 +54,7 @@ def _ngrok_headers(response):
 # ---------------------------------------------------------------------------
 _task_queues: dict[int, queue.Queue] = {}
 _task_logs:   dict[int, list] = {}  # post_id -> [{type, message}, ...]
+_cancel_flags: set = set()  # post_ids requested to cancel
 _yt_queries:  dict[int, str]  = {}  # post_id -> custom YT search query override
 _pub_queues:  dict[int, queue.Queue] = {}  # post_id -> publish progress queue
 _pub_logs:    dict[int, list] = {}  # post_id -> publish log entries
@@ -91,6 +95,7 @@ def _push_pub(post_id: int, message: str, type_: str = "progress") -> None:
         q.put(event)
 
 
+def _push(post_id: int, message: str, type_: str = "progress") -> None:
     """Push an SSE event into the post's active queue (if any listener) and persist to log."""
     event = {"type": type_, "message": message}
     with _tasks_lock:
@@ -124,21 +129,23 @@ def api_posts():
         if status == "all":
             total = conn.execute("SELECT COUNT(*) FROM scheduled_posts").fetchone()[0]
             rows  = conn.execute(
-                "SELECT * FROM scheduled_posts ORDER BY id DESC LIMIT ? OFFSET ?",
+                "SELECT * FROM scheduled_posts ORDER BY id ASC LIMIT ? OFFSET ?",
                 (per_page, offset),
             ).fetchall()
         elif status == "active":
-            # pending + sent, excluding posts already published to any social network
+            # pending always shown; sent only if published to fewer than 4 platforms
             total = conn.execute(
                 """SELECT COUNT(*) FROM scheduled_posts
-                   WHERE status IN ('pending','sent')
-                     AND (published_platforms IS NULL OR published_platforms = '[]')"""
+                   WHERE status = 'pending'
+                      OR (status = 'sent'
+                          AND json_array_length(COALESCE(published_platforms, '[]')) < 4)"""
             ).fetchone()[0]
             rows  = conn.execute(
                 """SELECT * FROM scheduled_posts
-                   WHERE status IN ('pending','sent')
-                     AND (published_platforms IS NULL OR published_platforms = '[]')
-                   ORDER BY id DESC LIMIT ? OFFSET ?""",
+                   WHERE status = 'pending'
+                      OR (status = 'sent'
+                          AND json_array_length(COALESCE(published_platforms, '[]')) < 4)
+                   ORDER BY id ASC LIMIT ? OFFSET ?""",
                 (per_page, offset),
             ).fetchall()
         else:
@@ -146,7 +153,7 @@ def api_posts():
                 "SELECT COUNT(*) FROM scheduled_posts WHERE status = ?", (status,)
             ).fetchone()[0]
             rows  = conn.execute(
-                "SELECT * FROM scheduled_posts WHERE status = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                "SELECT * FROM scheduled_posts WHERE status = ? ORDER BY id ASC LIMIT ? OFFSET ?",
                 (status, per_page, offset),
             ).fetchall()
 
@@ -210,10 +217,68 @@ def api_approve(post_id: int):
 
 
 async def _do_publish_telegram(post_id: int) -> None:
-    from telegram import Bot
-    import bot as bot_module
+    from telegram import Bot, InputMediaPhoto, InputMediaVideo
+    from telegram.error import TimedOut, TelegramError
+
+    post = db.get_scheduled_post(post_id)
+    if not post:
+        raise ValueError(f"Post #{post_id} not found")
+
+    text       = post["post_text"]
+    ru_text    = post.get("ru_post_text")
+    images     = [p for p in post.get("image_paths", [])  if os.path.exists(p)]
+    videos     = [p for p in post.get("video_paths", [])  if os.path.exists(p)]
+
+    async def _send(chat_id, caption, footer=None):
+        full_caption = caption
+        if footer:
+            full_caption = caption.rstrip() + f"\n\n{footer}"
+        # Hard-trim to Telegram caption limit (1024) at last newline boundary
+        if len(full_caption) > 1024:
+            cut = full_caption[:1024]
+            last_nl = cut.rfind("\n")
+            full_caption = cut[:last_nl].rstrip() if last_nl > 512 else cut.rstrip()
+        from telegram.constants import ParseMode
+        if images or videos:
+            media = []
+            for i, p in enumerate(images):
+                media.append(InputMediaPhoto(
+                    media=open(p, "rb"),
+                    caption=full_caption if i == 0 else None,
+                    parse_mode=ParseMode.HTML if i == 0 else None,
+                ))
+            for j, p in enumerate(videos):
+                media.append(InputMediaVideo(
+                    media=open(p, "rb"),
+                    caption=full_caption if not images and j == 0 else None,
+                    parse_mode=ParseMode.HTML if not images and j == 0 else None,
+                ))
+            if len(media) == 1:
+                if images:
+                    await bot.send_photo(chat_id=chat_id, photo=open(images[0], "rb"),
+                                         caption=full_caption, parse_mode=ParseMode.HTML)
+                else:
+                    await bot.send_video(chat_id=chat_id, video=open(videos[0], "rb"),
+                                         caption=full_caption, parse_mode=ParseMode.HTML)
+            else:
+                await bot.send_media_group(chat_id=chat_id, media=media)
+        else:
+            await bot.send_message(chat_id=chat_id, text=full_caption,
+                                   parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
     async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
-        await bot_module.publish_post(bot, post_id)
+        try:
+            await _send(TELEGRAM_CHANNEL_ID, text)
+            if TELEGRAM_SECOND_CHANNEL_ID and ru_text:
+                try:
+                    await _send(TELEGRAM_SECOND_CHANNEL_ID, ru_text, footer="@readitgames")
+                except TelegramError as e:
+                    logger.error("Second channel publish failed for #%d: %s", post_id, e)
+            db.update_post_status(post_id, "sent")
+        except TimedOut:
+            db.update_post_status(post_id, "sent")  # Telegram accepted it
+        except TelegramError as exc:
+            raise
 
 
 @app.route("/api/posts/<int:post_id>/cancel", methods=["POST"])
@@ -311,6 +376,7 @@ def api_generate_video(post_id: int):
     def _run():
         try:
             _run_async(_generate_video(post_id, lang))
+        except Exception as exc:
             _push(post_id, f"Fatal error: {exc}", "error")
         finally:
             # Put sentinel so SSE generator exits
@@ -341,6 +407,15 @@ def api_reset_yt_skip(post_id: int):
     """Reset the YouTube skip counter to 0."""
     with db.get_conn() as conn:
         conn.execute("UPDATE scheduled_posts SET yt_skip_count = 0 WHERE id = ?", (post_id,))
+    return jsonify({"success": True})
+
+
+@app.route("/api/posts/<int:post_id>/cancel-video", methods=["POST"])
+def api_cancel_video(post_id: int):
+    """Request cancellation of an in-progress video generation task."""
+    with _tasks_lock:
+        _cancel_flags.add(post_id)
+    _push(post_id, "⛔ Cancellation requested…", "progress")
     return jsonify({"success": True})
 
 
@@ -396,12 +471,20 @@ async def _generate_video(post_id: int, lang: str) -> None:
         _push(post_id, msg, type_)
         logger.info("[vidgen #%d] %s", post_id, msg)
 
+    def check_cancel():
+        with _tasks_lock:
+            if post_id in _cancel_flags:
+                _cancel_flags.discard(post_id)
+                return True
+        return False
+
     try:
         do_en = lang in ("en", "both")
         do_ru = lang in ("ru", "both")
 
         # --- Step 1: Write scripts ---
         progress("Step 1/4: Writing scripts…")
+        if check_cancel(): raise InterruptedError("Cancelled")
         en_script: Optional[str] = None
         ru_script: Optional[str] = None
 
@@ -430,6 +513,7 @@ async def _generate_video(post_id: int, lang: str) -> None:
 
         # --- Step 2: Determine search query ---
         progress("Step 2/4: Synthesizing voices…")
+        if check_cancel(): raise InterruptedError("Cancelled")
         title = post.get("article_title", "")
         with _tasks_lock:
             search_query = _yt_queries.pop(post_id, None)
@@ -442,6 +526,7 @@ async def _generate_video(post_id: int, lang: str) -> None:
 
         # --- Step 3: Fetch gameplay clips ---
         progress(f"Step 3/4: Searching YouTube for '{search_query}'…")
+        if check_cancel(): raise InterruptedError("Cancelled")
         yt_skip = db.increment_yt_skip(post_id, YT_SKIP_STEP) - YT_SKIP_STEP
         article_videos, yt_clips, clips_workdir = await video_generator.fetch_gameplay_clips(
             post=post, search_query=search_query, yt_skip=yt_skip,
@@ -450,6 +535,7 @@ async def _generate_video(post_id: int, lang: str) -> None:
         progress(f"Found {len(shared_clips)} video clips. Rendering…")
 
         # --- Step 4: Render ---
+        if check_cancel(): raise InterruptedError("Cancelled")
         en_path: Optional[str] = None
         ru_path: Optional[str] = None
         try:
@@ -496,6 +582,8 @@ async def _generate_video(post_id: int, lang: str) -> None:
             "ru_path": ru_path,
         }), "video_ready")
 
+    except InterruptedError:
+        progress("⛔ Generation cancelled", "error")
     except Exception as exc:
         progress(f"Error: {exc}", "error")
         raise
@@ -527,18 +615,39 @@ def api_publish(post_id: int, platform: str):
             progress(f"Publishing to {platform}…")
             result = _run_async(_do_publish_social(post_id, platform, post, progress_cb=progress))
             progress(f"✅ Done: {result}", "done")
-            # Mark post as published
-            with db.get_conn() as conn:
-                existing = conn.execute(
-                    "SELECT published_platforms FROM scheduled_posts WHERE id = ?", (post_id,)
-                ).fetchone()
-                platforms = json.loads((existing[0] if existing else None) or "[]")
-                if platform not in platforms:
-                    platforms.append(platform)
-                conn.execute(
-                    "UPDATE scheduled_posts SET published_platforms = ? WHERE id = ?",
-                    (json.dumps(platforms), post_id),
-                )
+            # Determine which individual platforms actually succeeded
+            _PLATFORM_KEYS = {
+                "instagram": "instagram", "instagram-ru": "instagram-ru",
+                "youtube": "youtube", "youtube-ru": "youtube-ru",
+            }
+            if platform in _PLATFORM_KEYS:
+                succeeded = [platform]
+            else:
+                # all / all-ru / all-combined — parse result string for ✅ lines
+                succeeded = []
+                label_map = {
+                    "Instagram EN": "instagram", "Instagram RU": "instagram-ru",
+                    "YouTube EN":   "youtube",   "YouTube RU":   "youtube-ru",
+                }
+                for part in result.split(" | "):
+                    if part.startswith("✅"):
+                        for label, key in label_map.items():
+                            if label in part:
+                                succeeded.append(key)
+                                break
+            if succeeded:
+                with db.get_conn() as conn:
+                    existing = conn.execute(
+                        "SELECT published_platforms FROM scheduled_posts WHERE id = ?", (post_id,)
+                    ).fetchone()
+                    platforms_list = json.loads((existing[0] if existing else None) or "[]")
+                    for s in succeeded:
+                        if s not in platforms_list:
+                            platforms_list.append(s)
+                    conn.execute(
+                        "UPDATE scheduled_posts SET published_platforms = ? WHERE id = ?",
+                        (json.dumps(platforms_list), post_id),
+                    )
         except Exception as exc:
             progress(f"❌ Error: {exc}", "error")
             logger.exception("Social publish failed: post #%d platform %s", post_id, platform)
@@ -611,8 +720,20 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
 
     async def _make_thumb(path: str, lang: str = "en", title: Optional[str] = None) -> Optional[str]:
         try:
-            from bot import _make_thumbnail
-            return await _make_thumbnail(post, path, title=title, lang=lang)
+            image_paths: list[str] = [p for p in post.get("image_paths", []) if os.path.exists(p)]
+            if not image_paths:
+                return None
+            source = image_paths[0]
+            raw_title = title or post.get("article_title", "")
+            if lang == "en" and not title:
+                translated = await ai_adapter.translate_title_to_english(raw_title)
+                if translated:
+                    raw_title = translated
+            hook = await ai_adapter.generate_thumbnail_hook(raw_title, lang=lang)
+            base = os.path.splitext(path)[0]
+            out_path = f"{base}_thumb_{lang}.jpg"
+            ok = thumbnail_generator.generate_instagram_thumbnail(source, hook, out_path)
+            return out_path if ok else None
         except Exception:
             return None
 

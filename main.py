@@ -5,7 +5,7 @@ Starts the Telegram bot and schedules the periodic news check.
 import asyncio
 import logging
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import aiohttp
 import certifi
@@ -14,7 +14,7 @@ from telegram.request import HTTPXRequest
 
 import database as db
 from ai_adapter import adapt_article, adapt_article_ru, is_gaming_related
-from bot import build_handlers, error_handler, publish_post, send_admin_notification
+from bot import build_handlers, error_handler, send_admin_notification
 from config import (
     CHECK_INTERVAL_MINUTES,
     TELEGRAM_BOT_TOKEN,
@@ -130,48 +130,12 @@ async def check_news(app: Application) -> None:
         logger.exception("Ошибка при проверке новостей: %s", exc)
 
 
-async def dispatch_due_posts(app: Application) -> None:
-    """Publish any posts that are past their scheduled time."""
-    now = datetime.now(timezone.utc)
-    due_posts = db.get_pending_posts_due(now)
-    for post in due_posts:
-        # Auto-publish if admin hasn't explicitly approved or cancelled
-        # (both 'pending' and 'approved' are published; only 'cancelled' is skipped)
-        logger.info("Publishing scheduled post #%d", post["id"])
-        await publish_post(bot=app.bot, post_id=post["id"])
-
-
 # ---------------------------------------------------------------------------
-# Periodic job wrappers for python-telegram-bot job queue
+# Periodic job wrappers
 # ---------------------------------------------------------------------------
 
 async def job_check_news(context) -> None:
     await check_news(context.application)
-
-
-async def resend_pending_notifications(app: Application) -> None:
-    """On startup, resend admin notifications for all posts still in 'pending' state."""
-    pending = db.get_all_pending_posts()
-    if not pending:
-        return
-    logger.info("Pending posts at startup: %d — resending notifications", len(pending))
-    for post in pending:
-        try:
-            scheduled_at = datetime.fromisoformat(post["scheduled_at"])
-            await send_admin_notification(
-                bot=app.bot,
-                post_id=post["id"],
-                article_title=post.get("article_title", ""),
-                article_url=post.get("article_url", ""),
-                post_text=post.get("post_text", ""),
-                image_paths=post.get("image_paths", []),
-                video_paths=post.get("video_paths", []),
-                scheduled_at=scheduled_at,
-            )
-            logger.info("Resent notification for pending post #%d", post["id"])
-            await asyncio.sleep(1)  # avoid Telegram flood limits
-        except Exception as exc:
-            logger.error("Failed to resend notification for post #%d: %s", post["id"], exc)
 
 
 # ---------------------------------------------------------------------------
@@ -216,13 +180,7 @@ def main() -> None:
 
     job_queue = app.job_queue
 
-    # On startup: resend notifications for pending posts
-    job_queue.run_once(
-        lambda ctx: resend_pending_notifications(ctx.application),
-        when=5,  # 5 seconds after start
-    )
-
-    # Check news every CHECK_INTERVAL_MINUTES
+    # On startup: light check after 15 seconds
     job_queue.run_repeating(
         job_check_news,
         interval=CHECK_INTERVAL_MINUTES * 60,
