@@ -204,6 +204,7 @@ _GAMING_KEYWORDS = [
     "консол", "приставк", "релиз", "анонс", "трейлер", "геймплей",
     "разработчик", "издател", "студи", "esports", "киберспорт",
     "стример", "стрим",
+    "ремейк", "ремастер", "сиквел", "приквел", "спин-офф", "аддон",
     # Game franchise / engine names (EN, recognizable in RU titles)
     "fallout", "elder scrolls", "elden ring", "stalker", "s.t.a.l.k.e.r",
     "cyberpunk", "witcher", "assassin", "call of duty", "battlefield",
@@ -215,7 +216,9 @@ _GAMING_KEYWORDS = [
     "death stranding", "god of war", "horizon", "spider-man", "marvel",
     "souls", "bloodborne", "sekiro", "unreal engine", "re engine",
     "nintendo", "playstation", "xbox", "steam", "epic games",
-    "zompiercer", "remake", "remaster", "expansion",
+    "black flag", "black ops", "modern warfare", "ghost recon",
+    "far cry", "watch dogs", "rainbow six", "division", "crew",
+    "remake", "remaster", "expansion",
 ]
 
 

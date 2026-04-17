@@ -14,6 +14,7 @@ import threading
 from typing import Optional
 
 from flask import Flask, Response, abort, jsonify, request, send_file
+import mimetypes
 
 import database as db
 import ai_adapter
@@ -33,10 +34,26 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-5s  %(message)s",
 )
 
+# DB migration: add published_platforms column if missing
+try:
+    with db.get_conn() as _conn:
+        _conn.execute("ALTER TABLE scheduled_posts ADD COLUMN published_platforms TEXT DEFAULT '[]'")
+except Exception:
+    pass  # column already exists
+
+@app.after_request
+def _ngrok_headers(response):
+    response.headers["ngrok-skip-browser-warning"] = "1"
+    return response
+
 # ---------------------------------------------------------------------------
 # In-memory task state: post_id -> Queue of SSE event dicts (None = sentinel)
 # ---------------------------------------------------------------------------
 _task_queues: dict[int, queue.Queue] = {}
+_task_logs:   dict[int, list] = {}  # post_id -> [{type, message}, ...]
+_yt_queries:  dict[int, str]  = {}  # post_id -> custom YT search query override
+_pub_queues:  dict[int, queue.Queue] = {}  # post_id -> publish progress queue
+_pub_logs:    dict[int, list] = {}  # post_id -> publish log entries
 _tasks_lock = threading.Lock()
 
 YT_SKIP_STEP = 1
@@ -64,12 +81,23 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
-def _push(post_id: int, message: str, type_: str = "progress") -> None:
-    """Push an SSE event into the post's active queue (if any listener)."""
+def _push_pub(post_id: int, message: str, type_: str = "progress") -> None:
+    """Push a publish-progress SSE event."""
+    event = {"type": type_, "message": message}
+    with _tasks_lock:
+        q = _pub_queues.get(post_id)
+        _pub_logs.setdefault(post_id, []).append(event)
+    if q is not None:
+        q.put(event)
+
+
+    """Push an SSE event into the post's active queue (if any listener) and persist to log."""
+    event = {"type": type_, "message": message}
     with _tasks_lock:
         q = _task_queues.get(post_id)
+        _task_logs.setdefault(post_id, []).append(event)
     if q is not None:
-        q.put({"type": type_, "message": message})
+        q.put(event)
 
 
 # ---------------------------------------------------------------------------
@@ -87,17 +115,41 @@ def index():
 
 @app.route("/api/posts")
 def api_posts():
-    status = request.args.get("status", "all")
+    status   = request.args.get("status", "active")
+    page     = max(1, int(request.args.get("page", 1)))
+    per_page = min(100, max(1, int(request.args.get("per_page", 20))))
+    offset   = (page - 1) * per_page
+
     with db.get_conn() as conn:
         if status == "all":
-            rows = conn.execute(
-                "SELECT * FROM scheduled_posts ORDER BY id DESC LIMIT 500"
+            total = conn.execute("SELECT COUNT(*) FROM scheduled_posts").fetchone()[0]
+            rows  = conn.execute(
+                "SELECT * FROM scheduled_posts ORDER BY id DESC LIMIT ? OFFSET ?",
+                (per_page, offset),
+            ).fetchall()
+        elif status == "active":
+            # pending + sent, excluding posts already published to any social network
+            total = conn.execute(
+                """SELECT COUNT(*) FROM scheduled_posts
+                   WHERE status IN ('pending','sent')
+                     AND (published_platforms IS NULL OR published_platforms = '[]')"""
+            ).fetchone()[0]
+            rows  = conn.execute(
+                """SELECT * FROM scheduled_posts
+                   WHERE status IN ('pending','sent')
+                     AND (published_platforms IS NULL OR published_platforms = '[]')
+                   ORDER BY id DESC LIMIT ? OFFSET ?""",
+                (per_page, offset),
             ).fetchall()
         else:
-            rows = conn.execute(
-                "SELECT * FROM scheduled_posts WHERE status = ? ORDER BY id DESC",
-                (status,),
+            total = conn.execute(
+                "SELECT COUNT(*) FROM scheduled_posts WHERE status = ?", (status,)
+            ).fetchone()[0]
+            rows  = conn.execute(
+                "SELECT * FROM scheduled_posts WHERE status = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                (status, per_page, offset),
             ).fetchall()
+
     result = []
     for row in rows:
         d = dict(row)
@@ -105,8 +157,20 @@ def api_posts():
         d["video_paths"] = json.loads(d.get("video_paths") or "[]")
         d["image_paths"] = [p for p in d["image_paths"] if os.path.exists(p)]
         d["video_paths"] = [p for p in d["video_paths"] if os.path.exists(p)]
+        en_vid = d.get("generated_video_path")
+        ru_vid = d.get("generated_video_path_ru")
+        d["en_video_exists"] = bool(en_vid and os.path.exists(en_vid))
+        d["ru_video_exists"] = bool(ru_vid and os.path.exists(ru_vid))
+        d["published_platforms"] = json.loads(d.get("published_platforms") or "[]")
         result.append(d)
-    return jsonify(result)
+
+    return jsonify({
+        "posts":    result,
+        "total":    total,
+        "page":     page,
+        "per_page": per_page,
+        "pages":    max(1, -(-total // per_page)),  # ceil division
+    })
 
 
 @app.route("/api/posts/<int:post_id>")
@@ -177,7 +241,35 @@ def api_media():
         abort(403)
     if not os.path.isfile(full):
         abort(404)
-    return send_file(full)
+
+    mime = mimetypes.guess_type(full)[0] or "application/octet-stream"
+    file_size = os.path.getsize(full)
+    range_header = request.headers.get("Range")
+
+    if range_header:
+        # Parse "bytes=start-end"
+        try:
+            byte_range = range_header.replace("bytes=", "").strip()
+            start_str, _, end_str = byte_range.partition("-")
+            start = int(start_str) if start_str else 0
+            end   = int(end_str)   if end_str   else file_size - 1
+        except ValueError:
+            abort(400)
+        end = min(end, file_size - 1)
+        length = end - start + 1
+        with open(full, "rb") as f:
+            f.seek(start)
+            data = f.read(length)
+        resp = Response(data, 206, mimetype=mime, direct_passthrough=True)
+        resp.headers["Content-Range"]  = f"bytes {start}-{end}/{file_size}"
+        resp.headers["Accept-Ranges"]  = "bytes"
+        resp.headers["Content-Length"] = str(length)
+        return resp
+
+    resp = send_file(full, mimetype=mime)
+    resp.headers["Accept-Ranges"]  = "bytes"
+    resp.headers["Content-Length"] = str(file_size)
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -195,16 +287,30 @@ def api_generate_video(post_id: int):
     if not post:
         return jsonify({"error": "Post not found"}), 404
 
+    # Optional custom YT search query override
+    yt_query_override = (body.get("yt_query") or "").strip() or None
+    if yt_query_override:
+        with _tasks_lock:
+            _yt_queries[post_id] = yt_query_override
+
     with _tasks_lock:
         if post_id in _task_queues:
-            return jsonify({"error": "Video generation already in progress for this post"}), 409
+            # Check if the queue has a sentinel already (task finished but not cleaned up)
+            q_existing = _task_queues[post_id]
+            # Drain to see if it's stale (has None sentinel or items but no active thread)
+            active_threads = {t.name for t in threading.enumerate()}
+            if f"vidgen-{post_id}" not in active_threads:
+                # Thread is gone — stale queue, remove it
+                _task_queues.pop(post_id, None)
+            else:
+                return jsonify({"error": "Video generation already in progress for this post"}), 409
         q: queue.Queue = queue.Queue()
         _task_queues[post_id] = q
+        _task_logs[post_id] = []  # reset log for new task
 
     def _run():
         try:
             _run_async(_generate_video(post_id, lang))
-        except Exception as exc:
             _push(post_id, f"Fatal error: {exc}", "error")
         finally:
             # Put sentinel so SSE generator exits
@@ -215,6 +321,35 @@ def api_generate_video(post_id: int):
 
     threading.Thread(target=_run, daemon=True, name=f"vidgen-{post_id}").start()
     return jsonify({"success": True, "message": "Video generation started"})
+
+
+@app.route("/api/posts/<int:post_id>/task-status")
+def api_task_status(post_id: int):
+    """Return saved log entries and whether task is still running."""
+    with _tasks_lock:
+        running = post_id in _task_queues
+        active_threads = {t.name for t in threading.enumerate()}
+        if running and f"vidgen-{post_id}" not in active_threads:
+            running = False
+            _task_queues.pop(post_id, None)
+        logs = list(_task_logs.get(post_id, []))
+    return jsonify({"running": running, "logs": logs})
+
+
+@app.route("/api/posts/<int:post_id>/reset-yt-skip", methods=["POST"])
+def api_reset_yt_skip(post_id: int):
+    """Reset the YouTube skip counter to 0."""
+    with db.get_conn() as conn:
+        conn.execute("UPDATE scheduled_posts SET yt_skip_count = 0 WHERE id = ?", (post_id,))
+    return jsonify({"success": True})
+
+
+@app.route("/api/posts/<int:post_id>/reset-task", methods=["POST"])
+def api_reset_task(post_id: int):
+    """Force-clear a stuck video generation task."""
+    with _tasks_lock:
+        _task_queues.pop(post_id, None)
+    return jsonify({"success": True})
 
 
 @app.route("/api/posts/<int:post_id>/video-stream")
@@ -296,7 +431,10 @@ async def _generate_video(post_id: int, lang: str) -> None:
         # --- Step 2: Determine search query ---
         progress("Step 2/4: Synthesizing voices…")
         title = post.get("article_title", "")
-        search_query = await ai_adapter.extract_game_name(title)
+        with _tasks_lock:
+            search_query = _yt_queries.pop(post_id, None)
+        if not search_query:
+            search_query = await ai_adapter.extract_game_name(title)
         if not search_query:
             first_chunk = re.split(r"[:–—|]", title)[0].strip()
             latin_tokens = [t for t in first_chunk.split() if re.match(r"^[A-Za-z0-9'&.]+$", t)]
@@ -375,15 +513,80 @@ def api_publish(post_id: int, platform: str):
     post = db.get_scheduled_post(post_id)
     if not post:
         return jsonify({"error": "Post not found"}), 404
-    try:
-        result = _run_async(_do_publish_social(post_id, platform, post))
-        return jsonify({"success": True, "result": result})
-    except Exception as exc:
-        logger.exception("Social publish failed: post #%d platform %s", post_id, platform)
-        return jsonify({"error": str(exc)}), 500
+
+    with _tasks_lock:
+        q: queue.Queue = queue.Queue()
+        _pub_queues[post_id] = q
+        _pub_logs[post_id] = []
+
+    def _run():
+        def progress(msg: str, type_: str = "progress"):
+            _push_pub(post_id, msg, type_)
+            logger.info("[publish #%d %s] %s", post_id, platform, msg)
+        try:
+            progress(f"Publishing to {platform}…")
+            result = _run_async(_do_publish_social(post_id, platform, post, progress_cb=progress))
+            progress(f"✅ Done: {result}", "done")
+            # Mark post as published
+            with db.get_conn() as conn:
+                existing = conn.execute(
+                    "SELECT published_platforms FROM scheduled_posts WHERE id = ?", (post_id,)
+                ).fetchone()
+                platforms = json.loads((existing[0] if existing else None) or "[]")
+                if platform not in platforms:
+                    platforms.append(platform)
+                conn.execute(
+                    "UPDATE scheduled_posts SET published_platforms = ? WHERE id = ?",
+                    (json.dumps(platforms), post_id),
+                )
+        except Exception as exc:
+            progress(f"❌ Error: {exc}", "error")
+            logger.exception("Social publish failed: post #%d platform %s", post_id, platform)
+        finally:
+            with _tasks_lock:
+                q_ref = _pub_queues.get(post_id)
+            if q_ref is not None:
+                q_ref.put(None)
+
+    threading.Thread(target=_run, daemon=True, name=f"publish-{post_id}").start()
+    return jsonify({"success": True})
 
 
-async def _do_publish_social(post_id: int, platform: str, post: dict) -> str:
+@app.route("/api/posts/<int:post_id>/publish-stream")
+def api_publish_stream(post_id: int):
+    """SSE endpoint for publish progress."""
+    with _tasks_lock:
+        q = _pub_queues.get(post_id)
+    if q is None:
+        def _empty():
+            yield f"data: {json.dumps({'type': 'done', 'message': 'No active publish'})}\n\n"
+        return Response(_empty(), mimetype="text/event-stream")
+
+    def _generate():
+        while True:
+            try:
+                event = q.get(timeout=60)
+            except queue.Empty:
+                yield "data: {\"type\":\"heartbeat\"}\n\n"
+                continue
+            if event is None:
+                with _tasks_lock:
+                    _pub_queues.pop(post_id, None)
+                yield f"data: {json.dumps({'type': 'closed'})}\n\n"
+                break
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return Response(
+        _generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+async def _do_publish_social(post_id: int, platform: str, post: dict, progress_cb=None) -> str:
+    def progress(msg: str, type_: str = "progress"):
+        if progress_cb:
+            progress_cb(msg, type_)
     en_path = db.get_generated_video_path(post_id)
     ru_path = db.get_generated_video_path_ru(post_id)
 
@@ -416,8 +619,11 @@ async def _do_publish_social(post_id: int, platform: str, post: dict) -> str:
     if platform == "instagram":
         if not en_path or not os.path.exists(en_path):
             raise ValueError("EN video not found — generate video first.")
+        progress("Translating title to English…")
         en_title = await ai_adapter.translate_title_to_english(post.get("article_title", ""))
+        progress("Generating thumbnail…")
         thumb = await _make_thumb(en_path, lang="en", title=en_title or None)
+        progress("Uploading reel to Instagram…")
         media_id = await instagram_publisher.publish_reel(
             video_path=en_path, caption=_caption_en(), cover_image_path=thumb,
         )
@@ -426,7 +632,9 @@ async def _do_publish_social(post_id: int, platform: str, post: dict) -> str:
     elif platform == "instagram-ru":
         if not ru_path or not os.path.exists(ru_path):
             raise ValueError("RU video not found — generate video first.")
+        progress("Generating thumbnail…")
         thumb = await _make_thumb(ru_path, lang="ru")
+        progress("Uploading reel to Instagram RU…")
         media_id = await instagram_publisher.publish_reel(
             video_path=ru_path, caption=_caption_ru(),
             user_id=INSTAGRAM_USER_ID_RU, access_token=INSTAGRAM_ACCESS_TOKEN_RU,
@@ -437,9 +645,11 @@ async def _do_publish_social(post_id: int, platform: str, post: dict) -> str:
     elif platform == "youtube":
         if not en_path or not os.path.exists(en_path):
             raise ValueError("EN video not found — generate video first.")
+        progress("Translating title to English…")
         yt_title = (await ai_adapter.translate_title_to_english(
             post.get("article_title", "") or f"Gaming news #{post_id}"
         ))[:100]
+        progress("Uploading Short to YouTube…")
         desc = "More news in the telegram channel, link in the bio\n\n" + _clean_text(post.get("post_text", ""))
         video_id = await youtube_publisher.upload_short(
             video_path=en_path, title=yt_title, description=desc, tags=_tags(),
@@ -450,6 +660,7 @@ async def _do_publish_social(post_id: int, platform: str, post: dict) -> str:
         if not ru_path or not os.path.exists(ru_path):
             raise ValueError("RU video not found — generate video first.")
         yt_title = (post.get("article_title") or f"Gaming news #{post_id}")[:100]
+        progress("Uploading Short to YouTube RU…")
         desc = "Больше новостей в telegram-канале, ссылка в bio\n\n" + _clean_text(
             post.get("ru_post_text") or post.get("post_text", "")
         )
@@ -463,18 +674,22 @@ async def _do_publish_social(post_id: int, platform: str, post: dict) -> str:
         results: list[str] = []
 
         if platform in ("all", "all-combined") and en_path and os.path.exists(en_path):
+            progress("Translating EN title…")
             en_title = (await ai_adapter.translate_title_to_english(
                 post.get("article_title", "") or f"Gaming news #{post_id}"
             ))[:100]
+            progress("Generating EN thumbnail…")
             en_thumb = await _make_thumb(en_path, lang="en", title=en_title)
             en_desc = "More news in the telegram channel, link in the bio\n\n" + _clean_text(post.get("post_text", ""))
             if instagram_publisher.is_configured():
+                progress("Starting Instagram EN upload…")
                 tasks["Instagram EN"] = asyncio.create_task(
                     instagram_publisher.publish_reel(
                         video_path=en_path, caption=_caption_en(), cover_image_path=en_thumb,
                     )
                 )
             if youtube_publisher.is_configured():
+                progress("Starting YouTube EN upload…")
                 tasks["YouTube EN"] = asyncio.create_task(
                     youtube_publisher.upload_short(
                         video_path=en_path, title=en_title, description=en_desc, tags=_tags(),
@@ -483,8 +698,10 @@ async def _do_publish_social(post_id: int, platform: str, post: dict) -> str:
 
         if platform in ("all-ru", "all-combined") and ru_path and os.path.exists(ru_path):
             ru_title = (post.get("article_title") or f"Gaming news #{post_id}")[:100]
+            progress("Generating RU thumbnail…")
             ru_thumb = await _make_thumb(ru_path, lang="ru")
             if instagram_publisher.is_configured_ru():
+                progress("Starting Instagram RU upload…")
                 tasks["Instagram RU"] = asyncio.create_task(
                     instagram_publisher.publish_reel(
                         video_path=ru_path, caption=_caption_ru(),
@@ -493,6 +710,7 @@ async def _do_publish_social(post_id: int, platform: str, post: dict) -> str:
                     )
                 )
             if youtube_publisher.is_configured_ru():
+                progress("Starting YouTube RU upload…")
                 tasks["YouTube RU"] = asyncio.create_task(
                     youtube_publisher.upload_short_ru(
                         video_path=ru_path, title=ru_title,
@@ -523,7 +741,11 @@ async def _do_publish_social(post_id: int, platform: str, post: dict) -> str:
 if __name__ == "__main__":
     db.init_db()
     os.makedirs("static", exist_ok=True)
+    import socket
+    local_ip = socket.gethostbyname(socket.gethostname())
     print("=" * 50)
-    print("  PlayItNews Dashboard  →  http://localhost:5000")
+    print(f"  PlayItNews Dashboard")
+    print(f"  Local:   http://localhost:5001")
+    print(f"  Network: http://{local_ip}:5001")
     print("=" * 50)
-    app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=5001, debug=False, threaded=True)

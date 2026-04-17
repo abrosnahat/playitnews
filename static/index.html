@@ -71,65 +71,110 @@
       color: var(--muted);
     }
 
-    /* ── Layout ──────────────────────────────────────────────── */
-    .main { display: flex; flex: 1; overflow: hidden; }
-
-    /* ── Left list ───────────────────────────────────────────── */
-    .post-list {
-      width: 320px;
-      flex-shrink: 0;
-      border-right: 1px solid var(--border);
+    /* ── Feed ────────────────────────────────────────────────── */
+    .feed {
+      flex: 1;
       overflow-y: auto;
+      padding: 16px;
     }
-    .post-list::-webkit-scrollbar { width: 5px; }
-    .post-list::-webkit-scrollbar-track { background: transparent; }
-    .post-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-
-    .post-card {
+    .feed::-webkit-scrollbar { width: 5px; }
+    .feed::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    .feed-inner {
+      max-width: 1920px;
+      margin: 0 auto;
       display: flex;
-      gap: 10px;
-      padding: 12px 14px;
-      border-bottom: 1px solid var(--border);
-      cursor: pointer;
-      transition: background .1s;
-      position: relative;
+      flex-direction: column;
+      gap: 12px;
     }
-    .post-card:hover { background: var(--surface2); }
-    .post-card.selected { background: var(--surface); border-left: 3px solid var(--accent); }
-    .post-card.selected .post-card-inner { margin-left: -3px; }
+    .empty-state {
+      padding: 60px 20px;
+      text-align: center;
+      color: var(--muted);
+      display: flex; flex-direction: column;
+      align-items: center; gap: 10px;
+    }
+    .empty-icon { font-size: 40px; opacity: .4; }
 
-    .post-card-thumb {
-      width: 58px; height: 58px;
-      object-fit: cover;
-      border-radius: 6px;
-      background: var(--surface2);
-      flex-shrink: 0;
-    }
-    .post-card-placeholder {
-      width: 58px; height: 58px;
-      border-radius: 6px;
-      background: var(--surface2);
-      display: flex; align-items: center; justify-content: center;
-      font-size: 22px;
-      flex-shrink: 0;
-    }
-
-    .post-card-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
-    .post-card-title {
-      font-size: 12.5px;
-      font-weight: 500;
-      line-height: 1.45;
+    /* ── Card ────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
       overflow: hidden;
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
     }
-    .post-card-footer { display: flex; align-items: center; gap: 6px; }
-    .post-card-date { font-size: 11px; color: var(--muted); }
+    .card-header {
+      padding: 14px 16px 12px;
+    }
+    .card-info { min-width: 0; }
+    .card-title {
+      font-size: 14px; font-weight: 600;
+      line-height: 1.4; margin-bottom: 7px;
+    }
+    .card-meta {
+      display: flex; flex-wrap: wrap;
+      align-items: center; gap: 7px;
+      font-size: 11.5px; color: var(--muted);
+    }
+    .card-meta a { color: var(--accent2); text-decoration: none; }
+    .card-meta a:hover { text-decoration: underline; }
+    .card-id { color: var(--border); font-size: 10px; }
+    .card-content { padding: 0 16px; }
+    .card-actions {
+      display: flex; flex-wrap: wrap; gap: 6px;
+      padding: 10px 16px 14px;
+      border-top: 1px solid var(--border);
+      margin-top: 6px;
+    }
 
-    /* Video indicator icons */
-    .video-icons { display: flex; gap: 3px; margin-left: auto; }
-    .vi { font-size: 10px; }
+    /* ── Card: images row ─────────────────────────────────────── */
+    .card-images {
+      display: flex; gap: 8px;
+      flex-wrap: wrap;
+      padding: 0 16px 12px;
+    }
+    .card-images img {
+      height: 100px; border-radius: 7px;
+      object-fit: cover; cursor: pointer;
+    }
+    .card-images img:hover { opacity: .85; }
+
+    /* ── Card: lang row: [RU text | RU vid | EN text | EN vid] ── */
+    .card-lang-row {
+      display: grid;
+      grid-template-columns: 2fr 1fr 2fr 1fr;
+      gap: 12px;
+      padding: 0 16px 12px;
+      align-items: start;
+    }
+    .text-col { min-width: 0; }
+    .text-lang-label { font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 5px; }
+    .vid-item { min-width: 0; }
+    .vid-item video { width: 50%; border-radius: 8px; background: #000; }
+
+    /* ── Card: YT query row ─────────────────────────────────────── */
+    .yt-query-row {
+      display: flex; align-items: center; gap: 7px;
+      padding: 6px 16px 0;
+    }
+    .yt-query-row input {
+      flex: 1; background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 6px; padding: 5px 9px;
+      color: var(--text); font-size: 12px;
+    }
+    .yt-query-row input::placeholder { color: var(--muted); }
+    .yt-query-row input:focus { outline: none; border-color: var(--accent); }
+    .yt-skip-badge {
+      font-size: 10px; color: var(--muted);
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 4px; padding: 2px 6px; white-space: nowrap;
+    }
+    .card-btn-row { display: flex; flex-wrap: wrap; gap: 6px; }
+    .text-body {
+      font-size: 12.5px; line-height: 1.65;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .text-body b, .text-body strong { color: #fff; }
+    .text-body i, .text-body em     { color: #c4c4c4; }
 
     /* ── Badges ──────────────────────────────────────────────── */
     .badge {
@@ -143,73 +188,7 @@
     .badge-pending  { background: rgba(245,158,11,.18); color: var(--yellow); }
     .badge-approved { background: rgba(99,102,241,.18); color: var(--accent2); }
     .badge-sent     { background: rgba(34,197,94,.15);  color: var(--green); }
-    .badge-cancelled{ background: rgba(239,68,68,.13);  color: var(--red); }
-
-    /* ── Detail panel ─────────────────────────────────────────── */
-    .detail-panel {
-      flex: 1;
-      overflow-y: auto;
-      padding: 24px 28px;
-    }
-    .detail-panel::-webkit-scrollbar { width: 5px; }
-    .detail-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-
-    .empty-state {
-      height: 100%;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      color: var(--muted);
-      gap: 10px;
-    }
-    .empty-state-icon { font-size: 40px; opacity: .4; }
-
-    /* ── Detail header ───────────────────────────────────────── */
-    .detail-header { margin-bottom: 18px; }
-    .detail-title {
-      font-size: 19px;
-      font-weight: 600;
-      line-height: 1.4;
-      margin-bottom: 8px;
-    }
-    .detail-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
-    .detail-meta a { color: var(--accent2); text-decoration: none; }
-    .detail-meta a:hover { text-decoration: underline; }
-
-    /* ── Images row ──────────────────────────────────────────── */
-    .images-row {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin-bottom: 20px;
-    }
-    .images-row img {
-      height: 130px;
-      border-radius: 8px;
-      object-fit: cover;
-      cursor: pointer;
-      transition: opacity .15s;
-    }
-    .images-row img:hover { opacity: .85; }
-
-    /* ── Action groups ───────────────────────────────────────── */
-    .action-group {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 14px 16px;
-      margin-bottom: 14px;
-    }
-    .action-group-label {
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: .5px;
-      color: var(--muted);
-      margin-bottom: 10px;
-    }
-    .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .badge-cancelled { background: rgba(239,68,68,.13);  color: var(--red); }
 
     /* ── Buttons ─────────────────────────────────────────────── */
     .btn {
@@ -240,13 +219,13 @@
     .btn-yt:hover:not(:disabled) { background: #cc0000; }
     .btn-sm { padding: 5px 10px; font-size: 12px; }
 
-    /* ── Progress panel ──────────────────────────────────────── */
+    /* ── Progress ────────────────────────────────────────────── */
     .progress-panel {
       background: #0a0a0a;
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 14px 16px;
-      margin-bottom: 14px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
     }
     .progress-label {
       font-size: 11px;
@@ -257,10 +236,10 @@
       margin-bottom: 8px;
     }
     .progress-log {
-      font-family: 'SF Mono', 'Menlo', 'Fira Code', monospace;
-      font-size: 12px;
+      font-family: 'SF Mono', 'Menlo', monospace;
+      font-size: 11.5px;
       line-height: 1.7;
-      max-height: 220px;
+      max-height: 200px;
       overflow-y: auto;
     }
     .progress-log::-webkit-scrollbar { width: 4px; }
@@ -268,50 +247,6 @@
     .log-progress { color: var(--text); }
     .log-done     { color: var(--green); font-weight: 600; }
     .log-error    { color: var(--red); }
-
-    /* ── Video section ───────────────────────────────────────── */
-    .video-section {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 14px 16px;
-      margin-bottom: 14px;
-    }
-    .video-grid { display: flex; gap: 14px; }
-    .video-item { flex: 1; min-width: 0; }
-    .video-item-label { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
-    .video-item video {
-      width: 100%;
-      border-radius: 8px;
-      background: #000;
-      max-height: 310px;
-    }
-
-    /* ── Post text section ───────────────────────────────────── */
-    .text-section {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 14px 16px;
-      margin-bottom: 14px;
-    }
-    .text-section-label {
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: .5px;
-      color: var(--muted);
-      margin-bottom: 10px;
-    }
-    .text-body {
-      font-size: 13px;
-      line-height: 1.65;
-      white-space: pre-wrap;
-      word-break: break-word;
-      color: var(--text);
-    }
-    .text-body b, .text-body strong { color: #fff; }
-    .text-body i, .text-body em { color: #c4c4c4; }
 
     /* ── Toast ───────────────────────────────────────────────── */
     .toast-wrap {
@@ -355,9 +290,41 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* ── Misc ────────────────────────────────────────────────── */
-    .empty-list  { padding: 32px 16px; text-align: center; color: var(--muted); }
-    .section-sep { border: none; border-top: 1px solid var(--border); margin: 18px 0; }
+    /* ── Pagination ──────────────────────────────────────────── */
+    .pagination {
+      display: flex; align-items: center; justify-content: center;
+      gap: 6px; padding: 16px 0 8px;
+    }
+    .pg-btn {
+      padding: 6px 12px; border-radius: 7px;
+      border: 1px solid var(--border);
+      background: transparent; color: var(--text);
+      font-size: 13px; cursor: pointer; transition: all .15s;
+      min-width: 36px; text-align: center;
+    }
+    .pg-btn:hover:not(:disabled) { background: var(--surface2); }
+    .pg-btn:disabled { opacity: .35; cursor: not-allowed; }
+    .pg-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .pg-info { font-size: 12px; color: var(--muted); padding: 0 6px; }
+    @media (max-width: 640px) {
+      body { height: 100dvh; }
+      .header { flex-wrap: wrap; padding: 8px 12px 6px; gap: 8px; }
+      .header-logo { font-size: 15px; }
+      .count-badge { display: none; }
+      .filter-tabs {
+        order: 3; width: 100%;
+        overflow-x: auto; -webkit-overflow-scrolling: touch;
+        scrollbar-width: none; gap: 5px;
+      }
+      .filter-tabs::-webkit-scrollbar { display: none; }
+      .filter-tab { flex-shrink: 0; }
+      .feed { padding: 10px; }
+      .card-title { font-size: 13.5px; }
+      .card-lang-row { grid-template-columns: 1fr 1fr; }
+      .card-actions .btn { flex: 1 1 auto; justify-content: center; }
+      .toast-wrap { left: 10px; right: 10px; bottom: 10px; }
+      .toast { max-width: 100%; }
+    }
   </style>
 </head>
 <body>
@@ -366,11 +333,8 @@
 <div class="header">
   <div class="header-logo">🎮 PlayItNews</div>
   <div class="filter-tabs">
-    <button class="filter-tab active" data-status="pending"  onclick="setFilter('pending')">⏳ Pending</button>
-    <button class="filter-tab"        data-status="sent"     onclick="setFilter('sent')">✅ Sent</button>
-    <button class="filter-tab"        data-status="approved" onclick="setFilter('approved')">🔷 Approved</button>
-    <button class="filter-tab"        data-status="cancelled"onclick="setFilter('cancelled')">✕ Cancelled</button>
-    <button class="filter-tab"        data-status="all"      onclick="setFilter('all')">All</button>
+    <button class="filter-tab active" data-status="active" onclick="setFilter('active')">⚡ Active</button>
+    <button class="filter-tab"        data-status="all"    onclick="setFilter('all')">All</button>
   </div>
   <div class="header-right">
     <span class="count-badge" id="countBadge">0 posts</span>
@@ -378,21 +342,13 @@
   </div>
 </div>
 
-<!-- Main -->
-<div class="main">
-  <!-- Post list -->
-  <div class="post-list" id="postList">
-    <div class="empty-list">Loading…</div>
-  </div>
-
-  <!-- Detail panel -->
-  <div class="detail-panel" id="detailPanel">
-    <div class="empty-state">
-      <div class="empty-state-icon">📋</div>
-      <div>Select a post to manage it</div>
-    </div>
+<!-- Feed -->
+<div class="feed" id="feed">
+  <div class="feed-inner">
+    <div class="empty-state"><div class="empty-icon">⏳</div><div>Loading…</div></div>
   </div>
 </div>
+<div class="pagination" id="pagination" style="display:none"></div>
 
 <!-- Toasts -->
 <div class="toast-wrap" id="toastWrap"></div>
@@ -400,16 +356,28 @@
 <script>
 'use strict';
 
+// ─── Global fetch wrapper (adds ngrok bypass header) ──────────────────────
+const _origFetch = window.fetch.bind(window);
+window.fetch = (url, opts = {}) => {
+  opts.headers = Object.assign({ 'ngrok-skip-browser-warning': '1' }, opts.headers || {});
+  return _origFetch(url, opts);
+};
+
 // ─── State ────────────────────────────────────────────────────────────────
-let currentFilter = 'pending';
-let currentPostId = null;
+let currentFilter = 'active';
+let currentPage   = 1;
+const PER_PAGE    = 20;
+let totalPages    = 1;
+let totalPosts    = 0;
 let posts = [];
-let activeSSE = null;   // EventSource for video generation stream
-const progressLogs = {};  // postId -> [{msg, cls}]
+let activeSSE = null;
+const progressLogs = {};   // postId -> [{msg, cls}]
+const _cardHashes  = {};   // postId -> JSON fingerprint for dirty-check
 
 // ─── Filter ───────────────────────────────────────────────────────────────
 function setFilter(status) {
   currentFilter = status;
+  currentPage   = 1;
   document.querySelectorAll('.filter-tab').forEach(t =>
     t.classList.toggle('active', t.dataset.status === status)
   );
@@ -419,192 +387,240 @@ function setFilter(status) {
 // ─── Load post list ────────────────────────────────────────────────────────
 async function loadPosts() {
   try {
-    const res = await fetch(`/api/posts?status=${currentFilter}`);
+    const res = await fetch(`/api/posts?status=${currentFilter}&page=${currentPage}&per_page=${PER_PAGE}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
     const text = await res.text();
+    let data;
     try {
-      posts = JSON.parse(text);
+      data = JSON.parse(text);
     } catch (e) {
       console.error('JSON parse error:', e, 'Body:', text.slice(0, 200));
       toast(`JSON parse error: ${e.message}`, 'error');
       return;
     }
+    posts      = data.posts;
+    totalPages = data.pages;
+    totalPosts = data.total;
     try {
-      renderList();
+      renderFeed();
+      renderPagination();
     } catch (e) {
-      console.error('renderList error:', e);
-      document.getElementById('postList').innerHTML =
-        `<div class="empty-list" style="color:var(--red)">Render error: ${esc(e.message)}</div>`;
+      console.error('renderFeed error:', e);
+      document.getElementById('feed').innerHTML =
+        `<div class="feed-inner"><div class="empty-state" style="color:var(--red)">Render error: ${esc(e.message)}</div></div>`;
       return;
     }
-    document.getElementById('countBadge').textContent = `${posts.length} posts`;
+    document.getElementById('countBadge').textContent = `${totalPosts} posts`;
   } catch (e) {
     console.error('loadPosts error:', e);
     toast(`Failed to load posts: ${e.message}`, 'error');
   }
 }
 
-function renderList() {
-  const el = document.getElementById('postList');
+function renderPagination() {
+  const el = document.getElementById('pagination');
+  if (totalPages <= 1) { el.style.display = 'none'; return; }
+  el.style.display = 'flex';
+
+  const p = currentPage;
+  const t = totalPages;
+
+  // Build page numbers to show: always first, last, current ±2
+  const show = new Set([1, t, p, p-1, p-2, p+1, p+2].filter(n => n >= 1 && n <= t));
+  const sorted = [...show].sort((a,b) => a-b);
+
+  let html = `<button class="pg-btn" onclick="goPage(${p-1})" ${p===1?'disabled':''}>‹</button>`;
+
+  let prev = 0;
+  for (const n of sorted) {
+    if (n - prev > 1) html += `<span class="pg-info">…</span>`;
+    html += `<button class="pg-btn${n===p?' active':''}" onclick="goPage(${n})">${n}</button>`;
+    prev = n;
+  }
+
+  html += `<button class="pg-btn" onclick="goPage(${p+1})" ${p===t?'disabled':''}>›</button>`;
+  html += `<span class="pg-info">${(p-1)*PER_PAGE+1}–${Math.min(p*PER_PAGE,totalPosts)} / ${totalPosts}</span>`;
+
+  el.innerHTML = html;
+}
+
+function goPage(n) {
+  if (n < 1 || n > totalPages || n === currentPage) return;
+  currentPage = n;
+  document.getElementById('feed').scrollTop = 0;
+  loadPosts();
+}
+
+function _cardFingerprint(p) {
+  return JSON.stringify([
+    p.status, p.en_video_exists, p.ru_video_exists,
+    p.generated_video_path, p.generated_video_path_ru,
+    (p.image_paths || []).join(','),
+  ]);
+}
+
+function renderFeed() {
+  const feed = document.getElementById('feed');
   if (!posts.length) {
-    el.innerHTML = `<div class="empty-list">No ${currentFilter === 'all' ? '' : currentFilter + ' '}posts</div>`;
+    feed.innerHTML = `<div class="feed-inner"><div class="empty-state">
+      <div class="empty-icon">📭</div>
+      <div>No ${currentFilter === 'all' ? '' : 'active '}posts</div>
+    </div></div>`;
     return;
   }
-  el.innerHTML = posts.map(p => {
-    const thumb = p.image_paths?.[0];
-    const thumbEl = thumb
-      ? `<img class="post-card-thumb" src="/api/media?path=${enc(thumb)}" loading="lazy" onerror="this.style.display='none'">`
-      : `<div class="post-card-placeholder">🎮</div>`;
-    const dtObj = new Date((p.created_at || '').replace(' ', 'T'));
-    const dt = isNaN(dtObj) ? (p.created_at || '') : dtObj.toLocaleString('ru-RU', {
-      day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
-    });
-    const hasVid = p.generated_video_path || p.generated_video_path_ru;
-    return `
-      <div class="post-card${p.id === currentPostId ? ' selected' : ''}" onclick="selectPost(${p.id})">
-        ${thumbEl}
-        <div class="post-card-meta">
-          <div class="post-card-title">${esc(p.article_title || 'Untitled')}</div>
-          <div class="post-card-footer">
-            <span class="badge badge-${p.status}">${p.status}</span>
-            <span class="post-card-date">${dt}</span>
-            ${hasVid ? '<span class="video-icons">🎬</span>' : ''}
-          </div>
-        </div>
-      </div>`;
-  }).join('');
+
+  let inner = feed.querySelector('.feed-inner');
+  // First render or filter/page change: build from scratch
+  if (!inner) {
+    inner = document.createElement('div');
+    inner.className = 'feed-inner';
+    feed.innerHTML = '';
+    feed.appendChild(inner);
+  }
+
+  const existingIds = new Set([...inner.children].map(el => Number(el.dataset.pid)));
+  const newIds      = new Set(posts.map(p => p.id));
+
+  // Remove cards no longer in this page
+  for (const el of [...inner.children]) {
+    if (!newIds.has(Number(el.dataset.pid))) el.remove();
+  }
+
+  // Insert / update in order
+  posts.forEach((p, i) => {
+    const fp  = _cardFingerprint(p);
+    const cur = inner.children[i];
+
+    if (cur && Number(cur.dataset.pid) === p.id) {
+      // Same position — only patch if data changed
+      if (_cardHashes[p.id] !== fp) {
+        _cardHashes[p.id] = fp;
+        cur.outerHTML = renderCard(p);
+      }
+    } else {
+      // New card or order changed — insert
+      _cardHashes[p.id] = fp;
+      const tmp = document.createElement('div');
+      tmp.innerHTML = renderCard(p);
+      const newEl = tmp.firstElementChild;
+      if (cur) inner.insertBefore(newEl, cur);
+      else     inner.appendChild(newEl);
+    }
+  });
 }
 
-// ─── Select post ───────────────────────────────────────────────────────────
-async function selectPost(id) {
-  currentPostId = id;
-  renderList(); // re-highlight
-  const panel = document.getElementById('detailPanel');
-  panel.innerHTML = `<div class="empty-state"><div class="spin" style="width:22px;height:22px;border-width:3px"></div></div>`;
-  try {
-    const res = await fetch(`/api/posts/${id}`);
-    if (!res.ok) throw new Error('Post not found');
-    renderDetail(await res.json());
-  } catch (e) {
-    panel.innerHTML = `<div class="empty-state"><div>❌ ${esc(e.message)}</div></div>`;
-  }
-}
+function renderCard(p) {
+  const isPending    = p.status === 'pending';
+  const isActionable = p.status === 'sent' || p.status === 'approved';
+  const hasEnVid     = p.en_video_exists;
+  const hasRuVid     = p.ru_video_exists;
 
-// ─── Render detail ─────────────────────────────────────────────────────────
-function renderDetail(p) {
-  const panel = document.getElementById('detailPanel');
-  const isPending   = p.status === 'pending';
-  const isPublished = p.status === 'sent' || p.status === 'approved';
-  const hasEnVid    = p.en_video_exists;
-  const hasRuVid    = p.ru_video_exists;
+  const dtObj = new Date((p.created_at || '').replace(' ', 'T'));
+  const dt    = isNaN(dtObj) ? (p.created_at || '') : dtObj.toLocaleString('ru-RU', {
+    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+  });
 
-  // ── Article images ──
-  const imagesHtml = (p.image_paths || []).map(img =>
-    `<img src="/api/media?path=${enc(img)}" loading="lazy" onerror="this.style.display='none'">`
-  ).join('');
+  // All images row
+  const allImgs = (p.image_paths || []);
+  const imagesHtml = allImgs.length > 0
+    ? `<div class="card-images">${allImgs.map(img =>
+        `<img src="/api/media?path=${enc(img)}" loading="lazy" onerror="this.parentElement.removeChild(this)">`
+      ).join('')}</div>`
+    : '';
 
-  // ── Action: approve / cancel ──
-  const approveHtml = isPending ? `
-    <div class="action-group">
-      <div class="action-group-label">📬 Post Actions</div>
-      <div class="btn-row">
-        <button class="btn btn-success" onclick="approvePost(${p.id}, this)">✅ Approve &amp; Publish to Telegram</button>
-        <button class="btn btn-danger"  onclick="cancelPost(${p.id})">✕ Cancel</button>
-      </div>
-    </div>` : '';
+  const progressHtml = _renderProgress(p.id);
 
-  // ── Action: generate video ──
-  const videoGenHtml = isPublished ? `
-    <div class="action-group">
-      <div class="action-group-label">🎬 Generate Video</div>
-      <div class="btn-row">
-        <button class="btn btn-primary" onclick="generateVideo(${p.id}, 'both')">🌍 EN + RU</button>
-        <button class="btn btn-outline" onclick="generateVideo(${p.id}, 'en')">🇬🇧 EN only</button>
-        <button class="btn btn-outline" onclick="generateVideo(${p.id}, 'ru')">🇷🇺 RU only</button>
-      </div>
-    </div>` : '';
-
-  // ── Action: social publish ──
-  let publishHtml = '';
-  if (hasEnVid || hasRuVid) {
-    let btns = '';
-    if (hasEnVid) {
-      btns += `<button class="btn btn-ig" onclick="publishTo(${p.id}, 'instagram', this)">📲 Instagram EN</button>`;
-      btns += `<button class="btn btn-yt" onclick="publishTo(${p.id}, 'youtube',   this)">▶️ YouTube EN</button>`;
-    }
-    if (hasRuVid) {
-      btns += `<button class="btn btn-ig" onclick="publishTo(${p.id}, 'instagram-ru', this)">📲 Instagram RU</button>`;
-      btns += `<button class="btn btn-yt" onclick="publishTo(${p.id}, 'youtube-ru',   this)">▶️ YouTube RU</button>`;
-    }
-    if (hasEnVid && hasRuVid)
-      btns += `<button class="btn btn-outline" onclick="publishTo(${p.id}, 'all-combined', this)">🌍 All EN+RU</button>`;
-    else if (hasEnVid)
-      btns += `<button class="btn btn-outline" onclick="publishTo(${p.id}, 'all', this)">🌐 All EN</button>`;
-    else if (hasRuVid)
-      btns += `<button class="btn btn-outline" onclick="publishTo(${p.id}, 'all-ru', this)">🌐 All RU</button>`;
-
-    publishHtml = `
-      <div class="action-group">
-        <div class="action-group-label">🚀 Publish Video</div>
-        <div class="btn-row">${btns}</div>
-      </div>`;
-  }
-
-  // ── Video previews ──
-  let videoSectionHtml = '';
-  if (hasEnVid || hasRuVid) {
-    let items = '';
-    if (hasEnVid)
-      items += `<div class="video-item">
-        <div class="video-item-label">🇬🇧 English</div>
-        <video controls><source src="/api/media?path=${enc(p.generated_video_path)}" type="video/mp4"></video>
-      </div>`;
-    if (hasRuVid)
-      items += `<div class="video-item">
-        <div class="video-item-label">🇷🇺 Russian</div>
-        <video controls><source src="/api/media?path=${enc(p.generated_video_path_ru)}" type="video/mp4"></video>
-      </div>`;
-    videoSectionHtml = `
-      <div class="video-section">
-        <div class="text-section-label">Generated Videos</div>
-        <div class="video-grid">${items}</div>
-      </div>`;
-  }
-
-  // ── Post texts ──
+  // One row: [RU text | RU vid | EN text | EN vid]
+  // Text is hidden for posts already sent to Telegram (status sent/approved)
+  const tgPublished = p.status === 'sent' || p.status === 'approved';
   const enText = p.post_text || '';
   const ruText = p.ru_post_text || '';
-  const textSections = `
-    <div class="text-section">
-      <div class="text-section-label">🇬🇧 English Post</div>
-      <div class="text-body">${sanitizeTg(enText)}</div>
-    </div>
-    ${ruText ? `<div class="text-section">
-      <div class="text-section-label">🇷🇺 Russian Post</div>
-      <div class="text-body">${sanitizeTg(ruText)}</div>
-    </div>` : ''}`;
+  let langRowHtml = '';
+  if (enText || ruText || hasEnVid || hasRuVid) {
+    const ruTextCol = (!tgPublished && ruText)
+      ? `<div class="text-col"><div class="text-lang-label">🇷🇺 Russian</div><div class="text-body">${sanitizeTg(ruText)}</div></div>`
+      : '';
+    const ruVidEl = hasRuVid
+      ? `<div class="vid-item"><div class="text-lang-label">🇷🇺 Russian</div><video controls playsinline preload="none" poster="/api/media?path=${enc(p.image_paths?.[0] || '')}"><source src="/api/media?path=${enc(p.generated_video_path_ru)}" type="video/mp4"></video></div>`
+      : (tgPublished ? '' : `<div class="vid-item"></div>`);
+    const enTextCol = (!tgPublished && enText)
+      ? `<div class="text-col"><div class="text-lang-label">🇬🇧 English</div><div class="text-body">${sanitizeTg(enText)}</div></div>`
+      : '';
+    const enVidEl = hasEnVid
+      ? `<div class="vid-item"><div class="text-lang-label">🇬🇧 English</div><video controls playsinline preload="none" poster="/api/media?path=${enc(p.image_paths?.[0] || '')}"><source src="/api/media?path=${enc(p.generated_video_path)}" type="video/mp4"></video></div>`
+      : (tgPublished ? '' : `<div class="vid-item"></div>`);
+    // Grid columns depend on whether text is shown
+    const gridCols = tgPublished
+      ? (hasRuVid && hasEnVid ? 'grid-template-columns:1fr 1fr' : 'grid-template-columns:1fr')
+      : '';
+    langRowHtml = `<div class="card-lang-row" style="${gridCols}">${ruTextCol}${ruVidEl}${enTextCol}${enVidEl}</div>`;
+  }
 
-  panel.innerHTML = `
-    <div class="detail-header">
-      <div class="detail-title">${esc(p.article_title || 'Untitled')}</div>
-      <div class="detail-meta">
-        <span class="badge badge-${p.status}">${p.status}</span>
-        <span>#${p.id}</span>
-        ${p.article_url ? `<a href="${esc(p.article_url)}" target="_blank" rel="noopener">Source ↗</a>` : ''}
-        <span>${(() => { const d = new Date((p.created_at||'').replace(' ','T')); return isNaN(d) ? p.created_at||'' : d.toLocaleString('ru-RU'); })()}</span>
+  let btnHtml = '';
+  if (isPending) {
+    btnHtml += `<button class="btn btn-success" onclick="approvePost(${p.id}, this)">✅ Approve</button>`;
+    btnHtml += `<button class="btn btn-danger btn-sm" onclick="cancelPost(${p.id})">✕ Cancel</button>`;
+  }
+  if (isActionable) {
+    const ytSkip = p.yt_skip_count || 0;
+    btnHtml += `<div class="yt-query-row">
+      <input id="ytq_${p.id}" type="text" placeholder="YouTube search query (auto)" value="">
+      <span class="yt-skip-badge" title="YT skip offset">skip: ${ytSkip}</span>
+      <button class="btn btn-outline btn-sm" onclick="resetYtSkip(${p.id})" title="Reset skip to 0">↺</button>
+    </div>`;
+    btnHtml += `<div class="card-btn-row">`;
+    btnHtml += `<button class="btn btn-primary btn-sm" onclick="generateVideo(${p.id},'both')">🎬 EN+RU</button>`;
+    btnHtml += `<button class="btn btn-outline btn-sm" onclick="generateVideo(${p.id},'en')">🇬🇧 EN</button>`;
+    btnHtml += `<button class="btn btn-outline btn-sm" onclick="generateVideo(${p.id},'ru')">🇷🇺 RU</button>`;
+    if (hasEnVid) {
+      btnHtml += `<button class="btn btn-ig btn-sm" onclick="publishTo(${p.id},'instagram',this)">📲 IG EN</button>`;
+      btnHtml += `<button class="btn btn-yt btn-sm" onclick="publishTo(${p.id},'youtube',this)">▶️ YT EN</button>`;
+    }
+    if (hasRuVid) {
+      btnHtml += `<button class="btn btn-ig btn-sm" onclick="publishTo(${p.id},'instagram-ru',this)">📲 IG RU</button>`;
+      btnHtml += `<button class="btn btn-yt btn-sm" onclick="publishTo(${p.id},'youtube-ru',this)">▶️ YT RU</button>`;
+    }
+    if (hasEnVid && hasRuVid)
+      btnHtml += `<button class="btn btn-outline btn-sm" onclick="publishTo(${p.id},'all-combined',this)">🌍 All</button>`;
+    btnHtml += `</div>`;
+  }
+
+  return `<div class="card" id="card-${p.id}" data-pid="${p.id}">
+    <div class="card-header">
+      <div class="card-info">
+        <div class="card-title">${esc(p.article_title || 'Untitled')}</div>
+        <div class="card-meta">
+          <span class="badge badge-${p.status}">${p.status}</span>
+          <span>${dt}</span>
+          ${p.article_url ? `<a href="${esc(p.article_url)}" target="_blank" rel="noopener">Source ↗</a>` : ''}
+          <span class="card-id">#${p.id}</span>
+        </div>
       </div>
     </div>
+    ${imagesHtml}
+    <div class="card-content">
+      <div id="progressArea_${p.id}">${progressHtml}</div>
+    </div>
+    ${langRowHtml}
+    ${btnHtml ? `<div class="card-actions" style="flex-direction:column;align-items:stretch">${btnHtml}</div>` : ''}
+  </div>`;
+}
 
-    ${imagesHtml ? `<div class="images-row">${imagesHtml}</div>` : ''}
-
-    ${approveHtml}
-    ${videoGenHtml}
-    <div id="progressArea_${p.id}">${_renderProgress(p.id)}</div>
-    ${publishHtml}
-    ${videoSectionHtml}
-    <hr class="section-sep">
-    ${textSections}
-  `;
+async function refreshCard(id) {
+  try {
+    const res = await fetch(`/api/posts/${id}`);
+    if (!res.ok) return;
+    const detail = await res.json();
+    const idx = posts.findIndex(p => p.id === id);
+    if (idx !== -1) posts[idx] = { ...posts[idx], ...detail };
+    const p = idx !== -1 ? posts[idx] : detail;
+    delete _cardHashes[id]; // force re-render
+    const cardEl = document.getElementById(`card-${id}`);
+    if (cardEl) {
+      _cardHashes[id] = _cardFingerprint(p);
+      cardEl.outerHTML = renderCard(p);
+    }
+  } catch (e) { console.error('refreshCard:', e); }
 }
 
 // ─── Approve ───────────────────────────────────────────────────────────────
@@ -618,7 +634,6 @@ async function approvePost(id, btn) {
     if (data.error) throw new Error(data.error);
     toast(`Post #${id} published to Telegram! ✅`, 'success');
     await loadPosts();
-    await selectPost(id);
   } catch (e) {
     toast(`Approve failed: ${e.message}`, 'error');
     btn.disabled = false;
@@ -635,7 +650,6 @@ async function cancelPost(id) {
     if (data.error) throw new Error(data.error);
     toast(`Post #${id} cancelled`, 'info');
     await loadPosts();
-    await selectPost(id);
   } catch (e) {
     toast(`Cancel failed: ${e.message}`, 'error');
   }
@@ -656,7 +670,8 @@ function _renderProgress(id) {
 async function generateVideo(id, lang) {
   const area = document.getElementById(`progressArea_${id}`);
   if (!area) return;
-
+  const ytqEl = document.getElementById(`ytq_${id}`);
+  const ytQuery = ytqEl ? ytqEl.value.trim() : '';
   progressLogs[id] = [];
   area.innerHTML = `
     <div class="progress-panel">
@@ -676,10 +691,30 @@ async function generateVideo(id, lang) {
     const res  = await fetch(`/api/posts/${id}/generate-video`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lang }),
+      body: JSON.stringify({ lang, ...(ytQuery ? { yt_query: ytQuery } : {}) }),
     });
     const data = await res.json();
-    if (data.error) { addLog(`Error: ${data.error}`, 'log-error'); return; }
+    if (data.error) {
+      addLog(`Error: ${data.error}`, 'log-error');
+      // Stale task — offer reset button
+      if (res.status === 409) {
+        const logEl = document.getElementById(`plog_${id}`);
+        if (logEl) {
+          const btn = document.createElement('button');
+          btn.className = 'btn btn-danger btn-sm';
+          btn.style.marginTop = '8px';
+          btn.textContent = '🔄 Сбросить и повторить';
+          btn.onclick = async () => {
+            btn.disabled = true;
+            await fetch(`/api/posts/${id}/reset-task`, { method: 'POST' });
+            progressLogs[id] = [];
+            generateVideo(id, lang);
+          };
+          logEl.appendChild(btn);
+        }
+      }
+      return;
+    }
   } catch (e) {
     addLog(`Failed to start: ${e.message}`, 'log-error');
     return;
@@ -693,7 +728,7 @@ async function generateVideo(id, lang) {
       toast('Video generation complete! 🎬', 'success');
       // Retry a few times in case the DB write hasn't committed yet
       const refresh = (attempt) => {
-        selectPost(id);
+        refreshCard(id);
         if (attempt < 3) setTimeout(() => refresh(attempt + 1), 2000);
       };
       setTimeout(() => refresh(0), 800);
@@ -731,23 +766,76 @@ async function generateVideo(id, lang) {
     }
   };
 }
-
+// ─── Reset YT skip counter ─────────────────────────────────────────────────────
+async function resetYtSkip(id) {
+  try {
+    await fetch(`/api/posts/${id}/reset-yt-skip`, { method: 'POST' });
+    // Update badge without full reload
+    const badge = document.querySelector(`#card-${id} .yt-skip-badge`);
+    if (badge) badge.textContent = 'skip: 0';
+    toast('YT skip reset to 0', 'info');
+  } catch (e) {
+    toast(`Reset failed: ${e.message}`, 'error');
+  }
+}
 // ─── Publish to social ─────────────────────────────────────────────────────
 async function publishTo(id, platform, btn) {
   const orig = btn.innerHTML;
   btn.disabled = true;
   btn.innerHTML = '<span class="spin"></span>';
+
+  // Show progress panel in the card
+  const area = document.getElementById(`progressArea_${id}`);
+  if (area) {
+    area.innerHTML = `
+      <div class="progress-panel">
+        <div class="progress-label">📤 Publishing to ${platform}</div>
+        <div class="progress-log" id="publog_${id}"></div>
+      </div>`;
+  }
+  const addLog = (msg, cls = 'log-progress') => {
+    const el = document.getElementById(`publog_${id}`);
+    if (el) { el.innerHTML += `<div class="${cls}">${esc(msg)}</div>`; el.scrollTop = el.scrollHeight; }
+  };
+
   try {
-    const res  = await fetch(`/api/posts/${id}/publish/${platform}`, { method: 'POST' });
+    const res = await fetch(`/api/posts/${id}/publish/${platform}`, { method: 'POST' });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    toast(`Published! ${data.result}`, 'success');
   } catch (e) {
-    toast(`Publish failed (${platform}): ${e.message}`, 'error');
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = orig;
+    addLog(`Failed to start: ${e.message}`, 'log-error');
+    btn.disabled = false; btn.innerHTML = orig;
+    return;
   }
+
+  // Connect to SSE stream
+  const sse = new EventSource(`/api/posts/${id}/publish-stream`);
+  sse.onmessage = (ev) => {
+    let event;
+    try { event = JSON.parse(ev.data); } catch { return; }
+    if (event.type === 'heartbeat') return;
+    const cls = event.type === 'error' ? 'log-error'
+              : event.type === 'done'  ? 'log-done'
+              : (event.message||'').startsWith('✅') ? 'log-done'
+              : 'log-progress';
+    if (event.message) addLog(event.message, cls);
+    if (event.type === 'done' || event.type === 'closed') {
+      sse.close();
+      btn.disabled = false; btn.innerHTML = orig;
+      if (event.type === 'done') {
+        toast(`Published! ✅`, 'success');
+        setTimeout(() => loadPosts(), 1500);
+      }
+    }
+    if (event.type === 'error') {
+      sse.close();
+      btn.disabled = false; btn.innerHTML = orig;
+    }
+  };
+  sse.onerror = () => {
+    sse.close();
+    btn.disabled = false; btn.innerHTML = orig;
+  };
 }
 
 // ─── Toast ─────────────────────────────────────────────────────────────────
@@ -792,8 +880,73 @@ function sanitizeTg(html) {
 }
 
 // ─── Init ──────────────────────────────────────────────────────────────────
-loadPosts();
-setInterval(loadPosts, 30_000);
+loadPosts().then(() => _reconnectActiveTasks());
+setInterval(loadPosts, 60_000);
+
+// ─── Reconnect active tasks after page reload ──────────────────────────────
+async function _reconnectActiveTasks() {
+  for (const p of posts) {
+    try {
+      const res  = await fetch(`/api/posts/${p.id}/task-status`);
+      const data = await res.json();
+      if (!data.running && !data.logs.length) continue;
+      // Restore saved log entries
+      progressLogs[p.id] = data.logs.map(e => ({
+        msg: e.message,
+        cls: e.type === 'error' ? 'log-error' : e.type === 'done' ? 'log-done' : 'log-progress'
+      }));
+      // Re-render the card to show the progress panel
+      delete _cardHashes[p.id];
+      const cardEl = document.getElementById(`card-${p.id}`);
+      if (cardEl) {
+        _cardHashes[p.id] = _cardFingerprint(p);
+        cardEl.outerHTML = renderCard(p);
+      }
+      // If still running, reconnect SSE
+      if (data.running) {
+        _reconnectSSE(p.id);
+      }
+    } catch (e) { /* ignore */ }
+  }
+}
+
+function _reconnectSSE(id) {
+  if (activeSSE) { activeSSE.close(); activeSSE = null; }
+  let taskDone = false;
+  const addLog = (msg, cls = 'log-progress') => {
+    if (!progressLogs[id]) progressLogs[id] = [];
+    progressLogs[id].push({ msg, cls });
+    const logEl = document.getElementById(`plog_${id}`);
+    if (logEl) { logEl.innerHTML += `<div class="${cls}">${esc(msg)}</div>`; logEl.scrollTop = logEl.scrollHeight; }
+  };
+  activeSSE = new EventSource(`/api/posts/${id}/video-stream`);
+  activeSSE.onmessage = (ev) => {
+    let event;
+    try { event = JSON.parse(ev.data); } catch { return; }
+    if (event.type === 'heartbeat') return;
+    const cls = event.type === 'error' ? 'log-error' : event.type === 'done' ? 'log-done'
+              : (event.message||'').startsWith('✅') ? 'log-done' : 'log-progress';
+    if (event.message) addLog(event.message, cls);
+    if (event.type === 'done' || event.type === 'video_ready') taskDone = true;
+    if (event.type === 'closed' || event.type === 'done' || event.type === 'video_ready') {
+      activeSSE.close(); activeSSE = null;
+      toast('Video generation complete! 🎬', 'success');
+      const refresh = (n) => { refreshCard(id); if (n < 3) setTimeout(() => refresh(n+1), 2000); };
+      setTimeout(() => refresh(0), 800);
+    }
+  };
+  activeSSE.onerror = () => {
+    if (taskDone) {
+      activeSSE.close(); activeSSE = null;
+      toast('Video generation complete! 🎬', 'success');
+      const refresh = (n) => { refreshCard(id); if (n < 3) setTimeout(() => refresh(n+1), 2000); };
+      setTimeout(() => refresh(0), 800);
+    } else {
+      addLog('Connection lost', 'log-error');
+      activeSSE.close(); activeSSE = null;
+    }
+  };
+}
 </script>
 </body>
 </html>
