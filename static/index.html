@@ -118,7 +118,7 @@
     }
     .card-meta a { color: var(--accent2); text-decoration: none; }
     .card-meta a:hover { text-decoration: underline; }
-    .card-id { color: var(--border); font-size: 10px; }
+    .card-id { color: var(--text); font-size: 10px; }
     .card-content { padding: 0 16px; }
 
     /* ── Card: images row ─────────────────────────────────────── */
@@ -247,6 +247,8 @@
     .btn-yt { background: #ff0000; color: #fff; }
     .btn-yt:hover:not(:disabled) { background: #cc0000; }
     .btn-sm { padding: 6px 12px; font-size: 12px; min-height: 34px; }
+    .btn-published { opacity: 0.6; }
+    .pub-done { font-size: 14px; pointer-events: none; }
 
     /* ── Card actions area ───────────────────────────────────── */
     .card-actions {
@@ -589,13 +591,16 @@ function renderCard(p) {
   // All images + source videos row
   const allImgs = (p.image_paths || []);
   const allVids = (p.video_paths || []);
+  const galleryUrls = allImgs.map(x => '/api/media?path=' + enc(x));
+  // Store urls for this card's gallery (will be set after render via _galleryMap)
   const imagesHtml = (allImgs.length > 0 || allVids.length > 0)
-    ? `<div class="card-images">${allImgs.map((img, i) =>
-        `<img src="/api/media?path=${enc(img)}" loading="lazy" onerror="this.parentElement.removeChild(this)" onclick="openGallery(${JSON.stringify(allImgs.map(x=>'/api/media?path='+enc(x)))},${i})">`
+    ? `<div class="card-images" data-gallery-id="${p.id}">${allImgs.map((img, i) =>
+        `<img src="/api/media?path=${enc(img)}" loading="lazy" onerror="this.parentElement.removeChild(this)" onclick="openGallery(${p.id},${i})">`
       ).join('')}${allVids.map(vid =>
         `<video controls playsinline preload="none" style="max-height:220px;border-radius:6px"><source src="/api/media?path=${enc(vid)}" type="video/mp4"></video>`
       ).join('')}</div>`
     : '';
+  _galleryMap[p.id] = galleryUrls;
 
   const progressHtml = _renderProgress(p.id);
 
@@ -634,6 +639,7 @@ function renderCard(p) {
   }
   if (isActionable) {
     const ytSkip = p.yt_skip_count || 0;
+    btnHtml += `<button class="btn btn-outline" style="color:var(--muted);font-size:12px;min-height:36px" onclick="markDone(${p.id}, this)">✔ Done — remove from feed</button>`;
     btnHtml += `<div class="btn-section">
       <div class="btn-section-label">🎬 Generate video</div>
       <div class="yt-query-row">
@@ -648,14 +654,16 @@ function renderCard(p) {
       </div>
     </div>`;
     if (hasEnVid || hasRuVid) {
+      const pub = new Set(p.published_platforms || []);
+      const done = k => pub.has(k) ? ' <span class="pub-done" title="Already published">✅</span>' : '';
       let pubBtns = '';
       if (hasEnVid) {
-        pubBtns += `<button class="btn btn-ig" onclick="publishTo(${p.id},'instagram',this)">📲 Instagram EN</button>`;
-        pubBtns += `<button class="btn btn-yt" onclick="publishTo(${p.id},'youtube',this)">▶️ YouTube EN</button>`;
+        pubBtns += `<button class="btn btn-ig${pub.has('instagram') ? ' btn-published' : ''}" onclick="publishTo(${p.id},'instagram',this)">📲 Instagram EN${done('instagram')}</button>`;
+        pubBtns += `<button class="btn btn-yt${pub.has('youtube') ? ' btn-published' : ''}" onclick="publishTo(${p.id},'youtube',this)">▶️ YouTube EN${done('youtube')}</button>`;
       }
       if (hasRuVid) {
-        pubBtns += `<button class="btn btn-ig" onclick="publishTo(${p.id},'instagram-ru',this)">📲 Instagram RU</button>`;
-        pubBtns += `<button class="btn btn-yt" onclick="publishTo(${p.id},'youtube-ru',this)">▶️ YouTube RU</button>`;
+        pubBtns += `<button class="btn btn-ig${pub.has('instagram-ru') ? ' btn-published' : ''}" onclick="publishTo(${p.id},'instagram-ru',this)">📲 Instagram RU${done('instagram-ru')}</button>`;
+        pubBtns += `<button class="btn btn-yt${pub.has('youtube-ru') ? ' btn-published' : ''}" onclick="publishTo(${p.id},'youtube-ru',this)">▶️ YouTube RU${done('youtube-ru')}</button>`;
       }
       if (hasEnVid && hasRuVid)
         pubBtns += `<button class="btn btn-outline" onclick="publishTo(${p.id},'all-combined',this)">🌍 Publish All</button>`;
@@ -951,10 +959,28 @@ function esc(s) {
 }
 function enc(s) { return encodeURIComponent(s || ''); }
 
+async function markDone(id, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Removing…';
+  try {
+    const res = await fetch(`/api/posts/${id}/mark-done`, { method: 'POST' });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    document.getElementById(`card-${id}`)?.remove();
+  } catch (e) {
+    toast(`Error: ${e.message}`, 'error');
+    btn.disabled = false;
+    btn.textContent = '✔ Done — remove from feed';
+  }
+}
+
 /* ── Lightbox ──────────────────────────────────────────────────── */
 let _lbUrls = [], _lbIdx = 0;
-function openGallery(urls, idx) {
-  _lbUrls = urls; _lbIdx = idx;
+const _galleryMap = {};  // postId -> [urls]
+function openGallery(postId, idx) {
+  _lbUrls = _galleryMap[postId] || [];
+  _lbIdx = idx;
+  if (!_lbUrls.length) return;
   _lbShow();
   document.addEventListener('keydown', _lbKey);
 }

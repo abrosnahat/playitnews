@@ -62,9 +62,12 @@ def _run(args: list[str], cwd: str | None = None, timeout: int = 120) -> bool:
             timeout=timeout,
             cwd=cwd,
         )
-        if result.returncode != 0:
-            logger.error("Command failed [%s]: %s", args[0], result.stderr[-600:])
+        # yt-dlp exits with 101 when --max-downloads limit is reached — treat as success
+        if result.returncode not in (0, 101):
+            logger.error("Command failed [%s] (rc=%d): %s", args[0], result.returncode, result.stderr[-600:])
             return False
+        if result.stderr:
+            logger.debug("Command stderr [%s]: %s", args[0], result.stderr[-400:])
         return True
     except subprocess.TimeoutExpired:
         logger.error("Command timed out: %s", args[:3])
@@ -1045,22 +1048,28 @@ async def _download_full_yt_video(
     clips_dir = os.path.join(workdir, "yt_clips")
     os.makedirs(clips_dir, exist_ok=True)
 
+    # Prefer 720p mp4 to avoid YouTube n-challenge throttling on higher formats;
+    # fall back to merged 'best' (always available without n-challenge).
+    _FMT = ("bestvideo[height=720][ext=mp4]/bestvideo[height<=720][ext=mp4]"
+            "/bestvideo[height<=720]/bestvideo[ext=mp4]/bestvideo/best")
+
     if is_url:
         ydl_args = [
             "yt-dlp",
-            "--no-playlist", "--no-warnings", "--quiet",
-            "--format", "bestvideo[height=1080][ext=mp4]/bestvideo[height=1080]/bestvideo[height<=1080][ext=mp4]/bestvideo[height<=720]",
+            "--no-playlist", "--no-warnings",
+            "--cookies-from-browser", "chrome",
+            "--format", _FMT,
             "--max-filesize", f"{YT_MAX_FILESIZE}M",
             "--output", os.path.join(clips_dir, "source.%(ext)s"),
             url_or_search,
         ]
     else:
-        # Download skip+1 results; the last file (highest autonumber) is the skip-th result.
-        fetch_count = skip + 3  # slight buffer in case some are filtered by max-filesize
+        fetch_count = skip + 3
         ydl_args = [
             "yt-dlp",
-            "--no-playlist", "--no-warnings", "--quiet",
-            "--format", "bestvideo[height=1080][ext=mp4]/bestvideo[height=1080]/bestvideo[height<=1080][ext=mp4]/bestvideo[height<=720]",
+            "--no-playlist", "--no-warnings",
+            "--cookies-from-browser", "chrome",
+            "--format", _FMT,
             "--max-filesize", f"{YT_MAX_FILESIZE}M",
             "--max-downloads", str(skip + 1),
             "--output", os.path.join(clips_dir, "%(autonumber)s.%(ext)s"),
@@ -1075,9 +1084,11 @@ async def _download_full_yt_video(
     if not ok:
         logger.warning("yt-dlp finished with error — checking partial downloads")
 
+    dir_contents = os.listdir(clips_dir)
+    logger.info("clips_dir contents after yt-dlp: %s", dir_contents)
     all_paths = sorted(
         os.path.join(clips_dir, f)
-        for f in os.listdir(clips_dir)
+        for f in dir_contents
         if f.endswith((".mp4", ".webm", ".mkv")) and not f.endswith(".part")
     )
     if not all_paths:

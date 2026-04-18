@@ -420,11 +420,13 @@ async def generate_thumbnail_hook(article_title: str, lang: str = "ru") -> str:
     lang: "ru" → Russian output, "en" → English output.
     Falls back to the original title on failure.
     """
-    lang_instruction = (
-        "Write the caption in RUSSIAN only. Use Cyrillic letters."
-        if lang == "ru" else
-        "Write the caption in ENGLISH only."
-    )
+    if lang == "en":
+        system_content = "You are a thumbnail copywriter. You ONLY write in ENGLISH. Never use Cyrillic."
+        lang_instruction = "Write in ENGLISH only. Use Latin letters only. Never use Cyrillic or Russian."
+    else:
+        system_content = "Ты копирайтер для thumbnail. Пишешь ТОЛЬКО на русском языке кириллицей."
+        lang_instruction = "Пиши ТОЛЬКО на русском. Используй только кириллицу."
+
     user_message = (
         "You are writing text for a gaming news video thumbnail.\n"
         "Create a SHORT, PUNCHY caption (2–3 words) that creates curiosity or urgency "
@@ -440,11 +442,30 @@ async def generate_thumbnail_hook(article_title: str, lang: str = "ru") -> str:
     )
     try:
         hook = (await _call_ollama_chat(
-            [{"role": "user", "content": user_message}], num_predict=20, timeout=30
+            [{"role": "system", "content": system_content},
+             {"role": "user", "content": user_message}],
+            num_predict=20, timeout=30
         )).strip('"\'').upper()
+        # Validate: for EN reject if result contains Cyrillic; for RU reject if only Latin
+        if lang == "en" and re.search(r'[а-яёА-ЯЁ]', hook):
+            logger.warning("Thumbnail hook for EN contained Cyrillic ('%s'), retrying…", hook)
+            raise ValueError("cyrillic in en hook")
         if hook and len(hook) <= 60 and "\n" not in hook:
             logger.info("Thumbnail hook: '%s' ← '%s'", hook, article_title[:60])
             return hook
+    except ValueError:
+        # Retry with even more explicit prompt
+        try:
+            simple = f"Write a 2-word English gaming thumbnail caption for: {article_title}. English only, no Russian:"
+            hook = (await _call_ollama_chat(
+                [{"role": "system", "content": "Reply in English only."},
+                 {"role": "user", "content": simple}],
+                num_predict=15, timeout=30
+            )).strip('"\'').upper()
+            if hook and not re.search(r'[а-яёА-ЯЁ]', hook) and len(hook) <= 60:
+                return hook
+        except Exception:
+            pass
     except Exception as exc:
         logger.warning("generate_thumbnail_hook failed: %s", exc)
     return article_title

@@ -227,7 +227,68 @@ async def _do_publish_telegram(post_id: int) -> None:
     text       = post["post_text"]
     ru_text    = post.get("ru_post_text")
     images     = [p for p in post.get("image_paths", [])  if os.path.exists(p)]
-    videos     = [p for p in post.get("video_paths", [])  if os.path.exists(p)]
+    TG_MAX_BYTES = 50 * 1024 * 1024  # Telegram Bot API hard limit
+
+    def _compress_for_tg(src: str) -> str:
+        """Compress video to fit under 50 MB using ffmpeg bitrate targeting. Returns path to compressed file."""
+        import subprocess as _sp, json as _json
+        # Probe duration
+        r = _sp.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "json", src],
+            capture_output=True, text=True, timeout=15,
+        )
+        duration = float(_json.loads(r.stdout).get("format", {}).get("duration", 0) or 0)
+        if duration <= 0:
+            return src  # can't probe, send as-is
+        target_mb = 45  # conservative target to stay safely under 50MB
+        audio_kbps = 128
+        total_kbits = target_mb * 8 * 1024
+        video_kbps = max(200, int(total_kbits / duration) - audio_kbps)
+        out = src.rsplit(".", 1)[0] + "_tg.mp4"
+        cmd = [
+            "ffmpeg", "-y", "-i", src,
+            "-c:v", "libx264", "-preset", "fast",
+            "-b:v", f"{video_kbps}k",
+            "-maxrate", f"{int(video_kbps * 1.5)}k",
+            "-bufsize", f"{video_kbps * 3}k",
+            "-c:a", "aac", "-b:a", f"{audio_kbps}k",
+            "-movflags", "+faststart",
+            out,
+        ]
+        result = _sp.run(cmd, capture_output=True, timeout=300)
+        if result.returncode == 0 and os.path.exists(out) and os.path.getsize(out) < TG_MAX_BYTES:
+            logger.info("Compressed %s → %s (%.1fMB)", src, out, os.path.getsize(out)/1024/1024)
+            return out
+        logger.warning("Compression failed or still too large for %s, returncode=%s stderr=%s",
+                       src, result.returncode, result.stderr[-500:] if result.stderr else "")
+        return src  # fallback to original
+
+    raw_videos = [p for p in post.get("video_paths", []) if os.path.exists(p)]
+    videos = []
+    for vp in raw_videos:
+        if os.path.getsize(vp) > TG_MAX_BYTES:
+            logger.info("Post #%d: video %s is %.1fMB, compressing…", post_id, vp, os.path.getsize(vp)/1024/1024)
+            vp = _compress_for_tg(vp)
+        if os.path.getsize(vp) <= TG_MAX_BYTES:
+            videos.append(vp)
+        else:
+            logger.warning("Post #%d: skipping video %s — still >50MB after compression", post_id, vp)
+
+    def _probe_dims(path: str):
+        """Return (width, height) of a video using ffprobe, or (None, None) on failure."""
+        try:
+            import subprocess as _sp, json as _json
+            r = _sp.run(
+                ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height", "-of", "json", path],
+                capture_output=True, text=True, timeout=10,
+            )
+            d = _json.loads(r.stdout)
+            s = d.get("streams", [{}])[0]
+            return s.get("width"), s.get("height")
+        except Exception:
+            return None, None
 
     async def _send(chat_id, caption, footer=None):
         full_caption = caption
@@ -248,18 +309,23 @@ async def _do_publish_telegram(post_id: int) -> None:
                     parse_mode=ParseMode.HTML if i == 0 else None,
                 ))
             for j, p in enumerate(videos):
+                w, h = _probe_dims(p)
                 media.append(InputMediaVideo(
                     media=open(p, "rb"),
                     caption=full_caption if not images and j == 0 else None,
                     parse_mode=ParseMode.HTML if not images and j == 0 else None,
+                    width=w, height=h,
+                    supports_streaming=True,
                 ))
             if len(media) == 1:
                 if images:
                     await bot.send_photo(chat_id=chat_id, photo=open(images[0], "rb"),
                                          caption=full_caption, parse_mode=ParseMode.HTML)
                 else:
+                    w, h = _probe_dims(videos[0])
                     await bot.send_video(chat_id=chat_id, video=open(videos[0], "rb"),
-                                         caption=full_caption, parse_mode=ParseMode.HTML)
+                                         caption=full_caption, parse_mode=ParseMode.HTML,
+                                         width=w, height=h, supports_streaming=True)
             else:
                 await bot.send_media_group(chat_id=chat_id, media=media)
         else:
@@ -268,7 +334,7 @@ async def _do_publish_telegram(post_id: int) -> None:
 
     async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
         try:
-            await _send(TELEGRAM_CHANNEL_ID, text)
+            await _send(TELEGRAM_CHANNEL_ID, text, footer="@playitgamesnews")
             if TELEGRAM_SECOND_CHANNEL_ID and ru_text:
                 try:
                     await _send(TELEGRAM_SECOND_CHANNEL_ID, ru_text, footer="@readitgames")
@@ -290,6 +356,21 @@ def api_cancel(post_id: int):
         return jsonify({"error": f"Cannot cancel post with status '{post['status']}'"}), 400
     db.update_post_status(post_id, "cancelled")
     return jsonify({"success": True, "status": "cancelled"})
+
+
+@app.route("/api/posts/<int:post_id>/mark-done", methods=["POST"])
+def api_mark_done(post_id: int):
+    """Mark a sent post as fully published (all 4 platforms) so it leaves the active feed."""
+    post = db.get_scheduled_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+    all_platforms = json.dumps(["instagram", "instagram-ru", "youtube", "youtube-ru"])
+    with db.get_conn() as conn:
+        conn.execute(
+            "UPDATE scheduled_posts SET published_platforms = ? WHERE id = ?",
+            (all_platforms, post_id),
+        )
+    return jsonify({"success": True})
 
 
 # ---------------------------------------------------------------------------
