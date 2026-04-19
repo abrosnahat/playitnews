@@ -393,25 +393,33 @@ async def extract_game_name(article_title: str) -> str:
 async def translate_title_to_english(article_title: str) -> str:
     """
     Translate a Russian (or mixed) article headline to a concise English YouTube title.
-    Returns the English title, or the original string on failure.
+    Returns the English title, or an empty string on failure (never returns Cyrillic).
     """
+    system_content = (
+        "You are a YouTube title translator. You ONLY write in ENGLISH. "
+        "Never use Cyrillic. Never respond in Russian. Latin letters only."
+    )
     user_message = (
         "Translate the following gaming news headline into English. "
         "Keep it concise (max 80 characters), catchy, and suitable as a YouTube video title. "
+        "IMPORTANT: Your answer must be in English only. Use Latin letters only. Never use Cyrillic. "
         "Return ONLY the translated title, nothing else.\n\n"
         f"Headline: {article_title}\n\n"
         "English title:"
     )
     try:
         translated = (await _call_ollama_chat(
-            [{"role": "user", "content": user_message}], num_predict=40, timeout=30
+            [{"role": "system", "content": system_content},
+             {"role": "user", "content": user_message}], num_predict=40, timeout=30
         )).strip('"\'')
-        if translated and len(translated) <= 100:
+        if translated and len(translated) <= 100 and not re.search(r'[а-яёА-ЯЁ]', translated):
             logger.info("Translated title: '%s' ← '%s'", translated, article_title[:60])
             return translated
+        if translated:
+            logger.warning("translate_title_to_english returned Cyrillic, discarding: '%s'", translated[:60])
     except Exception as exc:
         logger.warning("translate_title_to_english failed: %s", exc)
-    return article_title
+    return ""
 
 
 async def generate_thumbnail_hook(article_title: str, lang: str = "ru") -> str:

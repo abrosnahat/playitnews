@@ -36,6 +36,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-5s  %(message)s",
 )
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 # DB migration: add published_platforms column if missing
 try:
@@ -854,9 +855,10 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         if not en_path or not os.path.exists(en_path):
             raise ValueError("EN video not found — generate video first.")
         progress("Translating title to English…")
-        yt_title = (await ai_adapter.translate_title_to_english(
+        _raw_yt_title = await ai_adapter.translate_title_to_english(
             post.get("article_title", "") or f"Gaming news #{post_id}"
-        ))[:100]
+        )
+        yt_title = (_raw_yt_title if _raw_yt_title and not re.search(r'[а-яёА-ЯЁ]', _raw_yt_title) else "Gaming News")[:100]
         progress("Uploading Short to YouTube…")
         desc = "More news in the telegram channel, link in the bio\n\n" + _clean_text(post.get("post_text", ""))
         video_id = await youtube_publisher.upload_short(
@@ -887,7 +889,7 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
                 post.get("article_title", "") or f"Gaming news #{post_id}"
             ))[:100]
             # Only pass as title if it's actually English (no Cyrillic).
-            en_title = _raw_en_title if _raw_en_title and not re.search(r'[а-яёА-ЯЁ]', _raw_en_title) else None
+            en_title = (_raw_en_title if _raw_en_title and not re.search(r'[а-яёА-ЯЁ]', _raw_en_title) else "Gaming News")[:100]
             progress("Generating EN thumbnail…")
             en_thumb = await _make_thumb(en_path, lang="en", title=en_title)
             en_desc = "More news in the telegram channel, link in the bio\n\n" + _clean_text(post.get("post_text", ""))

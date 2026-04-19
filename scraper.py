@@ -281,7 +281,13 @@ async def download_videos(
             oid = params.get("oid", "")
             vid = params.get("id", "")
             if oid and vid:
-                youtube_urls.append(f"https://vk.com/video{oid}_{vid}")
+                vk_url = f"https://vk.com/video{oid}_{vid}"
+                path = await _download_vk_video(oid, vid)
+                if path:
+                    video_paths.append(path)
+                else:
+                    logger.warning("Не удалось скачать VK видео: %s", vk_url)
+                    youtube_urls.append(vk_url)
 
         elif embed["type"] == "playground":
             for attempt in range(1, 4):
@@ -352,6 +358,58 @@ async def _download_youtube_video(video_id: str) -> Optional[str]:
         return None
     except Exception as exc:
         logger.error("Ошибка скачивания YouTube видео %s: %s", video_id, exc)
+        return None
+
+
+async def _download_vk_video(oid: str, vid: str) -> Optional[str]:
+    """Download a VK video using yt-dlp. Returns local .mp4 path or None."""
+    file_id = f"vk_{oid}_{vid}".replace("-", "m")
+    output_path = os.path.join(VIDEOS_DIR, f"{file_id}.mp4")
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 10240:
+        return output_path  # already downloaded
+    url = f"https://vk.com/video{oid}_{vid}"
+    env = os.environ.copy()
+    extra_paths = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        os.path.expanduser("~/.nvm/versions/node/v20.19.5/bin"),
+    ]
+    env["PATH"] = os.pathsep.join(extra_paths) + os.pathsep + env.get("PATH", "")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "yt-dlp",
+            "--no-playlist",
+            "--no-warnings",
+            "--format", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]/best",
+            "--max-filesize", "1500M",
+            "--merge-output-format", "mp4",
+            "--output", output_path,
+            url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+        if proc.returncode not in (0, 101):
+            logger.warning(
+                "yt-dlp error downloading VK %s (rc=%d): %s",
+                url, proc.returncode, stderr.decode()[-400:],
+            )
+            return None
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 10240:
+            logger.info("VK видео скачано: %s", output_path)
+            return output_path
+        for ext in (".webm", ".mkv"):
+            alt = os.path.join(VIDEOS_DIR, f"{file_id}{ext}")
+            if os.path.exists(alt) and os.path.getsize(alt) > 10240:
+                return alt
+        logger.warning("VK видео не найдено после скачивания: %s", url)
+        return None
+    except asyncio.TimeoutError:
+        logger.error("yt-dlp timeout при скачивании VK видео: %s", url)
+        return None
+    except Exception as exc:
+        logger.error("Ошибка скачивания VK видео %s: %s", url, exc)
         return None
 
 
