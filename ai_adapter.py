@@ -468,6 +468,10 @@ async def generate_thumbnail_hook(article_title: str, lang: str = "ru") -> str:
             pass
     except Exception as exc:
         logger.warning("generate_thumbnail_hook failed: %s", exc)
+    # For EN: never fall back to a Russian (Cyrillic) title — return empty string instead.
+    if lang == "en" and re.search(r'[а-яёА-ЯЁ]', article_title):
+        logger.warning("generate_thumbnail_hook EN: all attempts failed, refusing to return Russian title")
+        return ""
     return article_title
 
 

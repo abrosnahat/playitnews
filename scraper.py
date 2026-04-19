@@ -261,15 +261,19 @@ async def download_videos(
     """Download videos from pg-embed tags.
 
     Returns:
-        youtube_urls  — list of YouTube watch URLs to append to post text
-        video_paths   — list of local mp4 file paths (playground internal videos)
+        youtube_urls  — list of non-YouTube external URLs (e.g. VK) to append to post text
+        video_paths   — list of local mp4 file paths (playground + YouTube videos)
     """
     youtube_urls: list[str] = []
     video_paths: list[str] = []
 
     for embed in pg_embeds:
         if embed["type"] == "youtube":
-            youtube_urls.append(f"https://www.youtube.com/watch?v={embed['id']}")
+            path = await _download_youtube_video(embed["id"])
+            if path:
+                video_paths.append(path)
+            else:
+                logger.warning("Не удалось скачать YouTube видео: %s", embed["id"])
 
         elif embed["type"] == "vk":
             # src is a query string like "oid=-231353027&id=456239049"
@@ -299,11 +303,74 @@ async def download_videos(
     return youtube_urls, video_paths
 
 
+async def _download_youtube_video(video_id: str) -> Optional[str]:
+    """Download a YouTube video by ID using yt-dlp. Returns local .mp4 path or None."""
+    output_path = os.path.join(VIDEOS_DIR, f"yt_{video_id}.mp4")
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 10240:
+        return output_path  # already downloaded
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    env = os.environ.copy()
+    extra_paths = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        os.path.expanduser("~/.nvm/versions/node/v20.19.5/bin"),
+    ]
+    env["PATH"] = os.pathsep.join(extra_paths) + os.pathsep + env.get("PATH", "")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "yt-dlp",
+            "--no-playlist",
+            "--no-warnings",
+            "--format", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]/best",
+            "--max-filesize", "1500M",
+            "--merge-output-format", "mp4",
+            "--output", output_path,
+            url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+        if proc.returncode not in (0, 101):
+            logger.warning(
+                "yt-dlp error downloading %s (rc=%d): %s",
+                video_id, proc.returncode, stderr.decode()[-400:],
+            )
+            return None
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 10240:
+            logger.info("YouTube видео скачано: %s", output_path)
+            return output_path
+        # yt-dlp may have chosen a different extension
+        for ext in (".webm", ".mkv"):
+            alt = os.path.join(VIDEOS_DIR, f"yt_{video_id}{ext}")
+            if os.path.exists(alt) and os.path.getsize(alt) > 10240:
+                return alt
+        logger.warning("YouTube видео не найдено после скачивания: %s", video_id)
+        return None
+    except asyncio.TimeoutError:
+        logger.error("yt-dlp timeout при скачивании YouTube видео: %s", video_id)
+        return None
+    except Exception as exc:
+        logger.error("Ошибка скачивания YouTube видео %s: %s", video_id, exc)
+        return None
+
+
 async def _download_hls_video(video_id: str, m3u8_url: str) -> Optional[str]:
     """Download HLS stream to mp4 using ffmpeg. Returns local path or None."""
     output_path = os.path.join(VIDEOS_DIR, f"{video_id}.mp4")
+    # Skip cache if file is corrupt (moov atom missing) — probe it first
     if os.path.exists(output_path) and os.path.getsize(output_path) > 10240:
-        return output_path  # already downloaded
+        probe = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", output_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await probe.communicate()
+        if stdout.strip():
+            return output_path  # valid cached file
+        logger.warning("Кэшированный файл %s повреждён, перескачиваем", output_path)
+        os.remove(output_path)
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg", "-i", m3u8_url,
@@ -315,13 +382,22 @@ async def _download_hls_video(video_id: str, m3u8_url: str) -> Optional[str]:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        await asyncio.wait_for(proc.communicate(), timeout=120)
+        await asyncio.wait_for(proc.communicate(), timeout=600)
         if proc.returncode == 0 and os.path.exists(output_path):
             return output_path
     except asyncio.TimeoutError:
         logger.warning("Таймаут при скачивании видео %s", video_id)
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        if os.path.exists(output_path):
+            os.remove(output_path)
     except Exception as exc:
         logger.warning("Ошибка скачивания видео %s: %s", video_id, exc)
+        if os.path.exists(output_path):
+            os.remove(output_path)
     return None
 
 

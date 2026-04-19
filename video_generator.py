@@ -55,12 +55,21 @@ TTS_PITCH = "-3Hz"   # Slightly lower pitch → warmer tone
 def _run(args: list[str], cwd: str | None = None, timeout: int = 120) -> bool:
     """Run a command, return True on success."""
     try:
+        # Extend PATH so yt-dlp can find JS runtimes (deno, node) for n-challenge solving.
+        _env = os.environ.copy()
+        _extra_paths = [
+            "/opt/homebrew/bin",                                      # deno (macOS Homebrew)
+            "/usr/local/bin",
+            os.path.expanduser("~/.nvm/versions/node/v20.19.5/bin"), # node (nvm)
+        ]
+        _env["PATH"] = os.pathsep.join(_extra_paths) + os.pathsep + _env.get("PATH", "")
         result = subprocess.run(
             args,
             capture_output=True,
             text=True,
             timeout=timeout,
             cwd=cwd,
+            env=_env,
         )
         # yt-dlp exits with 101 when --max-downloads limit is reached — treat as success
         if result.returncode not in (0, 101):
@@ -1057,7 +1066,6 @@ async def _download_full_yt_video(
         ydl_args = [
             "yt-dlp",
             "--no-playlist", "--no-warnings",
-            "--cookies-from-browser", "chrome",
             "--format", _FMT,
             "--max-filesize", f"{YT_MAX_FILESIZE}M",
             "--output", os.path.join(clips_dir, "source.%(ext)s"),
@@ -1068,7 +1076,6 @@ async def _download_full_yt_video(
         ydl_args = [
             "yt-dlp",
             "--no-playlist", "--no-warnings",
-            "--cookies-from-browser", "chrome",
             "--format", _FMT,
             "--max-filesize", f"{YT_MAX_FILESIZE}M",
             "--max-downloads", str(skip + 1),

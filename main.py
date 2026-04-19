@@ -72,11 +72,6 @@ async def process_article(app: Application, article_url: str, article_title: str
         adapt_article_ru(article.title, article.text),
     )
 
-    # Append YouTube links to post text (after AI adaptation)
-    if youtube_urls:
-        post_text = post_text + "\n\n" + "\n".join(youtube_urls)
-        ru_post_text = ru_post_text + "\n\n" + "\n".join(youtube_urls)
-
     # Schedule the post (no delay — admin approves to publish immediately)
     scheduled_at = datetime.now(timezone.utc)
     post_id = db.create_scheduled_post(

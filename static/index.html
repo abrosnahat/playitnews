@@ -639,7 +639,7 @@ function renderCard(p) {
   }
   if (isActionable) {
     const ytSkip = p.yt_skip_count || 0;
-    btnHtml += `<button class="btn btn-outline" style="color:var(--muted);font-size:12px;min-height:36px" onclick="markDone(${p.id}, this)">✔ Done — remove from feed</button>`;
+    btnHtml += `<button class="btn btn-outline" style="color:#e53935;border-color:#e53935;font-size:12px;min-height:36px" onclick="markDone(${p.id}, this)">✔ Done — remove from feed</button>`;
     btnHtml += `<div class="btn-section">
       <div class="btn-section-label">🎬 Generate video</div>
       <div class="yt-query-row">
@@ -960,6 +960,7 @@ function esc(s) {
 function enc(s) { return encodeURIComponent(s || ''); }
 
 async function markDone(id, btn) {
+  if (!confirm('Remove this post from the feed?')) return;
   btn.disabled = true;
   btn.textContent = 'Removing…';
   try {
@@ -970,6 +971,8 @@ async function markDone(id, btn) {
   } catch (e) {
     toast(`Error: ${e.message}`, 'error');
     btn.disabled = false;
+    btn.style.color = '#e53935';
+    btn.style.borderColor = '#e53935';
     btn.textContent = '✔ Done — remove from feed';
   }
 }

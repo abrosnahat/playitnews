@@ -806,11 +806,15 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
                 return None
             source = image_paths[0]
             raw_title = title or post.get("article_title", "")
-            if lang == "en" and not title:
+            if lang == "en" and (not title or re.search(r'[а-яёА-ЯЁ]', raw_title)):
                 translated = await ai_adapter.translate_title_to_english(raw_title)
-                if translated:
+                if translated and not re.search(r'[а-яёА-ЯЁ]', translated):
                     raw_title = translated
             hook = await ai_adapter.generate_thumbnail_hook(raw_title, lang=lang)
+            # Final safety net: never burn Cyrillic text onto an EN thumbnail.
+            if lang == "en" and (not hook or re.search(r'[а-яёА-ЯЁ]', hook)):
+                logger.warning("_make_thumb EN: hook is empty or contains Cyrillic ('%s') — skipping thumbnail", hook[:60])
+                return None
             base = os.path.splitext(path)[0]
             out_path = f"{base}_thumb_{lang}.jpg"
             ok = thumbnail_generator.generate_instagram_thumbnail(source, hook, out_path)
@@ -823,8 +827,10 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
             raise ValueError("EN video not found — generate video first.")
         progress("Translating title to English…")
         en_title = await ai_adapter.translate_title_to_english(post.get("article_title", ""))
+        # Only pass en_title if it's actually in English (no Cyrillic).
+        _en_title_clean = en_title if en_title and not re.search(r'[а-яёА-ЯЁ]', en_title) else None
         progress("Generating thumbnail…")
-        thumb = await _make_thumb(en_path, lang="en", title=en_title or None)
+        thumb = await _make_thumb(en_path, lang="en", title=_en_title_clean)
         progress("Uploading reel to Instagram…")
         media_id = await instagram_publisher.publish_reel(
             video_path=en_path, caption=_caption_en(), cover_image_path=thumb,
@@ -877,9 +883,11 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
 
         if platform in ("all", "all-combined") and en_path and os.path.exists(en_path):
             progress("Translating EN title…")
-            en_title = (await ai_adapter.translate_title_to_english(
+            _raw_en_title = (await ai_adapter.translate_title_to_english(
                 post.get("article_title", "") or f"Gaming news #{post_id}"
             ))[:100]
+            # Only pass as title if it's actually English (no Cyrillic).
+            en_title = _raw_en_title if _raw_en_title and not re.search(r'[а-яёА-ЯЁ]', _raw_en_title) else None
             progress("Generating EN thumbnail…")
             en_thumb = await _make_thumb(en_path, lang="en", title=en_title)
             en_desc = "More news in the telegram channel, link in the bio\n\n" + _clean_text(post.get("post_text", ""))
