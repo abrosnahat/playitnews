@@ -206,12 +206,14 @@ def _parse_vtt_cues(vtt_path: str) -> list[tuple[float, float, str]]:
 
 
 def _find_system_font(size: int):
-    """Return a PIL ImageFont, preferring Arial Bold on macOS."""
+    """Return a PIL ImageFont, preferring Impact on macOS."""
     from PIL import ImageFont
     candidates = [
+        "/System/Library/Fonts/Supplemental/Impact.ttf",
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/System/Library/Fonts/Helvetica.ttc",
+        "/usr/share/fonts/truetype/msttcorefonts/Impact.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]
     for path in candidates:
@@ -416,19 +418,28 @@ async def _burn_subtitles_pillow(
     return ok
 
 
+_SUB_GRAD_TOP    = (255, 255, 255)       # white
+_SUB_GRAD_BOTTOM = (0xC7, 0xF8, 0xFD)   # #C7F8FD light cyan
+
+
 def _render_subtitle_onto(text: str, img) -> None:
-    """Composite subtitle text onto an RGBA PIL image in-place."""
-    from PIL import ImageDraw
-    font_size = 112         # large karaoke-style single word
-    draw      = ImageDraw.Draw(img)
+    """Composite subtitle text onto an RGBA PIL image in-place.
+    Uses Impact font, white→cyan gradient fill and italic shear (top leans right).
+    """
+    from PIL import Image, ImageDraw
+
+    font_size = 112
     font      = _find_system_font(font_size)
-    max_w     = VID_W - 80
-    words     = text.split()
+
+    # Measure lines using a temporary draw on a throwaway image
+    _tmp = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    max_w   = VID_W - 80
+    words   = text.split()
     lines: list[str] = []
-    current   = ""
+    current = ""
     for word in words:
         candidate = (current + " " + word).strip()
-        bbox = draw.textbbox((0, 0), candidate, font=font)
+        bbox = _tmp.textbbox((0, 0), candidate, font=font)
         if (bbox[2] - bbox[0]) > max_w and current:
             lines.append(current)
             current = word
@@ -439,22 +450,52 @@ def _render_subtitle_onto(text: str, img) -> None:
 
     line_h  = font_size + 18
     total_h = len(lines) * line_h
-    # Position at ~55% from top (lower-third upper edge) — well above the bottom
-    y       = (VID_H - 330) - total_h // 2
-    # Thicker outline for legibility at larger size
-    outline = [
-        (dx, dy)
-        for dx in range(-4, 5)
-        for dy in range(-4, 5)
-        if abs(dx) + abs(dy) <= 5
-    ]
+    y_start = (VID_H - 330) - total_h // 2
+
+    # --- Render text to a separate RGBA layer ---
+    text_layer = Image.new("RGBA", (VID_W, VID_H), (0, 0, 0, 0))
+    draw_t     = ImageDraw.Draw(text_layer)
+
+    cur_y = y_start
     for line in lines:
-        bbox = draw.textbbox((0, 0), line, font=font)
-        x = (VID_W - (bbox[2] - bbox[0])) / 2
-        for dx, dy in outline:
-            draw.text((x+dx, y+dy), line, font=font, fill=(0, 0, 0, 220))
-        draw.text((x, y), line, font=font, fill=(255, 255, 255, 255))
-        y += line_h
+        bbox_measure = draw_t.textbbox((0, 0), line, font=font)
+        line_w = bbox_measure[2] - bbox_measure[0]
+        x = (VID_W - line_w) // 2 - bbox_measure[0]
+
+        # Thin black outline (2 px offset in 4 directions)
+        for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2)):
+            draw_t.text((x + dx, cur_y + dy), line, font=font, fill=(0, 0, 0, 255))
+
+        # Gradient fill (white top → cyan bottom)
+        bbox = draw_t.textbbox((x, cur_y), line, font=font)
+        ly0, ly1 = bbox[1], bbox[3]
+        lh = max(1, ly1 - ly0)
+
+        grad = Image.new("RGBA", (VID_W, lh), (0, 0, 0, 0))
+        for gy in range(lh):
+            t = gy / (lh - 1) if lh > 1 else 0
+            r = int(_SUB_GRAD_TOP[0] + (_SUB_GRAD_BOTTOM[0] - _SUB_GRAD_TOP[0]) * t)
+            g = int(_SUB_GRAD_TOP[1] + (_SUB_GRAD_BOTTOM[1] - _SUB_GRAD_TOP[1]) * t)
+            b = int(_SUB_GRAD_TOP[2] + (_SUB_GRAD_BOTTOM[2] - _SUB_GRAD_TOP[2]) * t)
+            ImageDraw.Draw(grad).line([(0, gy), (VID_W, gy)], fill=(r, g, b, 255))
+
+        mask_full = Image.new("L", (VID_W, VID_H), 0)
+        ImageDraw.Draw(mask_full).text((x, cur_y), line, font=font, fill=255)
+        line_mask = mask_full.crop((0, ly0, VID_W, ly1))
+        grad.putalpha(line_mask)
+        text_layer.paste(grad, (0, ly0), mask=line_mask)
+
+        cur_y += line_h
+
+    # --- Italic shear: top of text leans right ---
+    shear  = 0.18
+    affine = (1, shear, -shear * y_start, 0, 1, 0)
+    text_layer = text_layer.transform(
+        (VID_W, VID_H), Image.AFFINE, affine, resample=Image.BICUBIC,
+    )
+
+    # --- Composite onto caller's image ---
+    img.alpha_composite(text_layer)
 
 
 def _vtt_to_ass(
