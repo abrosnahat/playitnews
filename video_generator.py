@@ -14,6 +14,7 @@ import asyncio
 import concurrent.futures
 import logging
 import os
+import math
 import random
 import re
 import shutil
@@ -367,19 +368,22 @@ async def _burn_subtitles_pillow(
         t   = (idx - 1) / EXTRACT_FPS
 
         text: str | None = None
+        cue_start: float = 0.0
         for t_start, t_end, cue_text in cues:
             if t_start <= t < t_end:
                 text = cue_text
+                cue_start = t_start
                 break
 
         if not text:
             return
 
+        scale = _bounce_scale(t - cue_start)
         fpath = os.path.join(frames_dir, fname)
         try:
             base    = Image.open(fpath).convert("RGBA")
             overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-            _render_subtitle_onto(text, overlay)
+            _render_subtitle_onto(text, overlay, scale=scale)
             combined = Image.alpha_composite(base, overlay).convert("RGB")
             combined.save(fpath, "PNG")
         except Exception as exc:
@@ -421,10 +425,22 @@ async def _burn_subtitles_pillow(
 _SUB_GRAD_TOP    = (255, 255, 255)       # white
 _SUB_GRAD_BOTTOM = (0xC7, 0xF8, 0xFD)   # #C7F8FD light cyan
 
+# Duration of the bounce-in animation per word (seconds)
+_BOUNCE_DUR = 0.18
 
-def _render_subtitle_onto(text: str, img) -> None:
+
+def _bounce_scale(elapsed: float) -> float:
+    """easeOutBack: scale goes 0 → ~1.30 → 1.0 over _BOUNCE_DUR seconds."""
+    p = min(1.0, elapsed / _BOUNCE_DUR)
+    c1 = 1.70158
+    c3 = c1 + 1.0
+    return 1.0 + c3 * (p - 1.0) ** 3 + c1 * (p - 1.0) ** 2
+
+
+def _render_subtitle_onto(text: str, img, scale: float = 1.0) -> None:
     """Composite subtitle text onto an RGBA PIL image in-place.
     Uses Impact font, white→cyan gradient fill and italic shear (top leans right).
+    scale: bounce-in scale factor (easeOutBack, 0→1.3→1.0).
     """
     from PIL import Image, ImageDraw
 
@@ -493,6 +509,20 @@ def _render_subtitle_onto(text: str, img) -> None:
     text_layer = text_layer.transform(
         (VID_W, VID_H), Image.AFFINE, affine, resample=Image.BICUBIC,
     )
+
+    # --- Bounce-in scale: resize layer around text-block centre ---
+    if abs(scale - 1.0) > 0.005:
+        from PIL import Image as _PILImage
+        cx = VID_W // 2
+        cy = y_start + total_h // 2
+        new_w = max(1, int(VID_W * scale))
+        new_h = max(1, int(VID_H * scale))
+        scaled = text_layer.resize((new_w, new_h), _PILImage.BICUBIC)
+        dest = _PILImage.new("RGBA", (VID_W, VID_H), (0, 0, 0, 0))
+        ox = cx - round(cx * scale)
+        oy = cy - round(cy * scale)
+        dest.paste(scaled, (ox, oy))
+        text_layer = dest
 
     # --- Composite onto caller's image ---
     img.alpha_composite(text_layer)
