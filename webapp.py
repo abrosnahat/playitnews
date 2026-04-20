@@ -34,7 +34,12 @@ app = Flask(__name__, static_folder="static", static_url_path="")
 logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s  %(levelname)-5s  %(message)s",
+    format="%(asctime)s  %(levelname)-5s  %(name)-12s  %(message)s",
+    datefmt="%d.%m %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("playitnews.log", encoding="utf-8"),
+    ],
 )
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
@@ -372,6 +377,91 @@ def api_mark_done(post_id: int):
             (all_platforms, post_id),
         )
     return jsonify({"success": True})
+
+
+@app.route("/api/posts/<int:post_id>/republish-ru", methods=["POST"])
+def api_republish_ru(post_id: int):
+    """Re-send ru_post_text to @readitgames (useful when the second channel failed silently)."""
+    post = db.get_scheduled_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+    if post["status"] != "sent":
+        return jsonify({"error": f"Post status is '{post['status']}', expected 'sent'"}), 400
+    ru_text = post.get("ru_post_text")
+    if not ru_text:
+        return jsonify({"error": "No ru_post_text for this post"}), 400
+    try:
+        _run_async(_do_republish_ru(post_id))
+        return jsonify({"success": True})
+    except Exception as exc:
+        logger.exception("Republish RU failed for post #%d", post_id)
+        return jsonify({"error": str(exc)}), 500
+
+
+async def _do_republish_ru(post_id: int) -> None:
+    from telegram import Bot, InputMediaPhoto, InputMediaVideo
+    from telegram.error import TelegramError
+
+    post = db.get_scheduled_post(post_id)
+    ru_text = post["ru_post_text"]
+    images  = [p for p in post.get("image_paths", [])  if os.path.exists(p)]
+    videos  = [p for p in post.get("video_paths", [])  if os.path.exists(p)]
+    if post.get("generated_video_path_ru") and os.path.exists(post["generated_video_path_ru"]):
+        videos = [post["generated_video_path_ru"]]
+        images = []
+
+    full_caption = ru_text.rstrip() + "\n\n@readitgames"
+    if len(full_caption) > 1024:
+        cut = full_caption[:1024]
+        last_nl = cut.rfind("\n")
+        full_caption = cut[:last_nl].rstrip() if last_nl > 512 else cut.rstrip()
+
+    from telegram.constants import ParseMode
+
+    def _probe_dims(p):
+        try:
+            import subprocess, json as _j
+            r = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-show_streams", "-of", "json", p],
+                capture_output=True, text=True, timeout=10,
+            )
+            s = next((s for s in _j.loads(r.stdout).get("streams", []) if s.get("codec_type") == "video"), {})
+            return s.get("width"), s.get("height")
+        except Exception:
+            return None, None
+
+    async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
+        if images or videos:
+            media = []
+            for i, p in enumerate(images):
+                media.append(InputMediaPhoto(
+                    media=open(p, "rb"),
+                    caption=full_caption if i == 0 else None,
+                    parse_mode=ParseMode.HTML if i == 0 else None,
+                ))
+            for j, p in enumerate(videos):
+                w, h = _probe_dims(p)
+                media.append(InputMediaVideo(
+                    media=open(p, "rb"),
+                    caption=full_caption if not images and j == 0 else None,
+                    parse_mode=ParseMode.HTML if not images and j == 0 else None,
+                    width=w, height=h, supports_streaming=True,
+                ))
+            if len(media) == 1:
+                if images:
+                    await bot.send_photo(chat_id=TELEGRAM_SECOND_CHANNEL_ID, photo=open(images[0], "rb"),
+                                         caption=full_caption, parse_mode=ParseMode.HTML)
+                else:
+                    w, h = _probe_dims(videos[0])
+                    await bot.send_video(chat_id=TELEGRAM_SECOND_CHANNEL_ID, video=open(videos[0], "rb"),
+                                         caption=full_caption, parse_mode=ParseMode.HTML,
+                                         width=w, height=h, supports_streaming=True)
+            else:
+                await bot.send_media_group(chat_id=TELEGRAM_SECOND_CHANNEL_ID, media=media)
+        else:
+            await bot.send_message(chat_id=TELEGRAM_SECOND_CHANNEL_ID, text=full_caption,
+                                   parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    logger.info("Post #%d republished to @readitgames", post_id)
 
 
 # ---------------------------------------------------------------------------

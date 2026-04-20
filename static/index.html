@@ -81,7 +81,7 @@
     .feed::-webkit-scrollbar { width: 5px; }
     .feed::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
     .feed-inner {
-      max-width: 1920px;
+      max-width: 1200px;
       margin: 0 auto;
       display: flex;
       flex-direction: column;
@@ -639,7 +639,10 @@ function renderCard(p) {
   }
   if (isActionable) {
     const ytSkip = p.yt_skip_count || 0;
-    btnHtml += `<button class="btn btn-outline" style="color:#e53935;border-color:#e53935;font-size:12px;min-height:36px" onclick="markDone(${p.id}, this)">✔ Done — remove from feed</button>`;
+    btnHtml += `<div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn btn-outline" style="flex:1;color:#e53935;border-color:#e53935;font-size:12px;min-height:36px" onclick="markDone(${p.id}, this)">✔ Done — remove from feed</button>
+      <button class="btn btn-outline" style="flex:1;color:#1565c0;border-color:#1565c0;font-size:12px;min-height:36px" onclick="republishRu(${p.id}, this)">🔁 Republish RU → @readitgames</button>
+    </div>`;
     btnHtml += `<div class="btn-section">
       <div class="btn-section-label">🎬 Generate video</div>
       <div class="yt-query-row">
@@ -974,6 +977,25 @@ async function markDone(id, btn) {
     btn.style.color = '#e53935';
     btn.style.borderColor = '#e53935';
     btn.textContent = '✔ Done — remove from feed';
+  }
+}
+
+async function republishRu(id, btn) {
+  if (!confirm('Republish RU text to @readitgames?')) return;
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  try {
+    const res = await fetch(`/api/posts/${id}/republish-ru`, { method: 'POST' });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    toast(`Post #${id} sent to @readitgames ✅`, 'success');
+    btn.textContent = '✅ Sent to @readitgames';
+  } catch (e) {
+    toast(`Error: ${e.message}`, 'error');
+    btn.disabled = false;
+    btn.style.color = '#e53935';
+    btn.style.borderColor = '#e53935';
+    btn.textContent = '🔁 Republish RU → @readitgames';
   }
 }
 
