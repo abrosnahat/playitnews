@@ -1764,14 +1764,19 @@ async def fetch_gameplay_clips(
 
     source_video: str | None = None
 
+    # If an explicit YouTube search query is given, skip article video entirely
+    # and always pull footage from YouTube for visual variety.
+    use_article_video = not bool(search_query and search_query.strip())
+
     # ── 1. Playground HLS video already on disk ───────────────────────────
-    article_hls = [p for p in post.get("video_paths", []) if os.path.exists(p)]
-    if article_hls:
-        source_video = article_hls[0]
-        logger.info("Using article Playground video as source: %s", source_video)
+    if use_article_video:
+        article_hls = [p for p in post.get("video_paths", []) if os.path.exists(p)]
+        if article_hls:
+            source_video = article_hls[0]
+            logger.info("Using article Playground video as source: %s", source_video)
 
     # ── 2. Re-fetch article embeds if nothing on disk ─────────────────────
-    if not source_video and post.get("article_url"):
+    if use_article_video and not source_video and post.get("article_url"):
         try:
             async with aiohttp.ClientSession() as _sess:
                 article = await _scraper.scrape_article(_sess, post["article_url"])
