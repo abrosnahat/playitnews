@@ -689,6 +689,7 @@ async def _generate_video(post_id: int, lang: str) -> None:
         title = post.get("article_title", "")
         with _tasks_lock:
             search_query = _yt_queries.pop(post_id, None)
+        user_query = bool(search_query)
         if not search_query:
             search_query = await ai_adapter.extract_game_name(title)
         if not search_query:
@@ -701,7 +702,7 @@ async def _generate_video(post_id: int, lang: str) -> None:
         if check_cancel(): raise InterruptedError("Cancelled")
         yt_skip = db.increment_yt_skip(post_id, YT_SKIP_STEP) - YT_SKIP_STEP
         article_videos, yt_clips, clips_workdir = await video_generator.fetch_gameplay_clips(
-            post=post, search_query=search_query, yt_skip=yt_skip,
+            post=post, search_query=search_query, yt_skip=yt_skip, user_query=user_query,
         )
         shared_clips = article_videos + yt_clips
         progress(f"Found {len(shared_clips)} video clips. Rendering…")

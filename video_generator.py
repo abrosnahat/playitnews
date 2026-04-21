@@ -1740,6 +1740,7 @@ async def fetch_gameplay_clips(
     post: dict,
     search_query: str,
     yt_skip: int = 0,
+    user_query: bool = False,
 ) -> tuple[list[str], list[str], str]:
     """
     Find source video(s), cut random 3–4 s segments to fill the full runtime.
@@ -1764,19 +1765,15 @@ async def fetch_gameplay_clips(
 
     source_video: str | None = None
 
-    # If an explicit YouTube search query is given, skip article video entirely
-    # and always pull footage from YouTube for visual variety.
-    use_article_video = not bool(search_query and search_query.strip())
-
-    # ── 1. Playground HLS video already on disk ───────────────────────────
-    if use_article_video:
+    # ── 1. Article video already on disk — skip if user provided a custom query ──
+    if not user_query:
         article_hls = [p for p in post.get("video_paths", []) if os.path.exists(p)]
         if article_hls:
             source_video = article_hls[0]
             logger.info("Using article Playground video as source: %s", source_video)
 
     # ── 2. Re-fetch article embeds if nothing on disk ─────────────────────
-    if use_article_video and not source_video and post.get("article_url"):
+    if not user_query and not source_video and post.get("article_url"):
         try:
             async with aiohttp.ClientSession() as _sess:
                 article = await _scraper.scrape_article(_sess, post["article_url"])
