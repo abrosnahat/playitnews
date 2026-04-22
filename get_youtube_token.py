@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """
-One-shot script to obtain YouTube OAuth2 token and save it to youtube_token.json.
+One-shot script to obtain YouTube OAuth2 token.
+
+Usage:
+  python get_youtube_token.py        # EN account → youtube_token.json
+  python get_youtube_token.py --ru   # RU account → youtube_token_ru.json
 
 Steps:
   1. Go to console.cloud.google.com → New Project
   2. APIs & Services → Enable APIs → YouTube Data API v3
-  3. OAuth consent screen → External → add yourself as Test User
+  3. OAuth consent screen → External → Publish App (no expiry) or add Test Users
   4. Credentials → Create OAuth 2.0 Client ID → Desktop App
   5. Download JSON → save as client_secrets.json in this folder
-  6. Run: python get_youtube_token.py
-  7. Browser opens → log in → approve → token saved to youtube_token.json
+  6. Run the script for each account (see Usage above)
+  7. Browser opens → log in with the correct Google account → approve
 """
 import os
 import sys
 
-SECRETS_FILE = os.getenv("YOUTUBE_CLIENT_SECRETS", os.path.join(os.path.dirname(__file__), "client_secrets.json"))
-TOKEN_FILE   = os.getenv("YOUTUBE_TOKEN_FILE",    os.path.join(os.path.dirname(__file__), "youtube_token.json"))
+BASE_DIR     = os.path.dirname(__file__)
+SECRETS_FILE = os.getenv("YOUTUBE_CLIENT_SECRETS", os.path.join(BASE_DIR, "client_secrets.json"))
 SCOPES       = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.force-ssl",
@@ -23,9 +27,17 @@ SCOPES       = [
 
 
 def main():
+    ru = "--ru" in sys.argv
+
+    token_env  = "YOUTUBE_TOKEN_FILE_RU" if ru else "YOUTUBE_TOKEN_FILE"
+    token_default = "youtube_token_ru.json" if ru else "youtube_token.json"
+    TOKEN_FILE = os.getenv(token_env, os.path.join(BASE_DIR, token_default))
+
+    label = "RU" if ru else "EN"
+    port  = 8082 if ru else 8081
+
     try:
         from google_auth_oauthlib.flow import InstalledAppFlow
-        from google.oauth2.credentials import Credentials
     except ImportError:
         print("ERROR: Install required packages first:")
         print("  .venv/bin/pip install google-auth-oauthlib google-api-python-client")
@@ -38,19 +50,17 @@ def main():
         print(f"  Save as: {SECRETS_FILE}")
         sys.exit(1)
 
-    print("Opening browser for YouTube authorization...")
-    flow = InstalledAppFlow.from_client_secrets_file(SECRETS_FILE, SCOPES)
-    creds = flow.run_local_server(port=8081, prompt="consent")
+    print(f"[{label}] Opening browser for YouTube authorization...")
+    print(f"       Make sure to log in with your {label} Google account!\n")
 
-    # Save token
+    flow = InstalledAppFlow.from_client_secrets_file(SECRETS_FILE, SCOPES)
+    creds = flow.run_local_server(port=port, prompt="consent")
+
     with open(TOKEN_FILE, "w") as f:
         f.write(creds.to_json())
 
-    print(f"\nToken saved to: {TOKEN_FILE}")
-    print("Add to .env (optional, defaults already set):")
-    print(f"  YOUTUBE_CLIENT_SECRETS={SECRETS_FILE}")
-    print(f"  YOUTUBE_TOKEN_FILE={TOKEN_FILE}")
-    print("\nToken auto-refreshes — no need to re-run unless you revoke access.")
+    print(f"\n[{label}] Token saved to: {TOKEN_FILE}")
+    print(f"\nToken auto-refreshes — no need to re-run unless you revoke access.")
 
 
 if __name__ == "__main__":

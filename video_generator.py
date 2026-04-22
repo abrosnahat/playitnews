@@ -858,6 +858,7 @@ _RU_BRAND_MAP: list[tuple[str, str]] = [
     ("Square", "Сквэр"),
     ("Enix", "Эникс"),
     ("Bungie", "Банджи"),
+    ("Marathon", "Марафон"),
     ("Respawn", "Риспон"),
     ("DICE", "Дайс"),
     ("Crytek", "Крайтек"),
