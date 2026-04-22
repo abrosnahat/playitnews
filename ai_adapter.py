@@ -487,7 +487,8 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
     """
     Generate a spoken narration script for TikTok/Reels/Shorts.
     lang='en' → English script; lang='ru' → Russian script.
-    Target: 65–90 words (~35–45 seconds spoken at natural pace).
+    Target: 45–60 words (~18–25 seconds spoken at natural pace).
+    Analytics show videos ≤22s average 84.8% retention vs 56.9% for ≥29s.
     """
     # Strip HTML, URLs, markdown and emoji from input text
     clean_text = re.sub(r"<[^>]+>", "", post_text)
@@ -503,25 +504,23 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
             "Без сленга, мата и фамильярности. Только чистый информационный текст."
         )
         user_message = (
-            "Напиши короткий сценарий озвучки для игровой новости (формат Shorts/Reels).\n\n"
+            "Напиши ультракороткий сценарий озвучки для игровой новости (формат Shorts/Reels).\n\n"
             "СТРОГИЕ ПРАВИЛА:\n"
             "- Язык: ТОЛЬКО русский\n"
-            "- Длина: 65–90 слов МАКСИМУМ (35–45 секунд речи)\n"
+            "- Длина: СТРОГО 45–60 слов (18–25 секунд речи) — НЕЛЬЗЯ БОЛЬШЕ\n"
             "- Только чистый текст — БЕЗ хэштегов, HTML, эмодзи, markdown\n"
             "- Стиль: нейтральный, информационный, без сленга, жаргона и бранных слов\n"
             "- Текст будет зачитан голосовым AI — пиши чёткими литературными предложениями\n"
-            "- Следуй формуле (1-2 предложения на шаг):\n"
-            "  1. [Что произошло] — цепляющее вступительное предложение\n"
-            "  2. [Факт] — одна ключевая цифра, деталь или статистика\n"
-            "  3. [Деталь] — интересная или неожиданная подробность\n"
-            "  4. [Почему важно] — значимость для игрового сообщества\n"
-            "  5. [Вопрос или вывод] — завершающий вопрос или ёмкая фраза\n\n"
-            "- НЕ начинай с 'Сегодня в новостях', 'Привет всем' или шаблонных фраз\n"
-            "- Начинай сразу с главного факта\n"
+            "- Следуй формуле (ровно 3 шага):\n"
+            "  1. [Крючок — 1 предложение] — ШОКИРУЮЩИЙ ФАКТ, цифра или сюрприз. Никогда не начинай с названия игры. Используй паттерны: 'Бесплатно:', число+сущность, 'Утечка:', 'Впервые:'\n"
+            "  2. [Суть — 1-2 предложения] — одна ключевая деталь или неожиданная подробность\n"
+            "  3. [Вопрос или вывод — 1 предложение] — завершающий вопрос или ёмкая фраза, побуждающая думать\n\n"
+            "- НЕ начинай с 'Сегодня в новостях', 'Привет всем', названия игры или шаблонных фраз\n"
+            "- Начинай СРАЗУ с самого неожиданного или важного факта\n"
             "- ЗАПРЕЩЕНО: мат, сленг, грубые выражения, фамильярное обращение\n\n"
             f"Заголовок: {article_title}\n\n"
             f"Текст поста:\n{clean_text[:1800]}\n\n"
-            "Напиши сценарий (нейтральный литературный текст, 65–90 слов):"
+            "Напиши сценарий (нейтральный литературный текст, СТРОГО 45–60 слов):"
         )
     else:
         system_content = (
@@ -530,23 +529,21 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
             "You always write in plain English, no formatting, no symbols — just natural spoken words."
         )
         user_message = (
-            "Write a short spoken video narration script for TikTok/Reels/Shorts based on the gaming news below.\n\n"
+            "Write an ultra-short spoken narration script for TikTok/Reels/Shorts based on the gaming news below.\n\n"
             "STRICT RULES:\n"
             "- Language: English ONLY\n"
-            "- Length: 65–90 words MAXIMUM (critical — must fit in 35–45 seconds of speech)\n"
+            "- Length: STRICTLY 45–60 words (18–25 seconds of speech) — do NOT exceed this\n"
             "- Plain spoken text only — NO hashtags, NO HTML, NO emojis, NO markdown\n"
             "- The text will be read aloud by a voice AI, so write naturally spoken sentences\n"
-            "- Follow this exact narrative formula with 1-2 sentences per step:\n"
-            "  1. [What happened] — hook sentence that grabs attention immediately\n"
-            "  2. [Short fact] — one key number, stat, or specific detail\n"
-            "  3. [Detail] — one interesting or surprising detail from the news\n"
-            "  4. [Why it matters] — why gamers should care about this\n"
-            "  5. [Question or conclusion] — end with a question or strong closing line\n\n"
-            "- Do NOT start with 'In today's news', 'Hey guys', or any generic opener\n"
-            "- Start directly with the most exciting or surprising fact\n\n"
+            "- Follow this exact 3-step formula:\n"
+            "  1. [Hook — 1 sentence] — a SHOCKING FACT, number, or reveal. NEVER start with the game name. Use patterns like: 'Free:', a number+noun, 'Leaked:', 'For the first time:'\n"
+            "  2. [Core detail — 1-2 sentences] — the single most interesting or surprising fact\n"
+            "  3. [Question or punchline — 1 sentence] — end with a question or a strong closing thought\n\n"
+            "- Do NOT start with the game name, 'In today\'s news', 'Hey guys', or any generic opener\n"
+            "- Start IMMEDIATELY with the most surprising or important fact\n\n"
             f"Article title: {article_title}\n\n"
             f"Post content:\n{clean_text[:1800]}\n\n"
-            "Write the script now (plain text, 65–90 words):"
+            "Write the script now (plain text, STRICTLY 45–60 words):"
         )
 
     messages = [
@@ -558,8 +555,13 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
         script = re.sub(r"<[^>]+>", "", script)
         script = re.sub(r"[*_`#]", "", script)
         script = script.strip()
-        logger.info("%s video script generated: %d words", lang.upper(), len(script.split()))
+        word_count = len(script.split())
+        logger.info("%s video script generated: %d words", lang.upper(), word_count)
+        if word_count > 75:
+            # Trim to first 60 words to stay within target duration
+            script = " ".join(script.split()[:60])
+            logger.info("Script trimmed to 60 words for retention target")
         return script
     except Exception as exc:
         logger.error("Error generating %s video script: %s", lang.upper(), exc)
-        return clean_text[:350].strip()
+        return clean_text[:280].strip()

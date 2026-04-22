@@ -6,7 +6,7 @@ Pipeline:
   + YouTube gameplay clips + Pixabay stock fill) → ffmpeg slideshow + audio
   + burned-in subtitles → mp4
 
-Output: 1080 × 1920 portrait video (~30–45 s).
+Output: 1080 × 1920 portrait video (~18–25 s target for max retention.
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ VID_H = 1920
 VID_FPS = 30
 TTS_VOICE    = "en-US-AndrewMultilingualNeural"  # English — warm, authentic
 TTS_VOICE_RU = "ru-RU-DmitryNeural"              # Russian — Microsoft Neural TTS
-TTS_RATE  = "+10%"   # Slightly faster than default → more energetic, TikTok-style
+TTS_RATE  = "+15%"   # 15% faster → targets 18–25s video length for max retention (data: ≤22s = 84.8% avg)
 TTS_PITCH = "-3Hz"   # Slightly lower pitch → warmer tone
 
 
@@ -1759,9 +1759,9 @@ async def fetch_gameplay_clips(
     Caller is responsible for cleaning up shared_workdir after rendering.
     """
     workdir = tempfile.mkdtemp(dir=VIDEOS_DIR, prefix="clips_")
-    N_CLIPS_ARTICLE = 12   # ~12 × 3–4 s ≈ 36–48 s — fills a typical short
+    N_CLIPS_ARTICLE = 8    # ~7 × 3–4 s ≈ 24–32 s — fits the target short duration
     N_YT_VIDEOS     = 4    # source videos when no article video available
-    CLIPS_PER_VIDEO = 3    # cuts per YT video → 4 × 3 = 12 clips total
+    CLIPS_PER_VIDEO = 2    # cuts per YT video → 4 × 3 = 12 clips total
 
     source_video: str | None = None
 
