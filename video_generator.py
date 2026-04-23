@@ -49,6 +49,16 @@ TTS_RATE  = "+15%"   # 15% faster → targets 18–25s video length for max rete
 TTS_PITCH = "-3Hz"   # Slightly lower pitch → warmer tone
 
 
+# yt-dlp cookie arguments — passes Chrome cookies to bypass YouTube bot check
+_YT_COOKIE_ARGS = ["--cookies-from-browser", "chrome"]
+
+# YouTube extractor args: tv_downgraded client works best with authenticated cookies
+# (per yt-dlp docs: used for free accounts when logged-in cookies are passed)
+_YT_EXTRACTOR_ARGS = ["--extractor-args", "youtube:player_client=tv_downgraded,web_safari"]
+
+# Sleep between requests to avoid YouTube rate-limiting / bot detection
+_YT_SLEEP_ARGS = ["--sleep-requests", "1", "--sleep-interval", "2"]
+
 # ---------------------------------------------------------------------------
 # Generic subprocess helper
 # ---------------------------------------------------------------------------
@@ -1089,7 +1099,12 @@ async def _fetch_youtube_clips(
         "--no-playlist",
         "--no-warnings",
         "--quiet",
-        "--format", "bestvideo[height=1080][ext=mp4]/bestvideo[height=1080]/bestvideo[height<=1080][ext=mp4]/bestvideo[height<=720]",
+        "--ignore-errors",
+        "--match-filters", "live_status=not_live",  # skip premieres (is_upcoming) and live streams
+        *_YT_COOKIE_ARGS,
+        *_YT_EXTRACTOR_ARGS,
+        *_YT_SLEEP_ARGS,
+        "--format", "bestvideo[height<=1080][ext=mp4]/bestvideo[height<=720]/best[height<=720]/best",
         "--max-filesize", f"{YT_MAX_FILESIZE}M",
         "--max-downloads", str(count + skip),   # download skip+count, discard first skip
         "--output", os.path.join(clips_dir, "%(autonumber)s.%(ext)s"),
@@ -1139,6 +1154,11 @@ async def _download_multiple_yt_videos(
     ydl_args = [
         "yt-dlp",
         "--no-playlist", "--no-warnings",
+        "--ignore-errors",
+        "--match-filters", "live_status=not_live",  # skip premieres (is_upcoming) and live streams
+        *_YT_COOKIE_ARGS,
+        *_YT_EXTRACTOR_ARGS,
+        *_YT_SLEEP_ARGS,
         "--format", _FMT,
         "--max-filesize", f"{YT_MAX_FILESIZE}M",
         "--max-downloads", str(count + skip),
@@ -1186,6 +1206,8 @@ async def _download_full_yt_video(
         ydl_args = [
             "yt-dlp",
             "--no-playlist", "--no-warnings",
+            *_YT_COOKIE_ARGS,
+            *_YT_EXTRACTOR_ARGS,
             "--format", _FMT,
             "--max-filesize", f"{YT_MAX_FILESIZE}M",
             "--output", os.path.join(clips_dir, "source.%(ext)s"),
@@ -1196,6 +1218,11 @@ async def _download_full_yt_video(
         ydl_args = [
             "yt-dlp",
             "--no-playlist", "--no-warnings",
+            "--ignore-errors",
+            "--match-filters", "live_status=not_live",  # skip premieres (is_upcoming) and live streams
+            *_YT_COOKIE_ARGS,
+            *_YT_EXTRACTOR_ARGS,
+            *_YT_SLEEP_ARGS,
             "--format", _FMT,
             "--max-filesize", f"{YT_MAX_FILESIZE}M",
             "--max-downloads", str(skip + 1),

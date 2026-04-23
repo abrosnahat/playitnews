@@ -238,20 +238,36 @@ def _extract_pg_embeds(scope) -> list[dict]:
 
 
 async def _fetch_playground_m3u8(session: aiohttp.ClientSession, video_id: str) -> Optional[str]:
-    """Fetch the iframe page for a playground video and return the highest-quality m3u8 URL."""
+    """Fetch the iframe page for a playground video and return the best m3u8 URL ≤1080p."""
     iframe_url = f"https://www.playground.ru/video/iframe/{video_id}/"
     html = await fetch(session, iframe_url)
     if not html:
         return None
-    # Extract all m3u8 URLs — first one tends to be the highest quality
     matches = re.findall(r'file:\s*"(https://video\.playground\.ru/[^"]+\.m3u8)"', html)
     if not matches:
         return None
-    # Pick the stream with the highest "m-NNN" bitrate marker; fall back to first match
+
+    # Each master playlist is ~200 bytes and contains a RESOLUTION tag — fetch all in parallel
+    async def _get_height(url: str) -> tuple[int, str]:
+        content = await fetch(session, url)
+        if content:
+            m = re.search(r'RESOLUTION=\d+x(\d+)', content)
+            if m:
+                return int(m.group(1)), url
+        return 0, url
+
+    results = await asyncio.gather(*(_get_height(u) for u in matches))
+
+    # Best quality that fits within 1080p
+    candidates = [(h, u) for h, u in results if 0 < h <= 1080]
+    if candidates:
+        return max(candidates, key=lambda x: x[0])[1]
+
+    # All streams exceed 1080p — fall back to lowest bitrate number
     def _bitrate_key(url: str) -> int:
         m = re.search(r'm-(\d+)', url)
         return int(m.group(1)) if m else 0
-    return max(matches, key=_bitrate_key)
+    return min(matches, key=_bitrate_key)
 
 
 async def download_videos(
@@ -327,6 +343,7 @@ async def _download_youtube_video(video_id: str) -> Optional[str]:
             "yt-dlp",
             "--no-playlist",
             "--no-warnings",
+            "--cookies-from-browser", "chrome",
             "--format", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]/best",
             "--max-filesize", "1500M",
             "--merge-output-format", "mp4",
@@ -423,39 +440,58 @@ async def _download_hls_video(video_id: str, m3u8_url: str) -> Optional[str]:
             "-of", "default=noprint_wrappers=1:nokey=1", output_path,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await probe.communicate()
-        if stdout.strip():
+        stdout, stderr = await probe.communicate()
+        # Valid only if duration returned AND no decode errors in stderr
+        if stdout.strip() and not stderr.strip():
             return output_path  # valid cached file
         logger.warning("Кэшированный файл %s повреждён, перескачиваем", output_path)
         os.remove(output_path)
-    proc = None
-    try:
+    async def _run_ffmpeg(*args: str, timeout: int) -> bool:
+        nonlocal proc
         proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-i", m3u8_url,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-vf", "scale=iw*sar:ih,setsar=1",
-            "-c:a", "aac",
+            "ffmpeg", *args,
             "-movflags", "faststart",
             "-y", output_path,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        await asyncio.wait_for(proc.communicate(), timeout=600)
-        if proc.returncode == 0 and os.path.exists(output_path):
-            return output_path
-    except asyncio.TimeoutError:
-        logger.warning("Таймаут при скачивании видео %s", video_id)
-        if proc is not None:
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            return proc.returncode == 0 and os.path.exists(output_path)
+        except asyncio.TimeoutError:
             try:
                 proc.kill()
             except Exception:
                 pass
-        if os.path.exists(output_path):
-            os.remove(output_path)
+            return False
+
+    proc = None
+    try:
+        # Try stream copy first (fast, works when codec is already H264/AAC)
+        ok = await _run_ffmpeg(
+            "-i", m3u8_url,
+            "-c", "copy",
+            timeout=300,
+        )
+        if not ok:
+            # Corrupt or incompatible codec — re-encode
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            logger.info("Копирование не удалось, перекодируем %s", video_id)
+            ok = await _run_ffmpeg(
+                "-i", m3u8_url,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-vf", "scale=iw*sar:ih,setsar=1",
+                "-c:a", "aac",
+                timeout=600,
+            )
+        if ok:
+            return output_path
+        logger.warning("Таймаут/ошибка при скачивании видео %s", video_id)
     except Exception as exc:
         logger.warning("Ошибка скачивания видео %s: %s", video_id, exc)
-        if os.path.exists(output_path):
-            os.remove(output_path)
+    if os.path.exists(output_path):
+        os.remove(output_path)
     return None
 
 
