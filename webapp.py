@@ -83,12 +83,162 @@ def _run_async(coro):
         loop.close()
 
 
+def _make_bot():
+    """Create a Telegram Bot with timeouts large enough for media uploads.
+
+    PTB has TWO write timeouts:
+    - `write_timeout` — for plain API calls (default ~5s).
+    - `media_write_timeout` — used by upload methods (send_photo / send_video /
+      send_media_group). Default is 20s, which is too short for multipart
+      uploads of photos+videos and is the actual cause of the
+      `httpx.WriteTimeout` we kept seeing on send_media_group.
+    Both are bumped here so a single multipart upload can finish even on a slow
+    uplink.
+    """
+    from telegram import Bot
+    from telegram.request import HTTPXRequest
+    import certifi
+    request = HTTPXRequest(
+        httpx_kwargs={"verify": certifi.where()},
+        connect_timeout=30,
+        read_timeout=600,
+        write_timeout=600,
+        media_write_timeout=600,
+        pool_timeout=60,
+    )
+    return Bot(token=TELEGRAM_BOT_TOKEN, request=request)
+
+
 def _clean_text(text: str) -> str:
     """Strip Telegram HTML and Markdown formatting for plain-text captions."""
     text = re.sub(r'<[^>]+>', '', text)
     text = re.sub(r'[*_`~]', '', text)
     text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)  # [text](url) → text
     return text.strip()
+
+
+# Telegram Bot API hard limit for media uploads.
+TG_MAX_BYTES = 50 * 1024 * 1024
+
+# Video codecs that play reliably in Telegram clients (iOS, Android, web).
+# AV1, VP9, HEVC etc. often produce a black screen with audio only on iOS/web.
+_TG_SAFE_VIDEO_CODECS = {"h264", "avc1"}
+
+
+def _probe_video_codec(path: str) -> str:
+    """Return the video codec name (e.g. 'h264', 'av1', 'vp9'), or '' on failure."""
+    import subprocess as _sp, json as _json
+    try:
+        r = _sp.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name", "-of", "json", path],
+            capture_output=True, text=True, timeout=10,
+        )
+        s = _json.loads(r.stdout).get("streams", [{}])[0]
+        return (s.get("codec_name") or "").lower()
+    except Exception:
+        return ""
+
+
+def _transcode_to_h264(src: str, max_mb: int = 45) -> str:
+    """Re-encode video to H.264 / yuv420p / AAC so Telegram plays it back correctly.
+
+    Targets ~`max_mb` MB so the result also fits Telegram's 50 MB limit.
+    Returns the path to the new file, or the original path if ffmpeg fails.
+    """
+    import subprocess as _sp, json as _json
+    r = _sp.run(
+        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+         "-of", "json", src],
+        capture_output=True, text=True, timeout=15,
+    )
+    try:
+        duration = float(_json.loads(r.stdout).get("format", {}).get("duration", 0) or 0)
+    except Exception:
+        duration = 0
+    audio_kbps = 128
+    if duration > 0:
+        total_kbits = max_mb * 8 * 1024
+        video_kbps = max(400, int(total_kbits / duration) - audio_kbps)
+    else:
+        video_kbps = 2500
+    out = src.rsplit(".", 1)[0] + "_tg.mp4"
+    cmd = [
+        "ffmpeg", "-y", "-i", src,
+        "-c:v", "libx264", "-preset", "medium",
+        "-pix_fmt", "yuv420p",   # required for broadest Telegram client compatibility
+        "-profile:v", "high", "-level", "4.0",
+        "-b:v", f"{video_kbps}k",
+        "-maxrate", f"{int(video_kbps * 1.5)}k",
+        "-bufsize", f"{video_kbps * 3}k",
+        "-c:a", "aac", "-b:a", f"{audio_kbps}k",
+        "-movflags", "+faststart",
+        out,
+    ]
+    result = _sp.run(cmd, capture_output=True, timeout=600)
+    if result.returncode == 0 and os.path.exists(out) and os.path.getsize(out) < TG_MAX_BYTES:
+        logger.info("Transcoded %s → %s (%.1fMB)", src, out, os.path.getsize(out) / 1024 / 1024)
+        return out
+    logger.warning("Transcode failed for %s, returncode=%s stderr=%s",
+                   src, result.returncode,
+                   result.stderr[-500:].decode(errors="ignore") if result.stderr else "")
+    return src
+
+
+def _compress_for_tg(src: str) -> str:
+    """Backward-compat alias: H.264 transcode that also targets the 50 MB cap."""
+    return _transcode_to_h264(src, max_mb=45)
+
+
+def _prepare_videos_for_tg(raw_paths: list, post_id: int | None = None) -> list:
+    """Return videos ready for Telegram: must be H.264 and ≤50 MB.
+
+    - Anything not H.264 (AV1, VP9, HEVC, ...) is transcoded — Telegram clients
+      otherwise play audio with a black screen.
+    - Anything still over 50 MB after transcode/compression is dropped.
+    - The cached `*_tg.mp4` next to the source is reused on subsequent calls.
+    """
+    out = []
+    for vp in raw_paths:
+        if not os.path.exists(vp):
+            continue
+        cached = vp.rsplit(".", 1)[0] + "_tg.mp4"
+        if os.path.exists(cached) and os.path.getsize(cached) <= TG_MAX_BYTES:
+            logger.info("Post #%s: using cached Telegram-ready video %s", post_id, cached)
+            out.append(cached)
+            continue
+        codec = _probe_video_codec(vp)
+        size_mb = os.path.getsize(vp) / 1024 / 1024
+        needs_transcode = codec not in _TG_SAFE_VIDEO_CODECS
+        too_large = os.path.getsize(vp) > TG_MAX_BYTES
+        if needs_transcode or too_large:
+            reason = []
+            if needs_transcode:
+                reason.append(f"codec={codec or 'unknown'}")
+            if too_large:
+                reason.append(f"size={size_mb:.1f}MB")
+            logger.info("Post #%s: transcoding %s to H.264 (%s)", post_id, vp, ", ".join(reason))
+            vp = _transcode_to_h264(vp, max_mb=45)
+        if os.path.exists(vp) and os.path.getsize(vp) <= TG_MAX_BYTES:
+            out.append(vp)
+        else:
+            logger.warning("Post #%s: skipping video %s — could not prepare for Telegram", post_id, vp)
+    return out
+
+
+def _probe_video_dims(path: str):
+    """Return (width, height) of a video using ffprobe, or (None, None) on failure."""
+    try:
+        import subprocess as _sp, json as _json
+        r = _sp.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "json", path],
+            capture_output=True, text=True, timeout=10,
+        )
+        s = _json.loads(r.stdout).get("streams", [{}])[0]
+        return s.get("width"), s.get("height")
+    except Exception:
+        return None, None
 
 
 def _push_pub(post_id: int, message: str, type_: str = "progress") -> None:
@@ -222,9 +372,99 @@ def api_approve(post_id: int):
         return jsonify({"error": str(exc)}), 500
 
 
+async def _send_post_to_channel(bot, chat_id: str, caption: str, footer: str,
+                                images: list, videos: list, post_id: int | None = None) -> None:
+    """Send a single post (caption + optional images/videos) to a Telegram channel
+    as ONE Telegram message (text, photo, video, or media group).
+
+    To avoid httpx WriteTimeout from streaming large files, all media bytes are
+    pre-read into memory and re-uploaded as a single multipart request per attempt.
+    The send is retried up to MAX_RETRIES times on TimedOut/NetworkError.
+    """
+    import asyncio
+    from io import BytesIO
+    from telegram import InputMediaPhoto, InputMediaVideo
+    from telegram.error import TimedOut, NetworkError
+    from telegram.constants import ParseMode
+
+    full_caption = caption.rstrip()
+    if footer:
+        full_caption = full_caption + f"\n\n{footer}"
+    if len(full_caption) > 1024:
+        cut = full_caption[:1024]
+        last_nl = cut.rfind("\n")
+        full_caption = cut[:last_nl].rstrip() if last_nl > 512 else cut.rstrip()
+
+    # Pre-read everything into memory so each retry can rebuild the multipart
+    # body without re-streaming from disk (which is what trips WriteTimeout).
+    image_blobs: list[tuple[str, bytes]] = []
+    for p in images:
+        with open(p, "rb") as fh:
+            image_blobs.append((p, fh.read()))
+    video_blobs: list[tuple[str, bytes, int | None, int | None]] = []
+    for p in videos:
+        with open(p, "rb") as fh:
+            data = fh.read()
+        w, h = _probe_video_dims(p)
+        video_blobs.append((p, data, w, h))
+
+    MAX_RETRIES = 3
+
+    async def _attempt() -> None:
+        if not image_blobs and not video_blobs:
+            await bot.send_message(chat_id=chat_id, text=full_caption,
+                                   parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            return
+
+        total = len(image_blobs) + len(video_blobs)
+        if total == 1:
+            if image_blobs:
+                _, data = image_blobs[0]
+                await bot.send_photo(chat_id=chat_id, photo=BytesIO(data),
+                                     caption=full_caption, parse_mode=ParseMode.HTML)
+            else:
+                _, data, w, h = video_blobs[0]
+                await bot.send_video(chat_id=chat_id, video=BytesIO(data),
+                                     caption=full_caption, parse_mode=ParseMode.HTML,
+                                     width=w, height=h, supports_streaming=True)
+            return
+
+        media = []
+        for i, (_, data) in enumerate(image_blobs):
+            media.append(InputMediaPhoto(
+                media=BytesIO(data),
+                caption=full_caption if i == 0 else None,
+                parse_mode=ParseMode.HTML if i == 0 else None,
+            ))
+        for j, (_, data, w, h) in enumerate(video_blobs):
+            media.append(InputMediaVideo(
+                media=BytesIO(data),
+                caption=full_caption if not image_blobs and j == 0 else None,
+                parse_mode=ParseMode.HTML if not image_blobs and j == 0 else None,
+                width=w, height=h, supports_streaming=True,
+            ))
+        await bot.send_media_group(chat_id=chat_id, media=media)
+
+    last_exc: Exception | None = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            await _attempt()
+            return
+        except (TimedOut, NetworkError) as exc:
+            last_exc = exc
+            logger.warning(
+                "Post #%s: Telegram send to %s failed (attempt %d/%d): %s",
+                post_id, chat_id, attempt, MAX_RETRIES, exc,
+            )
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(3 * attempt)
+    # Exhausted retries — re-raise the last network error
+    assert last_exc is not None
+    raise last_exc
+
+
 async def _do_publish_telegram(post_id: int) -> None:
-    from telegram import Bot, InputMediaPhoto, InputMediaVideo
-    from telegram.error import TimedOut, TelegramError
+    from telegram.error import TelegramError
 
     post = db.get_scheduled_post(post_id)
     if not post:
@@ -233,124 +473,26 @@ async def _do_publish_telegram(post_id: int) -> None:
     text       = post["post_text"]
     ru_text    = post.get("ru_post_text")
     images     = [p for p in post.get("image_paths", [])  if os.path.exists(p)]
-    TG_MAX_BYTES = 50 * 1024 * 1024  # Telegram Bot API hard limit
-
-    def _compress_for_tg(src: str) -> str:
-        """Compress video to fit under 50 MB using ffmpeg bitrate targeting. Returns path to compressed file."""
-        import subprocess as _sp, json as _json
-        # Probe duration
-        r = _sp.run(
-            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-             "-of", "json", src],
-            capture_output=True, text=True, timeout=15,
-        )
-        duration = float(_json.loads(r.stdout).get("format", {}).get("duration", 0) or 0)
-        if duration <= 0:
-            return src  # can't probe, send as-is
-        target_mb = 45  # conservative target to stay safely under 50MB
-        audio_kbps = 128
-        total_kbits = target_mb * 8 * 1024
-        video_kbps = max(200, int(total_kbits / duration) - audio_kbps)
-        out = src.rsplit(".", 1)[0] + "_tg.mp4"
-        cmd = [
-            "ffmpeg", "-y", "-i", src,
-            "-c:v", "libx264", "-preset", "fast",
-            "-b:v", f"{video_kbps}k",
-            "-maxrate", f"{int(video_kbps * 1.5)}k",
-            "-bufsize", f"{video_kbps * 3}k",
-            "-c:a", "aac", "-b:a", f"{audio_kbps}k",
-            "-movflags", "+faststart",
-            out,
-        ]
-        result = _sp.run(cmd, capture_output=True, timeout=300)
-        if result.returncode == 0 and os.path.exists(out) and os.path.getsize(out) < TG_MAX_BYTES:
-            logger.info("Compressed %s → %s (%.1fMB)", src, out, os.path.getsize(out)/1024/1024)
-            return out
-        logger.warning("Compression failed or still too large for %s, returncode=%s stderr=%s",
-                       src, result.returncode, result.stderr[-500:] if result.stderr else "")
-        return src  # fallback to original
-
     raw_videos = [p for p in post.get("video_paths", []) if os.path.exists(p)]
-    videos = []
-    for vp in raw_videos:
-        if os.path.getsize(vp) > TG_MAX_BYTES:
-            logger.info("Post #%d: video %s is %.1fMB, compressing…", post_id, vp, os.path.getsize(vp)/1024/1024)
-            vp = _compress_for_tg(vp)
-        if os.path.getsize(vp) <= TG_MAX_BYTES:
-            videos.append(vp)
-        else:
-            logger.warning("Post #%d: skipping video %s — still >50MB after compression", post_id, vp)
+    videos     = _prepare_videos_for_tg(raw_videos, post_id=post_id)
 
-    def _probe_dims(path: str):
-        """Return (width, height) of a video using ffprobe, or (None, None) on failure."""
-        try:
-            import subprocess as _sp, json as _json
-            r = _sp.run(
-                ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
-                 "-show_entries", "stream=width,height", "-of", "json", path],
-                capture_output=True, text=True, timeout=10,
-            )
-            d = _json.loads(r.stdout)
-            s = d.get("streams", [{}])[0]
-            return s.get("width"), s.get("height")
-        except Exception:
-            return None, None
+    async with _make_bot() as bot:
+        # Main EN channel
+        await _send_post_to_channel(
+            bot, TELEGRAM_CHANNEL_ID, text, "@playitgamesnews",
+            images, videos, post_id=post_id,
+        )
+        # Second RU channel — failure here must not poison status of the first one
+        if TELEGRAM_SECOND_CHANNEL_ID and ru_text:
+            try:
+                await _send_post_to_channel(
+                    bot, TELEGRAM_SECOND_CHANNEL_ID, ru_text, "@readitgames",
+                    images, videos, post_id=post_id,
+                )
+            except TelegramError as e:
+                logger.error("Second channel publish failed for #%d: %s", post_id, e)
+        db.update_post_status(post_id, "sent")
 
-    async def _send(chat_id, caption, footer=None):
-        full_caption = caption
-        if footer:
-            full_caption = caption.rstrip() + f"\n\n{footer}"
-        # Hard-trim to Telegram caption limit (1024) at last newline boundary
-        if len(full_caption) > 1024:
-            cut = full_caption[:1024]
-            last_nl = cut.rfind("\n")
-            full_caption = cut[:last_nl].rstrip() if last_nl > 512 else cut.rstrip()
-        from telegram.constants import ParseMode
-        if images or videos:
-            media = []
-            for i, p in enumerate(images):
-                media.append(InputMediaPhoto(
-                    media=open(p, "rb"),
-                    caption=full_caption if i == 0 else None,
-                    parse_mode=ParseMode.HTML if i == 0 else None,
-                ))
-            for j, p in enumerate(videos):
-                w, h = _probe_dims(p)
-                media.append(InputMediaVideo(
-                    media=open(p, "rb"),
-                    caption=full_caption if not images and j == 0 else None,
-                    parse_mode=ParseMode.HTML if not images and j == 0 else None,
-                    width=w, height=h,
-                    supports_streaming=True,
-                ))
-            if len(media) == 1:
-                if images:
-                    await bot.send_photo(chat_id=chat_id, photo=open(images[0], "rb"),
-                                         caption=full_caption, parse_mode=ParseMode.HTML)
-                else:
-                    w, h = _probe_dims(videos[0])
-                    await bot.send_video(chat_id=chat_id, video=open(videos[0], "rb"),
-                                         caption=full_caption, parse_mode=ParseMode.HTML,
-                                         width=w, height=h, supports_streaming=True)
-            else:
-                await bot.send_media_group(chat_id=chat_id, media=media)
-        else:
-            await bot.send_message(chat_id=chat_id, text=full_caption,
-                                   parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-
-    async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
-        try:
-            await _send(TELEGRAM_CHANNEL_ID, text, footer="@playitgamesnews")
-            if TELEGRAM_SECOND_CHANNEL_ID and ru_text:
-                try:
-                    await _send(TELEGRAM_SECOND_CHANNEL_ID, ru_text, footer="@readitgames")
-                except TelegramError as e:
-                    logger.error("Second channel publish failed for #%d: %s", post_id, e)
-            db.update_post_status(post_id, "sent")
-        except TimedOut:
-            db.update_post_status(post_id, "sent")  # Telegram accepted it
-        except TelegramError as exc:
-            raise
 
 
 @app.route("/api/posts/<int:post_id>/cancel", methods=["POST"])
@@ -398,70 +540,51 @@ def api_republish_ru(post_id: int):
         return jsonify({"error": str(exc)}), 500
 
 
-async def _do_republish_ru(post_id: int) -> None:
-    from telegram import Bot, InputMediaPhoto, InputMediaVideo
-    from telegram.error import TelegramError
+@app.route("/api/posts/<int:post_id>/republish-en", methods=["POST"])
+def api_republish_en(post_id: int):
+    """Re-send post_text to @playitgamesnews (main EN channel)."""
+    post = db.get_scheduled_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+    if post["status"] != "sent":
+        return jsonify({"error": f"Post status is '{post['status']}', expected 'sent'"}), 400
+    en_text = post.get("post_text")
+    if not en_text:
+        return jsonify({"error": "No post_text for this post"}), 400
+    try:
+        _run_async(_do_republish_en(post_id))
+        return jsonify({"success": True})
+    except Exception as exc:
+        logger.exception("Republish EN failed for post #%d", post_id)
+        return jsonify({"error": str(exc)}), 500
 
+
+async def _do_republish_ru(post_id: int) -> None:
     post = db.get_scheduled_post(post_id)
     ru_text = post["ru_post_text"]
     images  = [p for p in post.get("image_paths", [])  if os.path.exists(p)]
-    videos  = [p for p in post.get("video_paths", [])  if os.path.exists(p)]
-    if post.get("generated_video_path_ru") and os.path.exists(post["generated_video_path_ru"]):
-        videos = [post["generated_video_path_ru"]]
-        images = []
-
-    full_caption = ru_text.rstrip() + "\n\n@readitgames"
-    if len(full_caption) > 1024:
-        cut = full_caption[:1024]
-        last_nl = cut.rfind("\n")
-        full_caption = cut[:last_nl].rstrip() if last_nl > 512 else cut.rstrip()
-
-    from telegram.constants import ParseMode
-
-    def _probe_dims(p):
-        try:
-            import subprocess, json as _j
-            r = subprocess.run(
-                ["ffprobe", "-v", "quiet", "-show_streams", "-of", "json", p],
-                capture_output=True, text=True, timeout=10,
-            )
-            s = next((s for s in _j.loads(r.stdout).get("streams", []) if s.get("codec_type") == "video"), {})
-            return s.get("width"), s.get("height")
-        except Exception:
-            return None, None
-
-    async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
-        if images or videos:
-            media = []
-            for i, p in enumerate(images):
-                media.append(InputMediaPhoto(
-                    media=open(p, "rb"),
-                    caption=full_caption if i == 0 else None,
-                    parse_mode=ParseMode.HTML if i == 0 else None,
-                ))
-            for j, p in enumerate(videos):
-                w, h = _probe_dims(p)
-                media.append(InputMediaVideo(
-                    media=open(p, "rb"),
-                    caption=full_caption if not images and j == 0 else None,
-                    parse_mode=ParseMode.HTML if not images and j == 0 else None,
-                    width=w, height=h, supports_streaming=True,
-                ))
-            if len(media) == 1:
-                if images:
-                    await bot.send_photo(chat_id=TELEGRAM_SECOND_CHANNEL_ID, photo=open(images[0], "rb"),
-                                         caption=full_caption, parse_mode=ParseMode.HTML)
-                else:
-                    w, h = _probe_dims(videos[0])
-                    await bot.send_video(chat_id=TELEGRAM_SECOND_CHANNEL_ID, video=open(videos[0], "rb"),
-                                         caption=full_caption, parse_mode=ParseMode.HTML,
-                                         width=w, height=h, supports_streaming=True)
-            else:
-                await bot.send_media_group(chat_id=TELEGRAM_SECOND_CHANNEL_ID, media=media)
-        else:
-            await bot.send_message(chat_id=TELEGRAM_SECOND_CHANNEL_ID, text=full_caption,
-                                   parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    raw_videos = [p for p in post.get("video_paths", []) if os.path.exists(p)]
+    videos = _prepare_videos_for_tg(raw_videos, post_id=post_id)
+    async with _make_bot() as bot:
+        await _send_post_to_channel(
+            bot, TELEGRAM_SECOND_CHANNEL_ID, ru_text, "@readitgames",
+            images, videos, post_id=post_id,
+        )
     logger.info("Post #%d republished to @readitgames", post_id)
+
+
+async def _do_republish_en(post_id: int) -> None:
+    post = db.get_scheduled_post(post_id)
+    en_text = post["post_text"]
+    images  = [p for p in post.get("image_paths", [])  if os.path.exists(p)]
+    raw_videos = [p for p in post.get("video_paths", []) if os.path.exists(p)]
+    videos = _prepare_videos_for_tg(raw_videos, post_id=post_id)
+    async with _make_bot() as bot:
+        await _send_post_to_channel(
+            bot, TELEGRAM_CHANNEL_ID, en_text, "@playitgamesnews",
+            images, videos, post_id=post_id,
+        )
+    logger.info("Post #%d republished to @playitgamesnews", post_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1048,7 +1171,7 @@ if __name__ == "__main__":
     local_ip = socket.gethostbyname(socket.gethostname())
     print("=" * 50)
     print(f"  PlayItNews Dashboard")
-    print(f"  Local:   http://localhost:5001")
-    print(f"  Network: http://{local_ip}:5001")
+    print(f"  Local:   http://localhost:5003")
+    print(f"  Network: http://{local_ip}:5003")
     print("=" * 50)
-    app.run(host="0.0.0.0", port=5001, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=5003, debug=False, threaded=True)

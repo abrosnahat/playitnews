@@ -63,7 +63,7 @@ BLOCKED_URL_CATEGORIES: list[str] = [
 
 # Video generation — YouTube clip settings
 YT_CLIP_DURATION: int = int(os.getenv("YT_CLIP_DURATION", "8"))    # seconds per clip
-YT_CLIP_SKIP: int = int(os.getenv("YT_CLIP_SKIP", "15"))            # skip intro seconds
+YT_CLIP_SKIP: int = int(os.getenv("YT_CLIP_SKIP", "5"))            # skip intro seconds
 YT_MAX_CLIPS: int = int(os.getenv("YT_MAX_CLIPS", "5"))             # max clips to download
 YT_MAX_FILESIZE: int = int(os.getenv("YT_MAX_FILESIZE", "1500"))      # MB per clip (yt-dlp limit)
 

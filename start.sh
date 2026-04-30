@@ -3,6 +3,11 @@
 VENV=".venv/bin/python"
 cd "$(dirname "$0")"
 
+# Kill any leftover instances from previous runs to avoid port/getUpdates conflicts
+pkill -f "$PWD/webapp.py" 2>/dev/null
+pkill -f "$PWD/main.py" 2>/dev/null
+sleep 1
+
 echo "Starting Telegram bot (main.py)..."
 $VENV main.py &
 BOT_PID=$!
@@ -16,7 +21,7 @@ if command -v cloudflared &>/dev/null; then
   # Kill any leftover cloudflared processes from previous runs
   pkill -f "cloudflared tunnel" 2>/dev/null; sleep 0.5
   echo "Starting Cloudflare tunnel..."
-  cloudflared tunnel --url http://localhost:5001 --no-autoupdate > /tmp/cloudflared_playitnews.log 2>&1 &
+  cloudflared --config /dev/null tunnel --url http://localhost:5003 --no-autoupdate > /tmp/cloudflared_playitnews.log 2>&1 &
   TUNNEL_PID=$!
   # Wait for URL to appear in log
   for i in $(seq 1 15); do
@@ -35,7 +40,7 @@ else
 fi
 
 echo ""
-  echo "  Local:   http://localhost:5001"
+echo "  Local:   http://localhost:5003"
 echo "  Bot PID: $BOT_PID  |  Web PID: $WEB_PID"
 echo ""
 echo "Press Ctrl+C to stop all."

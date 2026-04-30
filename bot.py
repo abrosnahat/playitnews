@@ -16,7 +16,7 @@ from config import TELEGRAM_ADMIN_CHAT_ID
 
 logger = logging.getLogger(__name__)
 
-DASHBOARD_LOCAL = "http://localhost:5001"
+DASHBOARD_LOCAL = "http://localhost:5003"
 
 
 def _get_cloudflare_url() -> Optional[str]:
