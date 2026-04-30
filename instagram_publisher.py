@@ -1,34 +1,32 @@
 """
-Instagram Reels publisher via Instagram API (Meta, 2024+).
+Instagram Reels publisher via Instagram Graph API.
 
 Flow:
-  1. Upload MP4 to a free temporary public host (tries multiple services).
-  2. Create Instagram media container (REELS) with that URL.
+  1. Upload MP4 (and optional cover image) to GitHub via github_uploader.
+  2. Create a REELS media container with the resulting raw.githubusercontent.com URLs.
   3. Poll until container status == FINISHED.
   4. Publish the container.
-  5. File on free host expires automatically.
+  5. Delete the GitHub assets (if GITHUB_MEDIA_DELETE_AFTER_PUBLISH=1).
 
 Requirements:
-  - pip install aiohttp
+  - pip install aiohttp certifi
   - Instagram Business or Creator account.
-  - Meta app with "Instagram" product and instagram_business_content_publish
-    permission (Instagram Login OAuth — no Facebook Page required).
-
-How to get INSTAGRAM_ACCESS_TOKEN: run  python get_instagram_token.py
+  - Meta app with Instagram product and instagram_business_content_publish permission.
+  - Public GitHub repo + PAT (GITHUB_MEDIA_REPO / GITHUB_MEDIA_TOKEN in .env).
 
 Environment variables (see config.py):
-  INSTAGRAM_USER_ID      — your Instagram account numeric ID
-  INSTAGRAM_ACCESS_TOKEN — long-lived token (60 days)
+  INSTAGRAM_USER_ID      — Instagram account numeric ID
+  INSTAGRAM_ACCESS_TOKEN — long-lived token
 """
 import asyncio
-import json
 import logging
 import os
-import uuid
-import urllib.request
+import ssl
 
 import aiohttp
+import certifi
 
+import github_uploader
 from config import (
     INSTAGRAM_ACCESS_TOKEN,
     INSTAGRAM_USER_ID,
@@ -44,180 +42,11 @@ _CONTAINER_POLL_TIMEOUT  = 300  # give up after 5 minutes
 
 
 # ---------------------------------------------------------------------------
-# Upload backends (tried in order until one succeeds)
-# ---------------------------------------------------------------------------
-
-def _ssl_ctx():
-    """Return an SSL context that validates certificates via certifi."""
-    import ssl, certifi
-    return ssl.create_default_context(cafile=certifi.where())
-
-
-def _upload_catbox(local_path: str) -> str:
-    """catbox.moe — free, no account, files kept indefinitely."""
-    boundary = uuid.uuid4().hex
-    filename  = os.path.basename(local_path)
-    with open(local_path, "rb") as f:
-        file_data = f.read()
-    body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="reqtype"\r\n\r\nfileupload\r\n'
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="fileToUpload"; filename="{filename}"\r\n'
-        f"Content-Type: video/mp4\r\n\r\n"
-    ).encode() + file_data + f"\r\n--{boundary}--\r\n".encode()
-    req = urllib.request.Request(
-        "https://catbox.moe/user/api.php",
-        data=body,
-        method="POST",
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-    )
-    with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as resp:
-        url = resp.read().decode().strip()
-    if not url.startswith("http"):
-        raise RuntimeError(f"catbox.moe unexpected response: {url!r}")
-    return url
-
-
-def _upload_0x0(local_path: str) -> str:
-    """0x0.st — free, no account, files expire after ~1 year."""
-    boundary = uuid.uuid4().hex
-    filename  = os.path.basename(local_path)
-    with open(local_path, "rb") as f:
-        file_data = f.read()
-    body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
-        f"Content-Type: video/mp4\r\n\r\n"
-    ).encode() + file_data + f"\r\n--{boundary}--\r\n".encode()
-    req = urllib.request.Request(
-        "https://0x0.st",
-        data=body,
-        method="POST",
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-    )
-    with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as resp:
-        return resp.read().decode().strip()
-
-
-def _upload_transfer_sh(local_path: str) -> str:
-    """transfer.sh — free, no account, files auto-deleted after 1 day."""
-    filename = os.path.basename(local_path)
-    with open(local_path, "rb") as f:
-        req = urllib.request.Request(
-            f"https://transfer.sh/{filename}", data=f, method="PUT",
-            headers={"Content-Type": "video/mp4", "Max-Days": "1"},
-        )
-        with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as resp:
-            return resp.read().decode().strip()
-
-
-def _upload_pixeldrain(local_path: str) -> str:
-    """pixeldrain.com — free, no account, direct MP4 link."""
-    filename = os.path.basename(local_path)
-    with open(local_path, "rb") as f:
-        req = urllib.request.Request(
-            f"https://pixeldrain.com/api/file/{filename}",
-            data=f, method="PUT",
-            headers={"Content-Type": "video/mp4"},
-        )
-        with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as resp:
-            data = json.loads(resp.read())
-    file_id = data.get("id")
-    if not file_id:
-        raise RuntimeError(f"pixeldrain error: {data}")
-    return f"https://pixeldrain.com/api/file/{file_id}"
-
-
-def _upload_litterbox(local_path: str) -> str:
-    """litterbox.catbox.moe — free, no account, files expire after 72 h. Direct MP4 link."""
-    boundary = uuid.uuid4().hex
-    filename  = os.path.basename(local_path)
-    with open(local_path, "rb") as f:
-        file_data = f.read()
-    body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="reqtype"\r\n\r\nfileupload\r\n'
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="time"\r\n\r\n72h\r\n'
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="fileToUpload"; filename="{filename}"\r\n'
-        f"Content-Type: video/mp4\r\n\r\n"
-    ).encode() + file_data + f"\r\n--{boundary}--\r\n".encode()
-    req = urllib.request.Request(
-        "https://litterbox.catbox.moe/resources/internals/api.php",
-        data=body,
-        method="POST",
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-    )
-    with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as resp:
-        url = resp.read().decode().strip()
-    if not url.startswith("http"):
-        raise RuntimeError(f"litterbox unexpected response: {url!r}")
-    return url
-
-
-def _upload_uguu(local_path: str) -> str:
-    """uguu.se — free, no account, files expire after ~48 h. Direct MP4 link."""
-    boundary = uuid.uuid4().hex
-    filename  = os.path.basename(local_path)
-    with open(local_path, "rb") as f:
-        file_data = f.read()
-    body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="files[]"; filename="{filename}"\r\n'
-        f"Content-Type: video/mp4\r\n\r\n"
-    ).encode() + file_data + f"\r\n--{boundary}--\r\n".encode()
-    req = urllib.request.Request(
-        "https://uguu.se/upload",
-        data=body,
-        method="POST",
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-    )
-    with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as resp:
-        data = json.loads(resp.read())
-    files = data.get("files", [])
-    if not files or not files[0].get("url"):
-        raise RuntimeError(f"uguu.se unexpected response: {data}")
-    return files[0]["url"]
-
-
-async def _upload_video(local_path: str) -> str:
-    """
-    Try free upload backends in order until one succeeds.
-    Returns a publicly accessible URL Instagram can fetch.
-    """
-    backends = [
-        ("litterbox.catbox.moe", _upload_litterbox),
-        ("uguu.se",             _upload_uguu),
-        ("catbox.moe",          _upload_catbox),
-        ("pixeldrain.com",      _upload_pixeldrain),
-        ("0x0.st",              _upload_0x0),
-        ("transfer.sh",         _upload_transfer_sh),
-    ]
-    errors: list[str] = []
-    for name, fn in backends:
-        try:
-            logger.info("Uploading to %s...", name)
-            url = await asyncio.to_thread(fn, local_path)
-            logger.info("%s → %s", name, url)
-            return url
-        except Exception as exc:
-            logger.warning("%s failed: %s", name, exc)
-            errors.append(f"{name}: {exc}")
-
-    raise RuntimeError(
-        "All upload backends failed:\n" + "\n".join(errors)
-    )
-
-
-# ---------------------------------------------------------------------------
 # Instagram API helpers
 # ---------------------------------------------------------------------------
 
 def _aiohttp_session() -> aiohttp.ClientSession:
     """aiohttp session with certifi SSL context (required on macOS)."""
-    import ssl, certifi
     ctx = ssl.create_default_context(cafile=certifi.where())
     connector = aiohttp.TCPConnector(ssl=ctx)
     return aiohttp.ClientSession(connector=connector)
@@ -324,12 +153,12 @@ async def publish_reel(
     cover_image_path: str | None = None,
 ) -> str:
     """
-    Upload *video_path*, post as Instagram Reel, then clean up.
+    Publish *video_path* as an Instagram Reel.
+
     Pass *user_id* / *access_token* to publish to a non-default account;
     otherwise defaults to INSTAGRAM_USER_ID / INSTAGRAM_ACCESS_TOKEN.
-    Pass *cover_image_path* to set a custom Reels cover (thumbnail).
-    Returns the published media ID on success.
-    Raises RuntimeError / TimeoutError on failure.
+    Pass *cover_image_path* to set a custom Reels cover. Returns the
+    published media ID on success.
     """
     uid = user_id or INSTAGRAM_USER_ID
     tok = access_token or INSTAGRAM_ACCESS_TOKEN
@@ -338,49 +167,62 @@ async def publish_reel(
             "Instagram credentials not configured. "
             "Set INSTAGRAM_USER_ID and INSTAGRAM_ACCESS_TOKEN in .env"
         )
+    if not os.path.exists(video_path):
+        raise RuntimeError(f"Video file not found: {video_path}")
 
-    # 1. Upload video to temporary public host (once — reused across retries)
-    video_url = await _upload_video(video_path)
+    # 1. Upload video to GitHub (acts as a Meta-friendly CDN).
+    logger.info("Uploading video to GitHub...")
+    video_url, video_repo_path = await asyncio.to_thread(github_uploader.upload, video_path)
+    logger.info("Public video URL: %s", video_url)
 
-    # 1b. Upload cover image if provided
     cover_url: str | None = None
+    cover_repo_path: str | None = None
     if cover_image_path and os.path.exists(cover_image_path):
         try:
-            cover_url = await _upload_video(cover_image_path)  # same backends work for images
-            logger.info("Cover image uploaded: %s", cover_url)
+            cover_url, cover_repo_path = await asyncio.to_thread(
+                github_uploader.upload, cover_image_path
+            )
+            logger.info("Public cover URL: %s", cover_url)
         except Exception as exc:
-            logger.warning("Cover image upload failed (continuing without cover): %s", exc)
+            logger.warning("Cover upload failed (continuing without cover): %s", exc)
 
     last_exc: Exception = RuntimeError("No attempts made")
-    for attempt in range(1, 4):
-        async with _aiohttp_session() as session:
-            try:
-                # 2. Create container
-                logger.info("Creating Instagram container (attempt %d/3)...", attempt)
-                container_id = await _ig_create_container(session, video_url, caption, uid, tok, cover_url)
-                logger.info("Container ID: %s — waiting for processing...", container_id)
+    media_id: str | None = None
+    try:
+        for attempt in range(1, 4):
+            async with _aiohttp_session() as session:
+                try:
+                    logger.info("Creating Instagram container (attempt %d/3)...", attempt)
+                    container_id = await _ig_create_container(
+                        session, video_url, caption, uid, tok, cover_url
+                    )
+                    logger.info("Container ID: %s — waiting for processing...", container_id)
 
-                # 3. Wait for processing
-                await _ig_wait_for_container(session, container_id, tok)
+                    await _ig_wait_for_container(session, container_id, tok)
 
-                # 4. Publish
-                logger.info("Publishing container %s...", container_id)
-                media_id = await _ig_publish_container(session, container_id, uid, tok)
-                logger.info("Published Instagram Reel, media_id=%s", media_id)
-                return media_id
+                    logger.info("Publishing container %s...", container_id)
+                    media_id = await _ig_publish_container(session, container_id, uid, tok)
+                    logger.info("Published Instagram Reel, media_id=%s", media_id)
+                    return media_id
 
-            except RuntimeError as exc:
-                last_exc = exc
-                msg = str(exc).lower()
-                # Auth errors are never retriable
-                if "oauthexception" in msg or "access token" in msg or "error_subcode" in msg:
-                    raise
-                # Retry on transient Meta errors that suggest recreating the container
-                if "something went wrong" in msg or "please retry" in msg or "container" in msg:
-                    logger.warning("Instagram transient error (attempt %d/3): %s", attempt, exc)
-                    if attempt < 3:
-                        await asyncio.sleep(15 * attempt)  # 15s, 30s
-                    continue
-                raise  # non-retriable error (bad video, etc.)
+                except RuntimeError as exc:
+                    last_exc = exc
+                    msg = str(exc).lower()
+                    # Auth errors are never retriable.
+                    if "oauthexception" in msg or "access token" in msg or "error_subcode" in msg:
+                        raise
+                    # Retry on transient Meta errors that suggest recreating the container.
+                    if "something went wrong" in msg or "please retry" in msg or "container" in msg:
+                        logger.warning("Instagram transient error (attempt %d/3): %s", attempt, exc)
+                        if attempt < 3:
+                            await asyncio.sleep(15 * attempt)  # 15s, 30s
+                        continue
+                    raise  # non-retriable error (bad video, etc.)
 
-    raise last_exc
+        raise last_exc
+    finally:
+        # Best-effort cleanup of GitHub assets after a successful publish.
+        if media_id is not None and os.getenv("GITHUB_MEDIA_DELETE_AFTER_PUBLISH", "1") == "1":
+            await asyncio.to_thread(github_uploader.delete, video_repo_path)
+            if cover_repo_path is not None:
+                await asyncio.to_thread(github_uploader.delete, cover_repo_path)

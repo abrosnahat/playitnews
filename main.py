@@ -5,6 +5,16 @@ Starts the Telegram bot and schedules the periodic news check.
 import asyncio
 import logging
 import sys
+import warnings
+
+# Silence harmless shutdown warning from python-telegram-bot on Ctrl+C:
+# "coroutine 'Updater.stop' was never awaited" — internal PTB shutdown
+# path occasionally drops the coroutine on macOS; bot still stops cleanly.
+warnings.filterwarnings(
+    "ignore",
+    message=r"coroutine 'Updater\.stop' was never awaited",
+    category=RuntimeWarning,
+)
 from datetime import datetime, timezone
 
 import aiohttp

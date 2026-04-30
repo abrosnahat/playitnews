@@ -6,6 +6,11 @@ cd "$(dirname "$0")"
 # Kill any leftover instances from previous runs to avoid port/getUpdates conflicts
 pkill -f "$PWD/webapp.py" 2>/dev/null
 pkill -f "$PWD/main.py" 2>/dev/null
+pkill -f "[Pp]ython.*[/ ]webapp\.py( |$)" 2>/dev/null
+pkill -f "[Pp]ython.*[/ ]main\.py( |$)" 2>/dev/null
+PORT_PID=$(lsof -tnP -i :5003 2>/dev/null)
+[ -n "$PORT_PID" ] && kill "$PORT_PID" 2>/dev/null
+pkill -f "cloudflared tunnel" 2>/dev/null
 sleep 1
 
 echo "Starting Telegram bot (main.py)..."
