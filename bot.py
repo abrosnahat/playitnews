@@ -23,7 +23,7 @@ def _get_cloudflare_url() -> Optional[str]:
     """Read the current cloudflared tunnel URL from the log file."""
     try:
         result = subprocess.run(
-            ["grep", "-o", "https://[a-z0-9-]*\\.trycloudflare\\.com",
+            ["grep", "-a", "-o", "https://[a-z0-9-]*\\.trycloudflare\\.com",
              "/tmp/cloudflared_playitnews.log"],
             capture_output=True, text=True, timeout=3,
         )
