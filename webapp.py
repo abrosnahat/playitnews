@@ -647,6 +647,8 @@ def api_generate_video(post_id: int):
     if not post:
         return jsonify({"error": "Post not found"}), 404
 
+    include_images = bool(body.get("include_images", False))
+
     # Optional custom YT search query override
     yt_query_override = (body.get("yt_query") or "").strip() or None
     if yt_query_override:
@@ -670,7 +672,7 @@ def api_generate_video(post_id: int):
 
     def _run():
         try:
-            _run_async(_generate_video(post_id, lang))
+            _run_async(_generate_video(post_id, lang, include_images=include_images))
         except Exception as exc:
             _push(post_id, f"Fatal error: {exc}", "error")
         finally:
@@ -755,7 +757,7 @@ def api_video_stream(post_id: int):
     )
 
 
-async def _generate_video(post_id: int, lang: str) -> None:
+async def _generate_video(post_id: int, lang: str, include_images: bool = False) -> None:
     """Core video generation logic (mirrors handle_create_video in bot.py)."""
     post = db.get_scheduled_post(post_id)
     if not post:
@@ -845,6 +847,7 @@ async def _generate_video(post_id: int, lang: str) -> None:
                     lang="en",
                     prefetched_clips=shared_clips,
                     n_article_clips=len(article_videos),
+                    include_article_images=include_images,
                 )
                 if en_path:
                     db.set_generated_video_path(post_id, en_path)
@@ -862,6 +865,7 @@ async def _generate_video(post_id: int, lang: str) -> None:
                     lang="ru",
                     prefetched_clips=shared_clips,
                     n_article_clips=len(article_videos),
+                    include_article_images=include_images,
                 )
                 if ru_path:
                     db.set_generated_video_path_ru(post_id, ru_path)

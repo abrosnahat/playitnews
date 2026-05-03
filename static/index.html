@@ -651,6 +651,10 @@ function renderCard(p) {
         <span class="yt-skip-badge" title="YT skip offset">skip: ${ytSkip}</span>
         <button class="btn btn-outline btn-sm" onclick="resetYtSkip(${p.id})" title="Reset skip to 0">↺</button>
       </div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:6px 0;cursor:pointer;">
+        <input id="incImg_${p.id}" type="checkbox">
+        <span>🖼 Include article images in video</span>
+      </label>
       <div class="btn-group">
         <button class="btn btn-primary" onclick="generateVideo(${p.id},'both')">🎬 EN+RU</button>
         <button class="btn btn-outline" onclick="generateVideo(${p.id},'en')">🇬🇧 EN only</button>
@@ -765,6 +769,8 @@ async function generateVideo(id, lang) {
   if (!area) return;
   const ytqEl = document.getElementById(`ytq_${id}`);
   const ytQuery = ytqEl ? ytqEl.value.trim() : '';
+  const incImgEl = document.getElementById(`incImg_${id}`);
+  const includeImages = !!(incImgEl && incImgEl.checked);
   progressLogs[id] = [];
   area.innerHTML = `
     <div class="progress-panel">
@@ -787,7 +793,7 @@ async function generateVideo(id, lang) {
     const res  = await fetch(`/api/posts/${id}/generate-video`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lang, ...(ytQuery ? { yt_query: ytQuery } : {}) }),
+      body: JSON.stringify({ lang, include_images: includeImages, ...(ytQuery ? { yt_query: ytQuery } : {}) }),
     });
     const data = await res.json();
     if (data.error) {

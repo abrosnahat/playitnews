@@ -21,7 +21,10 @@ Environment variables (see config.py):
 import asyncio
 import logging
 import os
+import shutil
 import ssl
+import subprocess
+import tempfile
 
 import aiohttp
 import certifi
@@ -134,6 +137,59 @@ async def _ig_publish_container(
 # Public API
 # ---------------------------------------------------------------------------
 
+# Max dimensions Instagram Reels ingester reliably accepts. Sending a 1080x1920
+# MP4 currently makes Meta return a misleading "HTTP error code 413 Payload
+# too large" — downscaling to 720x1280 makes their fetcher accept the video.
+_IG_MAX_W = 720
+_IG_MAX_H = 1280
+
+
+def _optimize_for_instagram(src_path: str) -> str:
+    """
+    Re-encode *src_path* with IG-friendly settings:
+      • scaled to fit within 720×1280 (preserves aspect ratio, keeps even dims)
+      • H.264 High @ Level 4.0, yuv420p
+      • AAC stereo 44.1 kHz, 128 kbps
+      • +faststart (moov before mdat)
+      • random metadata (unique content hash to bypass any prior bad-cache)
+    Returns the path of a temp file the caller must delete. On any error
+    (e.g. ffmpeg missing) returns *src_path* unchanged.
+    """
+    if shutil.which("ffmpeg") is None:
+        return src_path
+    fd, tmp_path = tempfile.mkstemp(suffix=".mp4", prefix="ig_opt_")
+    os.close(fd)
+    nonce = os.urandom(8).hex()
+    # `min(iw,720)` + `-2` keeps even dimensions and never upscales.
+    vf = (f"scale='min({_IG_MAX_W},iw)':'-2',"
+          f"scale='-2':'min({_IG_MAX_H},ih)'")
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", src_path,
+             "-vf", vf,
+             "-c:v", "libx264", "-profile:v", "high", "-level", "4.0",
+             "-pix_fmt", "yuv420p", "-preset", "fast", "-crf", "23",
+             "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "44100",
+             "-movflags", "+faststart",
+             "-metadata", f"comment=playitnews-{nonce}",
+             "-metadata", f"title=ig-{nonce}",
+             tmp_path],
+            check=False, capture_output=True,
+        )
+        if proc.returncode != 0 or not os.path.getsize(tmp_path):
+            logger.warning("IG re-encode failed: %s",
+                           proc.stderr.decode(errors="replace")[:300])
+            try: os.remove(tmp_path)
+            except OSError: pass
+            return src_path
+        return tmp_path
+    except Exception as exc:
+        logger.warning("IG re-encode exception: %s", exc)
+        try: os.remove(tmp_path)
+        except OSError: pass
+        return src_path
+
+
 def is_configured() -> bool:
     """Return True if English Instagram credentials are set."""
     return bool(INSTAGRAM_USER_ID and INSTAGRAM_ACCESS_TOKEN)
@@ -170,9 +226,18 @@ async def publish_reel(
     if not os.path.exists(video_path):
         raise RuntimeError(f"Video file not found: {video_path}")
 
-    # 1. Upload video to GitHub (acts as a Meta-friendly CDN).
+    # Re-encode for Instagram (scale ≤ 720×1280, faststart, vanilla H.264/AAC,
+    # random metadata for unique content hash). Sending 1080×1920 currently
+    # makes Meta's ingest fetcher reject with a misleading "413 Payload too
+    # large", even though the file is small.
+    upload_video_path = await asyncio.to_thread(_optimize_for_instagram, video_path)
+    optimized_tmp = upload_video_path if upload_video_path != video_path else None
+
+    # Upload video + optional cover to GitHub (Meta-friendly CDN via jsDelivr).
     logger.info("Uploading video to GitHub...")
-    video_url, video_repo_path = await asyncio.to_thread(github_uploader.upload, video_path)
+    video_url, video_repo_path = await asyncio.to_thread(
+        github_uploader.upload, upload_video_path
+    )
     logger.info("Public video URL: %s", video_url)
 
     cover_url: str | None = None
@@ -188,6 +253,8 @@ async def publish_reel(
 
     last_exc: Exception = RuntimeError("No attempts made")
     media_id: str | None = None
+    uploaded_video_paths: list[str] = [video_repo_path]
+    uploaded_cover_paths: list[str] = [cover_repo_path] if cover_repo_path else []
     try:
         for attempt in range(1, 4):
             async with _aiohttp_session() as session:
@@ -208,21 +275,40 @@ async def publish_reel(
                 except RuntimeError as exc:
                     last_exc = exc
                     msg = str(exc).lower()
-                    # Auth errors are never retriable.
                     if "oauthexception" in msg or "access token" in msg or "error_subcode" in msg:
                         raise
-                    # Retry on transient Meta errors that suggest recreating the container.
-                    if "something went wrong" in msg or "please retry" in msg or "container" in msg:
+                    transient_markers = (
+                        "something went wrong", "please retry", "container",
+                        "could not be fetched", "media could not be fetched",
+                        "не удалось скачать", "payload too large",
+                        "http error code 4", "http error code 5",
+                        "timeout", "connection",
+                    )
+                    if any(m in msg for m in transient_markers):
                         logger.warning("Instagram transient error (attempt %d/3): %s", attempt, exc)
                         if attempt < 3:
-                            await asyncio.sleep(15 * attempt)  # 15s, 30s
+                            try:
+                                logger.info("Re-uploading to fresh URL...")
+                                video_url, new_video_path = await asyncio.to_thread(
+                                    github_uploader.upload, upload_video_path
+                                )
+                                uploaded_video_paths.append(new_video_path)
+                                logger.info("New video URL: %s", video_url)
+                            except Exception as up_exc:
+                                logger.warning("Re-upload failed: %s", up_exc)
+                            await asyncio.sleep(15 * attempt)
                         continue
-                    raise  # non-retriable error (bad video, etc.)
+                    raise
 
         raise last_exc
     finally:
-        # Best-effort cleanup of GitHub assets after a successful publish.
         if media_id is not None and os.getenv("GITHUB_MEDIA_DELETE_AFTER_PUBLISH", "1") == "1":
-            await asyncio.to_thread(github_uploader.delete, video_repo_path)
-            if cover_repo_path is not None:
-                await asyncio.to_thread(github_uploader.delete, cover_repo_path)
+            for p in uploaded_video_paths:
+                await asyncio.to_thread(github_uploader.delete, p)
+            for p in uploaded_cover_paths:
+                await asyncio.to_thread(github_uploader.delete, p)
+        if optimized_tmp:
+            try:
+                os.remove(optimized_tmp)
+            except OSError:
+                pass

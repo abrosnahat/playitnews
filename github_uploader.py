@@ -35,7 +35,12 @@ logger = logging.getLogger(__name__)
 _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
 
 _API = "https://api.github.com"
-_RAW = "https://raw.githubusercontent.com"
+# We serve files via jsDelivr instead of raw.githubusercontent.com because
+# raw.github always returns `Content-Type: application/octet-stream`, which
+# triggers Meta's small "non-media payload" limit (~10 MB → HTTP 413 when
+# Instagram tries to ingest the video). jsDelivr proxies the same content
+# but sets `Content-Type: video/mp4` + `Content-Length`, so Meta accepts it.
+_RAW = "https://cdn.jsdelivr.net/gh"
 _MEDIA_DIR = "media"  # path inside the repo where files are stored
 
 
@@ -153,7 +158,8 @@ def upload(local_path: str) -> tuple[str, str]:
     if code not in (200, 201):
         raise RuntimeError(f"GitHub upload failed ({code}): {resp[:300]!r}")
 
-    raw_url = f"{_RAW}/{repo}/{branch}/{repo_path}"
+    # jsDelivr URL format: https://cdn.jsdelivr.net/gh/{repo}@{branch}/{path}
+    raw_url = f"{_RAW}/{repo}@{branch}/{repo_path}"
     logger.info("Uploaded %s → %s", base, raw_url)
     return raw_url, repo_path
 

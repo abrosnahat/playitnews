@@ -43,6 +43,54 @@ logger = logging.getLogger(__name__)
 VID_W = 1080
 VID_H = 1920
 VID_FPS = 30
+
+# ---------------------------------------------------------------------------
+# Monitor-frame mode: render the news video at 16:9 ("on the monitor") and
+# composite it into a portrait 9:16 scene with ambient bias lighting on the
+# wall behind the monitor. Disable via env var: USE_MONITOR_FRAME=0.
+# ---------------------------------------------------------------------------
+USE_MONITOR_FRAME = os.getenv("USE_MONITOR_FRAME", "1") not in ("0", "false", "False", "no", "")
+
+# Inner ("on-screen") content size — 16:9, rendered first, then placed on monitor.
+INNER_W = 1600
+INNER_H = 900
+
+# Monitor on-scene dimensions and placement inside the 1080×1920 portrait frame.
+_MON_W = 900
+_MON_H = 506   # 16:9
+_MON_X = (VID_W - _MON_W) // 2          # horizontal centre
+_MON_Y = 470                            # vertical position (upper half)
+# Subtle perspective tilt: right side of monitor slightly recedes (rotated about Y axis).
+_MON_TILT = 22                          # px — top-right pushed down / bottom-right pushed up
+
+# ---------------------------------------------------------------------------
+# Photo-background mode: instead of drawing a procedural monitor, use a real
+# 9:16 photo of a gaming setup (assets/monitor_bg.jpg by default) and embed
+# the inner video into the monitor screen area on the photo.
+#
+# Calibration via env vars (or edit defaults below):
+#   MONITOR_BG_PATH        — path to the background image (jpg/png)
+#   MONITOR_SCREEN_RECT    — "x,y,w,h" of the screen rectangle on the bg (px)
+#   MONITOR_SCREEN_QUAD    — optional 4 corners for perspective fit:
+#                            "x0,y0;x1,y1;x2,y2;x3,y3"
+#                            order: TL, TR, BL, BR (in bg pixel space)
+#                            If set, overrides MONITOR_SCREEN_RECT.
+# Disable with MONITOR_BG_PATH="" or by removing the file.
+# ---------------------------------------------------------------------------
+MONITOR_BG_PATH = os.getenv(
+    "MONITOR_BG_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "monitor_bg.jpg"),
+)
+# Defaults are rough estimates for the supplied gaming-desk photo (1080×1920);
+# fine-tune via MONITOR_SCREEN_RECT or MONITOR_SCREEN_QUAD env vars.
+MONITOR_SCREEN_RECT = os.getenv("MONITOR_SCREEN_RECT", "55,640,615,440")
+MONITOR_SCREEN_QUAD = os.getenv("MONITOR_SCREEN_QUAD", "")
+
+# "Filmed on camera" look applied to the inner video before it's warped into
+# the monitor — softens it just enough that it blends with the surrounding
+# photo/video instead of looking like a clean overlay. Disable with =0.
+MONITOR_CAMERA_LOOK = os.getenv("MONITOR_CAMERA_LOOK", "1") == "1"
+
 TTS_VOICE    = "en-US-AndrewMultilingualNeural"  # English — warm, authentic
 TTS_VOICE_RU = "ru-RU-DmitryNeural"              # Russian — Microsoft Neural TTS
 TTS_RATE  = "+15%"   # 15% faster → targets 18–25s video length for max retention (data: ≤22s = 84.8% avg)
@@ -424,6 +472,7 @@ async def _burn_subtitles_pillow(
             "-c:a", "aac",
             "-ar", "44100",
             "-b:a", "192k",
+            "-movflags", "+faststart",
             "-shortest",
             output_mp4,
         ],
@@ -955,8 +1004,10 @@ _RU_BRAND_MAP: list[tuple[str, str]] = [
     ("Spider-Man", "Спайдермэн"),
     ("Horizon", "Хорайзон"),
     ("The Last of Us", "Зе Ласт оф Ас"),
-    ("Uncharted", "Unchartd"),
+    ("Uncharted", "Анчартед"),
     ("Gran Turismo", "Гран Туризмо"),
+    ("Forza", "Форза"),
+    ("Horizon", "Хорайзон"),
 ]
 
 # Build compiled pattern once at module load
@@ -1456,42 +1507,44 @@ def _probe_image_dims(img_path: str) -> tuple[int, int]:
         return VID_W, VID_H
 
 
-def _make_image_segment(img_path: str, duration: float, out_path: str) -> bool:
+def _make_image_segment(
+    img_path: str,
+    duration: float,
+    out_path: str,
+    target_w: int = VID_W,
+    target_h: int = VID_H,
+) -> bool:
     """Create a fixed-duration silent video segment from a still image.
 
-    Landscape images (AR ≥ 9:16):
-      – Displayed letterboxed in their native 16:9 ratio (black bars top/bottom).
-      – Scaled so image height ≈ 60% of frame height, then padded to VID_H.
-      – L→R pan reveals the full image width without any cropping or squishing.
+    Landscape images (AR ≥ target):
+      – Scaled to fill height; L→R pan reveals the full image width.
 
-    Portrait images (AR < 9:16):
-      – Scaled to fit width=VID_W, centre-cropped vertically.
+    Portrait images (AR < target):
+      – Scaled to fit width, centre-cropped vertically.
     """
     fps      = VID_FPS
     n_frames = max(1, round(duration * fps))
 
     orig_w, orig_h = _probe_image_dims(img_path)
     img_ar = orig_w / max(orig_h, 1)
-    vid_ar = VID_W / VID_H  # 9/16
+    vid_ar = target_w / target_h
 
     if img_ar >= vid_ar:
         # Landscape: scale to full frame height, pan L→R to reveal full picture.
-        # Image fills 1920px tall; width grows proportionally (wider than 1080) → pan.
-        pan_h = VID_H
-        pan_w = max(VID_W + 2, (int(pan_h * img_ar + 0.5) // 2) * 2)  # e.g. 3413 for 16:9
-        pan_range  = pan_w - VID_W
+        pan_h = target_h
+        pan_w = max(target_w + 2, (int(pan_h * img_ar + 0.5) // 2) * 2)
+        pan_range  = pan_w - target_w
         pan_speed  = pan_range / max(duration, 0.001)  # px/s
         vf = (
             f"scale={pan_w}:{pan_h},"
-            # crop window slides from x=0 to x=pan_range using PTS time 't'
-            f"crop={VID_W}:{VID_H}:'min(t*{pan_speed:.4f},{pan_range})':0,"
+            f"crop={target_w}:{target_h}:'min(t*{pan_speed:.4f},{pan_range})':0,"
             f"setsar=1"
         )
     else:
         # Portrait: fit width, centre-crop height (static)
         vf = (
-            f"scale={VID_W}:-2,"
-            f"crop={VID_W}:{VID_H}:0:'(ih-{VID_H})/2',"
+            f"scale={target_w}:-2,"
+            f"crop={target_w}:{target_h}:0:'(ih-{target_h})/2',"
             f"setsar=1"
         )
     # Feed image as a looped stream at exactly VID_FPS so each output frame comes
@@ -1519,8 +1572,15 @@ def _make_image_segment(img_path: str, duration: float, out_path: str) -> bool:
     )
 
 
-def _make_video_segment(vid_path: str, duration: float, out_path: str, skip_secs: float = 0.0) -> bool:
-    """Trim and scale a video clip to the required portrait format.
+def _make_video_segment(
+    vid_path: str,
+    duration: float,
+    out_path: str,
+    skip_secs: float = 0.0,
+    target_w: int = VID_W,
+    target_h: int = VID_H,
+) -> bool:
+    """Trim and scale a video clip to the required output format.
     Uses -stream_loop so source clips shorter than duration are looped.
     skip_secs: seek into the source before cutting (e.g. to skip intros)."""
     ss_args = ["-ss", f"{skip_secs:.3f}"] if skip_secs > 0 else []
@@ -1532,8 +1592,8 @@ def _make_video_segment(vid_path: str, duration: float, out_path: str, skip_secs
             "-i", vid_path,
             "-t", f"{duration:.3f}",
             "-vf", (
-                f"scale={VID_W}:{VID_H}:force_original_aspect_ratio=increase,"
-                f"crop={VID_W}:{VID_H},"
+                f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+                f"crop={target_w}:{target_h},"
                 f"setsar=1,"
                 f"fps={VID_FPS}"
             ),
@@ -1614,6 +1674,268 @@ async def _fetch_pixabay_music(search_query: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Monitor + ambient bias-light compose
+# ---------------------------------------------------------------------------
+
+def _parse_screen_rect(spec: str) -> tuple[int, int, int, int] | None:
+    try:
+        parts = [int(float(p.strip())) for p in spec.split(",")]
+        if len(parts) == 4 and all(p >= 0 for p in parts) and parts[2] > 0 and parts[3] > 0:
+            return parts[0], parts[1], parts[2], parts[3]
+    except Exception:
+        pass
+    return None
+
+
+def _parse_screen_quad(spec: str) -> list[tuple[int, int]] | None:
+    """Parse 'x0,y0;x1,y1;x2,y2;x3,y3' into [(x,y), ...] (TL, TR, BL, BR)."""
+    try:
+        pts = []
+        for chunk in spec.split(";"):
+            x, y = chunk.split(",")
+            pts.append((int(float(x.strip())), int(float(y.strip()))))
+        if len(pts) == 4:
+            return pts
+    except Exception:
+        pass
+    return None
+
+
+async def _compose_monitor_scene_photo(
+    inner_mp4: str,
+    bg_path: str,
+    output_mp4: str,
+    audio_dur: float,
+) -> bool:
+    """
+    Composite the inner 16:9 video into the monitor screen of a real photo
+    (9:16 background image of a gaming desk).
+
+    Two placement modes:
+      * MONITOR_SCREEN_QUAD set → perspective-warp video into the 4 corners.
+      * Otherwise           → plain rectangular overlay at MONITOR_SCREEN_RECT.
+
+    The bg image is scaled/cropped to {VID_W}×{VID_H} so all coordinates are
+    interpreted in the final 1080×1920 frame.
+    """
+    quad = _parse_screen_quad(MONITOR_SCREEN_QUAD) if MONITOR_SCREEN_QUAD else None
+    rect = _parse_screen_rect(MONITOR_SCREEN_RECT)
+
+    # Common: scale background photo to fill 1080x1920 (cover-style).
+    bg_chain = (
+        f"[1:v]scale={VID_W}:{VID_H}:force_original_aspect_ratio=increase,"
+        f"crop={VID_W}:{VID_H},setsar=1[bg];"
+    )
+
+    # Optional alpha-mask file path (used to clip warped video to the quad
+    # shape so it doesn't leak onto the monitor bezel for tilted screens).
+    mask_png: str | None = None
+    extra_inputs: list[str] = []
+
+    if quad:
+        # Bounding box of the quad — perspective filter warps within input frame,
+        # so we render the video onto a bbox-sized canvas first.
+        xs = [p[0] for p in quad]
+        ys = [p[1] for p in quad]
+        bbox_x, bbox_y = min(xs), min(ys)
+        bbox_w = max(xs) - bbox_x
+        bbox_h = max(ys) - bbox_y
+        # corners relative to bbox (TL, TR, BL, BR)
+        (x0, y0), (x1, y1), (x2, y2), (x3, y3) = [
+            (p[0] - bbox_x, p[1] - bbox_y) for p in quad
+        ]
+        # Build a grayscale alpha mask (white inside the quad, black outside)
+        # so pixels that perspective-extrapolates beyond the dst quad are
+        # masked out and don't bleed onto the monitor frame.
+        mask_png = os.path.join(os.path.dirname(output_mp4), "_quad_mask.png")
+        try:
+            from PIL import Image, ImageDraw
+            # Supersample 4× then downscale with LANCZOS → smooth, anti-aliased
+            # polygon edges (no "staircase" along tilted monitor sides).
+            ss = 4
+            big = Image.new("L", (bbox_w * ss, bbox_h * ss), 0)
+            ImageDraw.Draw(big).polygon(
+                [(x0 * ss, y0 * ss), (x1 * ss, y1 * ss),
+                 (x3 * ss, y3 * ss), (x2 * ss, y2 * ss)],   # CW: TL→TR→BR→BL
+                fill=255,
+            )
+            mask_img = big.resize((bbox_w, bbox_h), Image.LANCZOS)
+            mask_img.save(mask_png)
+        except Exception as exc:
+            logger.warning("Quad mask render failed (%s) — continuing without alpha clip", exc)
+            mask_png = None
+
+        screen_chain = (
+            f"[0:v]scale={bbox_w}:{bbox_h},setsar=1,"
+            + (
+                # Camera-look pre-pass: softens the screen so it reads like
+                # footage filmed off a real monitor rather than a sharp overlay.
+                #   gblur     – tiny optical blur
+                #   eq        – slight desaturation + a touch less brightness/contrast
+                #   noise     – temporal sensor grain (no luma desync between frames)
+                #   vignette  – subtle corner falloff like a phone-cam lens
+                "gblur=sigma=0.6,"
+                "eq=saturation=0.92:brightness=-0.02:contrast=0.96:gamma=1.03,"
+                "noise=alls=8:allf=t,"
+                "vignette=PI/6,"
+                if MONITOR_CAMERA_LOOK else ""
+            ) +
+            f"perspective="
+            f"x0={x0}:y0={y0}:"
+            f"x1={x1}:y1={y1}:"
+            f"x2={x2}:y2={y2}:"
+            f"x3={x3}:y3={y3}:"
+            f"sense=destination:interpolation=linear[warp];"
+        )
+        if mask_png:
+            # Mask is input #2 (after inner=0 and bg=1).
+            extra_inputs = ["-loop", "1", "-i", mask_png]
+            screen_chain += (
+                f"[2:v]format=gray,scale={bbox_w}:{bbox_h},setsar=1[mask];"
+                f"[warp][mask]alphamerge[screen];"
+            )
+        else:
+            screen_chain += "[warp]null[screen];"
+        overlay_xy = f"{bbox_x}:{bbox_y}"
+        logger.info(
+            "Photo-monitor compose: perspective quad bbox=(%d,%d,%dx%d) mask=%s",
+            bbox_x, bbox_y, bbox_w, bbox_h, "yes" if mask_png else "no",
+        )
+    elif rect:
+        x, y, w, h = rect
+        screen_chain = f"[0:v]scale={w}:{h},setsar=1[screen];"
+        overlay_xy = f"{x}:{y}"
+        logger.info("Photo-monitor compose: rect overlay at (%d,%d,%dx%d)", x, y, w, h)
+    else:
+        logger.warning("No valid MONITOR_SCREEN_RECT/QUAD — cannot compose photo scene")
+        return False
+
+    filter_complex = bg_chain + screen_chain + (
+        f"[bg][screen]overlay={overlay_xy}:format=auto[final]"
+    )
+
+    # Background can be a still image (jpg/png) or a looping video (mp4/mov/webm).
+    is_video_bg = bg_path.lower().endswith((".mp4", ".mov", ".mkv", ".webm", ".m4v"))
+    bg_input = (
+        ["-stream_loop", "-1", "-i", bg_path]
+        if is_video_bg
+        else ["-loop", "1", "-i", bg_path]
+    )
+
+    ok = await _run_async(
+        [
+            "ffmpeg", "-y",
+            "-i", inner_mp4,
+            *bg_input,
+            *extra_inputs,
+            "-filter_complex", filter_complex,
+            "-map", "[final]",
+            "-map", "0:a?",
+            "-c:v", "libx264",
+            "-crf", "20",
+            "-preset", "fast",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "copy",
+            "-t", f"{audio_dur:.3f}",
+            output_mp4,
+        ],
+        timeout=300,
+    )
+    if mask_png and os.path.exists(mask_png):
+        try:
+            os.remove(mask_png)
+        except OSError:
+            pass
+    return ok
+
+
+async def _compose_monitor_scene(
+    inner_mp4: str,
+    output_mp4: str,
+    audio_dur: float,
+) -> bool:
+    """
+    Take a 16:9 inner video (with audio already mixed) and composite it
+    onto a 1080×1920 portrait scene:
+
+      • dark wall background
+      • ambient bias-light: blurred + saturated copy of the inner video
+        stretched over the full frame, with vignette so it falls off to dark
+        at the edges. The visible "halo" leaking around the monitor edges is
+        the Ambilight-style effect — colours follow the on-screen content.
+      • monitor: inner video scaled to {_MON_W}×{_MON_H}, perspective-tilted
+        (right side recedes), with thin dark bezel, placed in upper half.
+
+    Output keeps the original audio.
+    """
+    mon_w, mon_h = _MON_W, _MON_H
+    mon_x, mon_y = _MON_X, _MON_Y
+    tilt = _MON_TILT
+    bezel = 14
+    bw = mon_w + bezel * 2
+    bh = mon_h + bezel * 2
+
+    # Stand: rectangular neck + base under the monitor (drawbox).
+    stand_neck_w, stand_neck_h = 90, 50
+    stand_neck_x = (VID_W - stand_neck_w) // 2
+    stand_neck_y = mon_y + mon_h + bezel
+    stand_base_w, stand_base_h = 280, 14
+    stand_base_x = (VID_W - stand_base_w) // 2
+    stand_base_y = stand_neck_y + stand_neck_h
+
+    # filter_complex: split inner → ambient halo + monitor screen.
+    filter_complex = (
+        f"[0:v]split=2[main][bgsrc];"
+        # Ambient bias light: cover full portrait, heavy blur + sat boost,
+        # vignette darkens edges so the halo is concentrated around centre.
+        f"[bgsrc]"
+        f"scale={VID_W}:{VID_H}:force_original_aspect_ratio=increase,"
+        f"crop={VID_W}:{VID_H},"
+        f"gblur=sigma=80,"
+        f"eq=saturation=1.7:brightness=-0.18,"
+        f"vignette=PI/3.2"
+        f"[ambient];"
+        # Monitor screen: scale to monitor size, perspective-tilt,
+        # then add dark bezel via pad.
+        f"[main]"
+        f"scale={mon_w}:{mon_h},setsar=1,"
+        f"perspective="
+        f"x0=0:y0=0:"
+        f"x1={mon_w}:y1={tilt}:"
+        f"x2=0:y2={mon_h}:"
+        f"x3={mon_w}:y3={mon_h - tilt}:"
+        f"sense=destination:interpolation=linear,"
+        f"pad={bw}:{bh}:{bezel}:{bezel}:color=0x0a0a0a"
+        f"[monitor];"
+        # Place monitor on ambient wall.
+        f"[ambient][monitor]overlay={mon_x - bezel}:{mon_y - bezel}:format=auto[withmon];"
+        # Draw monitor stand (neck + base) — solid dark rectangles.
+        f"[withmon]"
+        f"drawbox=x={stand_neck_x}:y={stand_neck_y}:w={stand_neck_w}:h={stand_neck_h}:color=0x0c0c0c@1.0:t=fill,"
+        f"drawbox=x={stand_base_x}:y={stand_base_y}:w={stand_base_w}:h={stand_base_h}:color=0x101010@1.0:t=fill"
+        f"[final]"
+    )
+
+    return await _run_async(
+        [
+            "ffmpeg", "-y",
+            "-i", inner_mp4,
+            "-filter_complex", filter_complex,
+            "-map", "[final]",
+            "-map", "0:a?",
+            "-c:v", "libx264",
+            "-crf", "20",
+            "-preset", "fast",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "copy",
+            "-t", f"{audio_dur:.3f}",
+            output_mp4,
+        ],
+        timeout=300,
+    )
+
+
 async def _assemble_video(
     image_paths: list[str],
     video_clip_paths: list[str],
@@ -1655,6 +1977,14 @@ async def _assemble_video(
 
     seg_dur = audio_dur / len(all_media)       # equal time per media item
 
+    # Inner segments are rendered at 16:9 when monitor mode is on; otherwise
+    # they are rendered directly at portrait 9:16 as before.
+    if USE_MONITOR_FRAME:
+        seg_w, seg_h = INNER_W, INNER_H
+        logger.info("Monitor mode ON — rendering inner content at %dx%d", seg_w, seg_h)
+    else:
+        seg_w, seg_h = VID_W, VID_H
+
     # ── Step 1: build segments (parallel) ────────────────────────────────
     # Article clips are always the first n_article_clips entries in `clips`.
     # Track which media indices correspond to article clips for skip logic.
@@ -1663,10 +1993,14 @@ async def _assemble_video(
     async def _build_segment(i, media, img_flag):
         seg_path = os.path.join(workdir, f"seg_{i:03d}.mp4")
         if img_flag:
-            ok = await asyncio.to_thread(_make_image_segment, media, seg_dur, seg_path)
+            ok = await asyncio.to_thread(
+                _make_image_segment, media, seg_dur, seg_path, seg_w, seg_h,
+            )
         else:
             skip = YT_CLIP_SKIP if media in article_clip_set else 0.0
-            ok = await asyncio.to_thread(_make_video_segment, media, seg_dur, seg_path, skip)
+            ok = await asyncio.to_thread(
+                _make_video_segment, media, seg_dur, seg_path, skip, seg_w, seg_h,
+            )
         return seg_path if ok else None
 
     seg_results = await asyncio.gather(
@@ -1688,10 +2022,20 @@ async def _assemble_video(
             fh.write(f"file '{s}'\n")
 
     raw_mp4 = os.path.join(workdir, "raw.mp4")
+    # Re-encode (not -c copy) so all segments share an identical timebase /
+    # GOP structure. With -c copy, transitions between image segments and
+    # video segments can leave a brief PTS gap that desyncs downstream
+    # filters (e.g. alphamerge in the monitor compose step), making the
+    # warped video flash as a full-bbox rectangle for one GOP.
     ok = await _run_async(
         ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_txt,
-         "-c", "copy", raw_mp4],
-        timeout=180,
+         "-vf", f"fps={VID_FPS},setsar=1,format=yuv420p",
+         "-c:v", "libx264", "-crf", "20", "-preset", "fast",
+         "-pix_fmt", "yuv420p",
+         "-video_track_timescale", "15360",
+         "-an",
+         raw_mp4],
+        timeout=300,
     )
     if not ok:
         return False
@@ -1745,6 +2089,37 @@ async def _assemble_video(
             logger.info("Background music added: %s", os.path.basename(music_track))
         else:
             logger.warning("Music mixing failed — continuing without background music")
+
+    # ── Step 3.7: monitor + ambient bias-light compose (if enabled) ──────────
+    # At this point mixed_mp4 is 16:9 (INNER_W×INNER_H) with full audio.
+    # Wrap it into a 1080×1920 portrait scene with a tilted monitor and
+    # ambilight-style halo on the wall behind. After this, mixed_mp4 is 9:16.
+    if USE_MONITOR_FRAME:
+        scene_mp4 = os.path.join(workdir, "scene.mp4")
+        # Prefer photo-background mode if a usable bg image is available.
+        use_photo = bool(MONITOR_BG_PATH) and os.path.exists(MONITOR_BG_PATH)
+        ok_scene = False
+        if use_photo:
+            ok_scene = await _compose_monitor_scene_photo(
+                mixed_mp4, MONITOR_BG_PATH, scene_mp4, audio_dur,
+            )
+            if ok_scene:
+                logger.info(
+                    "Monitor scene composed using photo bg: %s",
+                    os.path.basename(MONITOR_BG_PATH),
+                )
+            else:
+                logger.warning(
+                    "Photo monitor compose failed — falling back to procedural scene"
+                )
+        if not ok_scene:
+            ok_scene = await _compose_monitor_scene(mixed_mp4, scene_mp4, audio_dur)
+            if ok_scene:
+                logger.info("Monitor scene composed (procedural ambilight)")
+        if ok_scene:
+            mixed_mp4 = scene_mp4
+        else:
+            logger.warning("Monitor compose failed — falling back to raw 16:9 output")
 
     # ── Step 4: burn subtitles (Pillow PNG → ffmpeg overlay) ───────────────
     # Uses only the always-available `overlay` filter — no libass/libfreetype.
@@ -1866,6 +2241,7 @@ async def create_short_video(
     lang: str = "en",
     prefetched_clips: list[str] | None = None,
     n_article_clips: int = 0,
+    include_article_images: bool = False,
 ) -> Optional[str]:
     """
     Generate a TikTok/Reels/Shorts video for an approved post.
@@ -1876,6 +2252,8 @@ async def create_short_video(
         search_query:      Keywords for YouTube gameplay clip search.
         lang:              'en' for English TTS, 'ru' for Russian TTS.
         prefetched_clips:  Already-downloaded clip paths to reuse (skip download).
+        include_article_images: If True, append article still images after the
+            video clips. Defaults to False (clips/footage only).
 
     Returns:
         Absolute path to the generated .mp4 file, or None on failure.
@@ -1892,15 +2270,19 @@ async def create_short_video(
         audio_dur = _get_audio_duration(audio_path)
 
         # 2. Article images — may have been cleaned up after publish; re-fetch from source if needed
-        article_images = [p for p in post.get("image_paths", []) if os.path.exists(p)]
+        # Article images are opt-in via `include_article_images` (default off).
+        if include_article_images:
+            article_images = [p for p in post.get("image_paths", []) if os.path.exists(p)]
+        else:
+            article_images = []
 
         # Article videos (Playground HLS downloaded at scrape time) — same check
         article_videos = [p for p in post.get("video_paths", []) if os.path.exists(p)]
 
         # Re-fetch from source if any stored files are missing on disk
-        images_missing = not article_images and bool(post.get("image_paths"))
+        images_missing = include_article_images and not article_images and bool(post.get("image_paths"))
         videos_missing = not article_videos and bool(post.get("video_paths"))
-        if images_missing or videos_missing or (not article_images and not article_videos):
+        if images_missing or videos_missing or (not article_videos and include_article_images and not article_images):
             article_url = post.get("article_url", "")
             if article_url:
                 logger.info("Re-downloading article media from %s", article_url)
@@ -1908,7 +2290,7 @@ async def create_short_video(
                     async with aiohttp.ClientSession() as _sess:
                         article = await _scraper.scrape_article(_sess, article_url)
                         if article:
-                            if article.image_urls and not article_images:
+                            if include_article_images and article.image_urls and not article_images:
                                 article_images = await _scraper.download_images(_sess, article.image_urls)
                                 logger.info("Re-fetched %d article images", len(article_images))
                             if article.pg_embeds and not article_videos:
