@@ -26,6 +26,10 @@ from config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHANNEL_ID,
     TELEGRAM_SECOND_CHANNEL_ID,
+    TELEGRAM_LOCAL_API_URL,
+    TELEGRAM_LOCAL_API_FILE_URL,
+    TELEGRAM_LOCAL_MODE,
+    TG_MAX_BYTES,
     INSTAGRAM_USER_ID_RU,
     INSTAGRAM_ACCESS_TOKEN_RU,
 )
@@ -106,7 +110,12 @@ def _make_bot():
         media_write_timeout=600,
         pool_timeout=60,
     )
-    return Bot(token=TELEGRAM_BOT_TOKEN, request=request)
+    bot_kwargs = {"token": TELEGRAM_BOT_TOKEN, "request": request}
+    if TELEGRAM_LOCAL_MODE:
+        bot_kwargs["base_url"] = f"{TELEGRAM_LOCAL_API_URL}/bot"
+        bot_kwargs["base_file_url"] = f"{TELEGRAM_LOCAL_API_FILE_URL}/bot"
+        bot_kwargs["local_mode"] = True
+    return Bot(**bot_kwargs)
 
 
 def _clean_text(text: str) -> str:
@@ -117,8 +126,8 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
-# Telegram Bot API hard limit for media uploads.
-TG_MAX_BYTES = 50 * 1024 * 1024
+# Telegram upload size cap: 50 MB on cloud Bot API, 2000 MB on local Bot API server.
+# Imported from config (auto-derived from TELEGRAM_LOCAL_API_URL).
 
 # Video codecs that play reliably in Telegram clients (iOS, Android, web).
 # AV1, VP9, HEVC etc. often produce a black screen with audio only on iOS/web.
@@ -1004,7 +1013,7 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         ht = " ".join(re.findall(r'#\w+', re.sub(r'<[^>]+>', '', post.get("post_text", ""))))
         if ht and ht not in raw:
             raw = raw.rstrip() + "\n\n" + ht
-        return "More news in the telegram channel, link in the bio\n\n" + raw
+        return raw.rstrip() + "\n\nMore news in the telegram channel, link in the bio"
 
     def _caption_ru() -> str:
         raw = _clean_text(post.get("ru_post_text") or post.get("post_text", ""))
@@ -1012,7 +1021,7 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         ht = " ".join(re.findall(r'#\w+', re.sub(r'<[^>]+>', '', src)))
         if ht and ht not in raw:
             raw = raw.rstrip() + "\n\n" + ht
-        return "Больше новостей в telegram-канале, ссылка в био\n\n" + raw
+        return raw.rstrip() + "\n\nБольше новостей в telegram-канале, ссылка в био"
 
     def _tags(key: str = "post_text") -> list[str]:
         src = re.sub(r'<[^>]+>', '', post.get(key) or post.get("post_text", ""))
@@ -1078,7 +1087,7 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         )
         yt_title = (_raw_yt_title if _raw_yt_title and not re.search(r'[а-яёА-ЯЁ]', _raw_yt_title) else "Gaming News")[:100]
         progress("Uploading Short to YouTube…")
-        desc = "More news in the telegram channel, link in the bio\n\n" + _clean_text(post.get("post_text", ""))
+        desc = _clean_text(post.get("post_text", "")).rstrip() + "\n\nMore news in the telegram channel, link in the bio"
         video_id = await youtube_publisher.upload_short(
             video_path=en_path, title=yt_title, description=desc, tags=_tags(),
         )
@@ -1089,9 +1098,9 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
             raise ValueError("RU video not found — generate video first.")
         yt_title = (post.get("article_title") or f"Gaming news #{post_id}")[:100]
         progress("Uploading Short to YouTube RU…")
-        desc = "Больше новостей в telegram-канале, ссылка в bio\n\n" + _clean_text(
+        desc = _clean_text(
             post.get("ru_post_text") or post.get("post_text", "")
-        )
+        ).rstrip() + "\n\nБольше новостей в telegram-канале, ссылка в био"
         video_id = await youtube_publisher.upload_short_ru(
             video_path=ru_path, title=yt_title, description=desc, tags=_tags("ru_post_text"),
         )
@@ -1110,7 +1119,7 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
             en_title = (_raw_en_title if _raw_en_title and not re.search(r'[а-яёА-ЯЁ]', _raw_en_title) else "Gaming News")[:100]
             progress("Generating EN thumbnail…")
             en_thumb = await _make_thumb(en_path, lang="en", title=en_title)
-            en_desc = "More news in the telegram channel, link in the bio\n\n" + _clean_text(post.get("post_text", ""))
+            en_desc = _clean_text(post.get("post_text", "")).rstrip() + "\n\nMore news in the telegram channel, link in the bio"
             if instagram_publisher.is_configured():
                 progress("Starting Instagram EN upload…")
                 tasks["Instagram EN"] = asyncio.create_task(

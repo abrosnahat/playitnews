@@ -28,6 +28,13 @@ import ssl
 import aiofiles
 import aiohttp
 import certifi
+from dotenv import load_dotenv
+
+# Load .env BEFORE the module-level os.getenv() calls below.
+# Required because this module is imported in webapp.py before `config`
+# (which is the other place that calls load_dotenv()), so otherwise the
+# MONITOR_* / USE_MONITOR_FRAME defaults would be used instead of .env values.
+load_dotenv()
 
 import scraper as _scraper
 from config import PIXABAY_API_KEY, VIDEOS_DIR, YT_CLIP_DURATION, YT_CLIP_SKIP, YT_MAX_CLIPS, YT_MAX_FILESIZE

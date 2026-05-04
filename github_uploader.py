@@ -19,6 +19,7 @@ import base64
 import json
 import logging
 import os
+import random
 import secrets
 import ssl
 import time
@@ -57,7 +58,7 @@ def _cfg() -> tuple[str, str]:
 
 def _request(method: str, url: str, *, token: str, data: bytes | None = None,
              headers: dict | None = None, timeout: int = 120,
-             retries: int = 4) -> tuple[int, bytes]:
+             retries: int = 6) -> tuple[int, bytes]:
     h = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
@@ -73,10 +74,12 @@ def _request(method: str, url: str, *, token: str, data: bytes | None = None,
             with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
                 return resp.status, resp.read()
         except urllib.error.HTTPError as exc:
-            # 5xx and 403/429 (secondary rate limits) are worth retrying.
-            if exc.code in (403, 429, 500, 502, 503, 504) and attempt < retries:
-                wait = min(2 ** attempt, 30)
-                logger.warning("GitHub %s %s: HTTP %s — retry %d/%d in %ds",
+            # Retry on transient errors and on 409 (concurrent commit race
+            # on the branch tip — happens when EN and RU publish in parallel
+            # and both PUT to /contents/ at the same time).
+            if exc.code in (409, 403, 429, 500, 502, 503, 504) and attempt < retries:
+                wait = min(2 ** attempt, 30) + random.uniform(0, 2)
+                logger.warning("GitHub %s %s: HTTP %s — retry %d/%d in %.1fs",
                                method, url, exc.code, attempt, retries, wait)
                 time.sleep(wait)
                 continue

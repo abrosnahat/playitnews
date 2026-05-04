@@ -9,6 +9,34 @@ TELEGRAM_CHANNEL_ID: str = os.getenv("TELEGRAM_CHANNEL_ID", "@playitnews")
 TELEGRAM_SECOND_CHANNEL_ID: str = os.getenv("TELEGRAM_SECOND_CHANNEL_ID", "@readitgames")
 TELEGRAM_ADMIN_CHAT_ID: int = int(os.getenv("TELEGRAM_ADMIN_CHAT_ID", "0"))
 
+# --- Local Bot API server (optional) ---
+# Telegram's official cloud Bot API caps uploads at 50 MB. Running your own
+# `telegram-bot-api` server (https://github.com/tdlib/telegram-bot-api) raises
+# that limit to 2000 MB. To enable:
+#   1) Get api_id / api_hash on https://my.telegram.org/apps
+#   2) Run: telegram-bot-api --local --api-id=XXXX --api-hash=YYYY --dir=/tmp/tgbotapi
+#      (or use ./start_tg_api.sh — see start.sh)
+#   3) One-time switch the bot from cloud to local:
+#        curl https://api.telegram.org/bot<TOKEN>/logOut
+#   4) Set TELEGRAM_LOCAL_API_URL in .env (default below points at localhost).
+# Leave TELEGRAM_LOCAL_API_URL empty to keep using the official cloud API.
+TELEGRAM_LOCAL_API_URL: str = os.getenv("TELEGRAM_LOCAL_API_URL", "").rstrip("/")
+# File-download endpoint of the same server. Defaults are derived from the API URL.
+TELEGRAM_LOCAL_API_FILE_URL: str = os.getenv("TELEGRAM_LOCAL_API_FILE_URL", "").rstrip("/")
+if TELEGRAM_LOCAL_API_URL and not TELEGRAM_LOCAL_API_FILE_URL:
+    # Convention: same host, path /file/bot<token>/...
+    TELEGRAM_LOCAL_API_FILE_URL = TELEGRAM_LOCAL_API_URL.replace("/bot", "/file/bot") \
+        if "/bot" in TELEGRAM_LOCAL_API_URL else TELEGRAM_LOCAL_API_URL + "/file"
+
+TELEGRAM_LOCAL_MODE: bool = bool(TELEGRAM_LOCAL_API_URL)
+
+# Telegram upload size cap. 50 MB on cloud, 2000 MB on local Bot API server.
+TG_MAX_BYTES: int = (2000 if TELEGRAM_LOCAL_MODE else 50) * 1024 * 1024
+
+# Credentials for the local Bot API server itself (not the bot token).
+TELEGRAM_API_ID: str = os.getenv("TELEGRAM_API_ID", "")
+TELEGRAM_API_HASH: str = os.getenv("TELEGRAM_API_HASH", "")
+
 # Ollama (local)
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "gemma4:e4b")

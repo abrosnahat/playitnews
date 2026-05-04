@@ -29,6 +29,9 @@ from config import (
     CHECK_INTERVAL_MINUTES,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_ADMIN_CHAT_ID,
+    TELEGRAM_LOCAL_API_URL,
+    TELEGRAM_LOCAL_API_FILE_URL,
+    TELEGRAM_LOCAL_MODE,
     setup_dirs,
 )
 from scraper import download_images, download_videos, get_latest_article_links, scrape_article
@@ -175,8 +178,17 @@ def main() -> None:
             write_timeout=300,   # large file uploads (video) can take time
             pool_timeout=30,
         ))
-        .build()
     )
+    if TELEGRAM_LOCAL_MODE:
+        # Use a self-hosted telegram-bot-api server (raises the 50 MB upload cap to 2 GB).
+        app = (
+            app
+            .base_url(f"{TELEGRAM_LOCAL_API_URL}/bot")
+            .base_file_url(f"{TELEGRAM_LOCAL_API_FILE_URL}/bot")
+            .local_mode(True)
+        )
+        logger.info("Telegram: local Bot API server at %s", TELEGRAM_LOCAL_API_URL)
+    app = app.build()
 
     # Register Telegram bot handlers
     for handler in build_handlers():
