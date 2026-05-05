@@ -1,0 +1,25 @@
+{
+  "_comment": "Monitor background variants. A random entry is picked per render. Calibrate coordinates with: python3 calibrate_monitor.py <bg_path>. Paths are relative to project root. Set rect to [x, y, w, h] or quad to [[x0,y0],[x1,y1],[x2,y2],[x3,y3]] in TL,TR,BL,BR order. quad takes priority over rect.",
+  "variants": [
+    {
+      "bg_path": "assets/monitor_bg.mp4",
+      "rect": [6, 290, 1061, 621],
+      "quad": [[6, 324], [1067, 290], [98, 911], [1016, 843]]
+    },
+    {
+      "bg_path": "assets/monitor_bg2.mp4",
+      "rect": [11, 262, 1052, 634],
+      "quad": [[11,290],[1063,262],[96,896],[1022,819]]
+    },
+    {
+      "bg_path": "assets/monitor_bg3.mp4",
+      "rect": [0,243,1050,632],
+      "quad": [[0,282],[1050,243],[100,875],[1010,796]]
+    },
+    {
+      "bg_path": "assets/monitor_bg4.mp4",
+      "rect": [2,273,1061,636],
+      "quad": [[2,303],[1063,273],[90,909],[1016,830]]
+    }
+  ]
+}

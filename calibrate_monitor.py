@@ -44,6 +44,14 @@ VID_W, VID_H = 1080, 1920
 PREVIEW_H = 900
 PREVIEW_W = int(VID_W * PREVIEW_H / VID_H)   # 506
 
+# Inner margin around the image inside the canvas, so points right at the
+# image edge are still comfortably clickable (you can overshoot into the
+# margin and the coord is clamped to the image edge).
+CANVAS_MARGIN = 40
+
+CANVAS_W = PREVIEW_W + 2 * CANVAS_MARGIN
+CANVAS_H = PREVIEW_H + 2 * CANVAS_MARGIN
+
 # Magnifier loupe settings
 LOUPE_SIZE = 220   # px (square)
 LOUPE_ZOOM = 8     # full-res pixels visible across the loupe = LOUPE_SIZE/ZOOM
@@ -310,10 +318,10 @@ class Picker:
 
         root.title("Monitor screen calibration")
 
-        self.canvas = tk.Canvas(root, width=PREVIEW_W, height=PREVIEW_H,
+        self.canvas = tk.Canvas(root, width=CANVAS_W, height=CANVAS_H,
                                 cursor="cross", highlightthickness=0,
                                 bg="#222222")
-        self.canvas.pack(side=tk.LEFT)
+        self.canvas.pack(side=tk.LEFT, padx=(24, 0), pady=12)
         self.canvas.bind("<Button-1>", self._on_click)
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<Leave>", lambda e: self._hide_loupe())
@@ -413,8 +421,16 @@ class Picker:
         self.tk_img  = ImageTk.PhotoImage(self.preview)
         self.full_img = img
         if self._image_id is None:
-            self._image_id = self.canvas.create_image(0, 0, anchor=tk.NW,
-                                                      image=self.tk_img)
+            self._image_id = self.canvas.create_image(
+                CANVAS_MARGIN, CANVAS_MARGIN,
+                anchor=tk.NW, image=self.tk_img,
+            )
+            # Subtle frame around the image so the margin is visible.
+            self.canvas.create_rectangle(
+                CANVAS_MARGIN - 1, CANVAS_MARGIN - 1,
+                CANVAS_MARGIN + PREVIEW_W, CANVAS_MARGIN + PREVIEW_H,
+                outline="#444", width=1, tags="frame",
+            )
         else:
             self.canvas.itemconfig(self._image_id, image=self.tk_img)
 
@@ -434,9 +450,13 @@ class Picker:
     def _on_motion(self, event):
         if self.full_img is None:
             return
-        # Map preview-canvas coords → full-res 1080×1920 coords
-        fx = event.x * VID_W / PREVIEW_W
-        fy = event.y * VID_H / PREVIEW_H
+        # Map preview-canvas coords → full-res 1080×1920 coords.
+        # Image is drawn at (CANVAS_MARGIN, CANVAS_MARGIN); subtract that
+        # offset and clamp so cursor in the margin still tracks edge pixels.
+        ex = max(0, min(PREVIEW_W - 1, event.x - CANVAS_MARGIN))
+        ey = max(0, min(PREVIEW_H - 1, event.y - CANVAS_MARGIN))
+        fx = ex * VID_W / PREVIEW_W
+        fy = ey * VID_H / PREVIEW_H
         crop_size = LOUPE_SIZE / LOUPE_ZOOM   # full-res pixels visible
         half = crop_size / 2.0
         left   = int(round(fx - half))
@@ -478,8 +498,12 @@ class Picker:
     def _on_click(self, event):
         if len(self.points) >= 4:
             return
-        x = round(event.x * VID_W / PREVIEW_W)
-        y = round(event.y * VID_H / PREVIEW_H)
+        # Translate by image offset; allow clicking into the margin to land
+        # exactly on the image edge.
+        ex = max(0, min(PREVIEW_W - 1, event.x - CANVAS_MARGIN))
+        ey = max(0, min(PREVIEW_H - 1, event.y - CANVAS_MARGIN))
+        x = round(ex * VID_W / PREVIEW_W)
+        y = round(ey * VID_H / PREVIEW_H)
         x = max(0, min(VID_W - 1, x))
         y = max(0, min(VID_H - 1, y))
         self.points.append((x, y))
@@ -546,8 +570,8 @@ class Picker:
 
         # Raw click markers
         for i, (x, y) in enumerate(self.points):
-            px = x * PREVIEW_W / VID_W
-            py = y * PREVIEW_H / VID_H
+            px = CANVAS_MARGIN + x * PREVIEW_W / VID_W
+            py = CANVAS_MARGIN + y * PREVIEW_H / VID_H
             r = 6
             self.canvas.create_oval(
                 px - r, py - r, px + r, py + r,
@@ -559,8 +583,8 @@ class Picker:
             colours = {"TL": "#00FF88", "TR": "#FF4477",
                        "BL": "#33AAFF", "BR": "#FFCC00"}
             for name, (x, y) in zip(LABELS, sorted_pts):
-                px = x * PREVIEW_W / VID_W
-                py = y * PREVIEW_H / VID_H
+                px = CANVAS_MARGIN + x * PREVIEW_W / VID_W
+                py = CANVAS_MARGIN + y * PREVIEW_H / VID_H
                 self.canvas.create_text(
                     px + 12, py - 12, text=name,
                     fill=colours[name],
@@ -571,7 +595,10 @@ class Picker:
             tl, tr, bl, br = sorted_pts
             poly = []
             for x, y in (tl, tr, br, bl):
-                poly.extend([x * PREVIEW_W / VID_W, y * PREVIEW_H / VID_H])
+                poly.extend([
+                    CANVAS_MARGIN + x * PREVIEW_W / VID_W,
+                    CANVAS_MARGIN + y * PREVIEW_H / VID_H,
+                ])
             self.canvas.create_polygon(
                 poly, outline="#00FF88", fill="", width=2,
                 tags="marker", dash=(4, 3),

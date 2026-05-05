@@ -93,6 +93,107 @@ MONITOR_BG_PATH = os.getenv(
 MONITOR_SCREEN_RECT = os.getenv("MONITOR_SCREEN_RECT", "55,640,615,440")
 MONITOR_SCREEN_QUAD = os.getenv("MONITOR_SCREEN_QUAD", "")
 
+# Multi-variant config (JSON). One entry is picked at random per render.
+# Path can be overridden via MONITOR_VARIANTS_FILE env var.
+MONITOR_VARIANTS_FILE = os.getenv(
+    "MONITOR_VARIANTS_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "monitors.json"),
+)
+
+
+def _format_rect(rect) -> str:
+    """Convert [x,y,w,h] (list/tuple) or string → 'x,y,w,h' spec string."""
+    if not rect:
+        return ""
+    if isinstance(rect, str):
+        return rect
+    try:
+        return ",".join(str(int(v)) for v in rect)
+    except Exception:
+        return ""
+
+
+def _format_quad(quad) -> str:
+    """Convert [[x,y],…×4] (list) or string → 'x0,y0;x1,y1;x2,y2;x3,y3' spec string."""
+    if not quad:
+        return ""
+    if isinstance(quad, str):
+        return quad
+    try:
+        return ";".join(f"{int(p[0])},{int(p[1])}" for p in quad)
+    except Exception:
+        return ""
+
+
+def _collect_monitor_variants() -> list[dict]:
+    """Load monitor background variants from `assets/monitors.json`.
+
+    Schema:
+      {
+        "variants": [
+          {"bg_path": "assets/monitor_bg.mp4",
+           "rect":    [x, y, w, h]            # or null
+           "quad":    [[x0,y0],[x1,y1],[x2,y2],[x3,y3]]  # or null (TL,TR,BL,BR)
+          },
+          ...
+        ]
+      }
+
+    Falls back to legacy `MONITOR_BG_PATH` / `MONITOR_SCREEN_RECT` /
+    `MONITOR_SCREEN_QUAD` env vars when the JSON file is missing.
+
+    Each variant is included only if its bg file exists AND it has a usable
+    rect or quad. Returned dicts contain `bg_path`, `rect` (str), `quad` (str).
+    """
+    project_root = os.path.dirname(os.path.abspath(__file__))
+
+    def _resolve(path: str) -> str:
+        if not path:
+            return ""
+        if not os.path.isabs(path):
+            path = os.path.join(project_root, path)
+        return path
+
+    variants: list[dict] = []
+
+    # Try JSON config first
+    if os.path.exists(MONITOR_VARIANTS_FILE):
+        try:
+            import json
+            with open(MONITOR_VARIANTS_FILE, "r", encoding="utf-8") as fh:
+                cfg = json.load(fh)
+            for v in cfg.get("variants", []):
+                bg = _resolve(v.get("bg_path", ""))
+                rect_str = _format_rect(v.get("rect"))
+                quad_str = _format_quad(v.get("quad"))
+                if not bg or not os.path.exists(bg):
+                    logger.warning("Monitor variant skipped — bg not found: %s", v.get("bg_path"))
+                    continue
+                if not (rect_str or quad_str):
+                    logger.warning(
+                        "Monitor variant %s skipped — no rect/quad calibrated",
+                        os.path.basename(bg),
+                    )
+                    continue
+                variants.append({"bg_path": bg, "rect": rect_str, "quad": quad_str})
+        except Exception as exc:
+            logger.warning("Failed to load %s: %s — falling back to env vars",
+                           MONITOR_VARIANTS_FILE, exc)
+
+    if variants:
+        return variants
+
+    # Legacy fallback: single variant from env
+    bg = _resolve(MONITOR_BG_PATH)
+    if bg and os.path.exists(bg) and (MONITOR_SCREEN_RECT or MONITOR_SCREEN_QUAD):
+        variants.append({
+            "bg_path": bg,
+            "rect":    MONITOR_SCREEN_RECT,
+            "quad":    MONITOR_SCREEN_QUAD,
+        })
+
+    return variants
+
 # "Filmed on camera" look applied to the inner video before it's warped into
 # the monitor — softens it just enough that it blends with the surrounding
 # photo/video instead of looking like a clean overlay. Disable with =0.
@@ -1320,6 +1421,9 @@ async def _download_full_yt_video(
     return chosen
 
 
+_OUTRO_SKIP = 5.0  # don't take material from the last 5 s of a source video
+
+
 def _cut_clips_from_video(
     video_path: str,
     n_clips: int,
@@ -1328,7 +1432,8 @@ def _cut_clips_from_video(
     clip_name_prefix: str = "clip",
 ) -> list[str]:
     """
-    Cut n_clips random 3–4 second segments from video_path, skipping the opening.
+    Cut n_clips random 3–4 second segments from video_path, skipping the opening
+    and the final _OUTRO_SKIP seconds (typical outro/end-card territory).
     The available range is divided into n_clips equal buckets; a random start
     position is chosen within each bucket to ensure even coverage with variety.
     Each clip is stream-copied (no re-encode) for speed.
@@ -1337,11 +1442,12 @@ def _cut_clips_from_video(
     os.makedirs(clips_dir, exist_ok=True)
 
     duration = _get_audio_duration(video_path)  # ffprobe works on video too
-    available = max(0.0, duration - intro_skip)
+    usable_end = max(0.0, duration - _OUTRO_SKIP)
+    available = max(0.0, usable_end - intro_skip)
     if available < 4.0:
         # Video too short after intro skip — start from the very beginning
         intro_skip = 0.0
-        available = duration
+        available = max(0.0, usable_end)
 
     if available < 1.0:
         logger.warning("Video too short to cut clips: %.1f s", duration)
@@ -1714,6 +1820,8 @@ async def _compose_monitor_scene_photo(
     bg_path: str,
     output_mp4: str,
     audio_dur: float,
+    rect_spec: str | None = None,
+    quad_spec: str | None = None,
 ) -> bool:
     """
     Composite the inner 16:9 video into the monitor screen of a real photo
@@ -1726,8 +1834,10 @@ async def _compose_monitor_scene_photo(
     The bg image is scaled/cropped to {VID_W}×{VID_H} so all coordinates are
     interpreted in the final 1080×1920 frame.
     """
-    quad = _parse_screen_quad(MONITOR_SCREEN_QUAD) if MONITOR_SCREEN_QUAD else None
-    rect = _parse_screen_rect(MONITOR_SCREEN_RECT)
+    rect_spec = rect_spec if rect_spec is not None else MONITOR_SCREEN_RECT
+    quad_spec = quad_spec if quad_spec is not None else MONITOR_SCREEN_QUAD
+    quad = _parse_screen_quad(quad_spec) if quad_spec else None
+    rect = _parse_screen_rect(rect_spec) if rect_spec else None
 
     # Common: scale background photo to fill 1080x1920 (cover-style).
     bg_chain = (
@@ -1783,7 +1893,7 @@ async def _compose_monitor_scene_photo(
                 #   noise     – temporal sensor grain (no luma desync between frames)
                 #   vignette  – subtle corner falloff like a phone-cam lens
                 "gblur=sigma=0.6,"
-                "eq=saturation=0.92:brightness=-0.02:contrast=0.96:gamma=1.03,"
+                "eq=saturation=0.92:contrast=0.96:gamma=1.03,"
                 "noise=alls=8:allf=t,"
                 "vignette=PI/6,"
                 if MONITOR_CAMERA_LOOK else ""
@@ -1952,6 +2062,7 @@ async def _assemble_video(
     workdir: str,
     search_query: str = "",
     n_article_clips: int = 0,
+    use_monitor_frame: bool | None = None,
 ) -> bool:
     """
     Assemble portrait video:
@@ -1963,6 +2074,10 @@ async def _assemble_video(
     """
     audio_dur = _get_audio_duration(audio_path)
     logger.info("Audio duration: %.1f s", audio_dur)
+
+    # Per-call override of the module-level USE_MONITOR_FRAME default.
+    if use_monitor_frame is None:
+        use_monitor_frame = USE_MONITOR_FRAME
 
     # Order: first clip → images (pan animation) → remaining clips.
     # This keeps the video opening with motion footage and returns to gameplay after images.
@@ -1986,7 +2101,7 @@ async def _assemble_video(
 
     # Inner segments are rendered at 16:9 when monitor mode is on; otherwise
     # they are rendered directly at portrait 9:16 as before.
-    if USE_MONITOR_FRAME:
+    if use_monitor_frame:
         seg_w, seg_h = INNER_W, INNER_H
         logger.info("Monitor mode ON — rendering inner content at %dx%d", seg_w, seg_h)
     else:
@@ -2101,19 +2216,28 @@ async def _assemble_video(
     # At this point mixed_mp4 is 16:9 (INNER_W×INNER_H) with full audio.
     # Wrap it into a 1080×1920 portrait scene with a tilted monitor and
     # ambilight-style halo on the wall behind. After this, mixed_mp4 is 9:16.
-    if USE_MONITOR_FRAME:
+    if use_monitor_frame:
         scene_mp4 = os.path.join(workdir, "scene.mp4")
         # Prefer photo-background mode if a usable bg image is available.
-        use_photo = bool(MONITOR_BG_PATH) and os.path.exists(MONITOR_BG_PATH)
+        # Pick a random variant — each MONITOR_BG_PATH_N has its own RECT/QUAD.
+        variants = _collect_monitor_variants()
+        chosen = random.choice(variants) if variants else None
+        use_photo = chosen is not None
         ok_scene = False
         if use_photo:
             ok_scene = await _compose_monitor_scene_photo(
-                mixed_mp4, MONITOR_BG_PATH, scene_mp4, audio_dur,
+                mixed_mp4,
+                chosen["bg_path"],
+                scene_mp4,
+                audio_dur,
+                rect_spec=chosen["rect"],
+                quad_spec=chosen["quad"],
             )
             if ok_scene:
                 logger.info(
-                    "Monitor scene composed using photo bg: %s",
-                    os.path.basename(MONITOR_BG_PATH),
+                    "Monitor scene composed using photo bg: %s (variants available: %d)",
+                    os.path.basename(chosen["bg_path"]),
+                    len(variants),
                 )
             else:
                 logger.warning(
@@ -2249,6 +2373,7 @@ async def create_short_video(
     prefetched_clips: list[str] | None = None,
     n_article_clips: int = 0,
     include_article_images: bool = False,
+    use_monitor_frame: bool | None = None,
 ) -> Optional[str]:
     """
     Generate a TikTok/Reels/Shorts video for an approved post.
@@ -2353,6 +2478,7 @@ async def create_short_video(
             all_images, all_clips, audio_path, cues, output_path, workdir,
             search_query=search_query,
             n_article_clips=n_article_clips,
+            use_monitor_frame=use_monitor_frame,
         )
         return output_path if ok else None
 

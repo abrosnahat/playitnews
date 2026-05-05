@@ -655,6 +655,10 @@ function renderCard(p) {
         <input id="incImg_${p.id}" type="checkbox">
         <span>🖼 Include article images in video</span>
       </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:6px 0;cursor:pointer;">
+        <input id="monFrame_${p.id}" type="checkbox" checked>
+        <span>🖥️ Use monitor frame</span>
+      </label>
       <div class="btn-group">
         <button class="btn btn-primary" onclick="generateVideo(${p.id},'both')">🎬 EN+RU</button>
         <button class="btn btn-outline" onclick="generateVideo(${p.id},'en')">🇬🇧 EN only</button>
@@ -771,6 +775,8 @@ async function generateVideo(id, lang) {
   const ytQuery = ytqEl ? ytqEl.value.trim() : '';
   const incImgEl = document.getElementById(`incImg_${id}`);
   const includeImages = !!(incImgEl && incImgEl.checked);
+  const monFrameEl = document.getElementById(`monFrame_${id}`);
+  const monitorFrame = monFrameEl ? !!monFrameEl.checked : true;
   progressLogs[id] = [];
   area.innerHTML = `
     <div class="progress-panel">
@@ -793,7 +799,7 @@ async function generateVideo(id, lang) {
     const res  = await fetch(`/api/posts/${id}/generate-video`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lang, include_images: includeImages, ...(ytQuery ? { yt_query: ytQuery } : {}) }),
+      body: JSON.stringify({ lang, include_images: includeImages, monitor_frame: monitorFrame, ...(ytQuery ? { yt_query: ytQuery } : {}) }),
     });
     const data = await res.json();
     if (data.error) {
@@ -823,17 +829,16 @@ async function generateVideo(id, lang) {
   }
 
   let taskDone = false;
+  let finished = false;
 
   const _finishSSE = (withRefresh) => {
+    if (finished) return;
+    finished = true;
     if (activeSSE) { activeSSE.close(); activeSSE = null; }
     if (withRefresh) {
       toast('Video generation complete! 🎬', 'success');
-      // Retry a few times in case the DB write hasn't committed yet
-      const refresh = (attempt) => {
-        refreshCard(id);
-        if (attempt < 3) setTimeout(() => refresh(attempt + 1), 2000);
-      };
-      setTimeout(() => refresh(0), 800);
+      // Single refresh after a short delay so DB write is committed
+      setTimeout(() => refreshCard(id), 800);
     }
   };
 

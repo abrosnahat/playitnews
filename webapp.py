@@ -657,6 +657,7 @@ def api_generate_video(post_id: int):
         return jsonify({"error": "Post not found"}), 404
 
     include_images = bool(body.get("include_images", False))
+    use_monitor_frame = bool(body.get("monitor_frame", True))
 
     # Optional custom YT search query override
     yt_query_override = (body.get("yt_query") or "").strip() or None
@@ -681,7 +682,7 @@ def api_generate_video(post_id: int):
 
     def _run():
         try:
-            _run_async(_generate_video(post_id, lang, include_images=include_images))
+            _run_async(_generate_video(post_id, lang, include_images=include_images, use_monitor_frame=use_monitor_frame))
         except Exception as exc:
             _push(post_id, f"Fatal error: {exc}", "error")
         finally:
@@ -766,7 +767,7 @@ def api_video_stream(post_id: int):
     )
 
 
-async def _generate_video(post_id: int, lang: str, include_images: bool = False) -> None:
+async def _generate_video(post_id: int, lang: str, include_images: bool = False, use_monitor_frame: bool = True) -> None:
     """Core video generation logic (mirrors handle_create_video in bot.py)."""
     post = db.get_scheduled_post(post_id)
     if not post:
@@ -857,6 +858,7 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False)
                     prefetched_clips=shared_clips,
                     n_article_clips=len(article_videos),
                     include_article_images=include_images,
+                    use_monitor_frame=use_monitor_frame,
                 )
                 if en_path:
                     db.set_generated_video_path(post_id, en_path)
@@ -875,6 +877,7 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False)
                     prefetched_clips=shared_clips,
                     n_article_clips=len(article_videos),
                     include_article_images=include_images,
+                    use_monitor_frame=use_monitor_frame,
                 )
                 if ru_path:
                     db.set_generated_video_path_ru(post_id, ru_path)
