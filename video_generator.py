@@ -14,7 +14,6 @@ import asyncio
 import concurrent.futures
 import logging
 import os
-import math
 import random
 import re
 import shutil
@@ -25,7 +24,6 @@ from typing import Optional
 
 import ssl
 
-import aiofiles
 import aiohttp
 import certifi
 from dotenv import load_dotenv
@@ -37,7 +35,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import scraper as _scraper
-from config import PIXABAY_API_KEY, VIDEOS_DIR, YT_CLIP_DURATION, YT_CLIP_SKIP, YT_MAX_CLIPS, YT_MAX_FILESIZE
+from config import VIDEOS_DIR, YT_CLIP_SKIP, YT_MAX_FILESIZE
 
 # Directory with royalty-free background music tracks (mp3/wav/flac/ogg/m4a)
 MUSIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music")
@@ -316,31 +314,6 @@ def _parse_vtt_entries(vtt_path: str) -> list[dict]:
     return entries
 
 
-def _ts_vtt_to_ass(ts: str) -> str:
-    """Convert VTT timestamp (HH:MM:SS.mmm or MM:SS.mmm) to ASS format (H:MM:SS.cc).
-    Handles both '.' and ',' as the decimal separator."""
-    ts = ts.strip().replace(",", ".")   # SRT-style comma → dot
-    # Normalise to HH:MM:SS.mmm
-    if ts.count(":") == 1:
-        ts = "00:" + ts
-    h, m, rest = ts.split(":")
-    secs, ms = (rest.split(".") + ["0"])[:2]
-    cs = int(ms[:3].ljust(3, "0")) // 10   # centiseconds
-    return f"{int(h)}:{int(m):02d}:{int(secs):02d}.{cs:02d}"
-
-
-def _ass_ts_to_sec(ts: str) -> float:
-    """Convert ASS timestamp H:MM:SS.cc to seconds."""
-    try:
-        h, m, rest = ts.strip().split(":")
-        s_parts = rest.split(".")
-        s  = int(s_parts[0])
-        cs = int(s_parts[1]) if len(s_parts) > 1 else 0
-        return int(h) * 3600 + int(m) * 60 + s + cs / 100
-    except Exception:
-        return 0.0
-
-
 def _vtt_ts_to_sec(ts: str) -> float:
     """Convert VTT/SRT timestamp (HH:MM:SS,mmm or HH:MM:SS.mmm or MM:SS.mmm) to seconds."""
     try:
@@ -390,86 +363,6 @@ def _find_system_font(size: int):
             except Exception:
                 continue
     return ImageFont.load_default()
-
-
-def _render_subtitle_png(text: str, out_path: str) -> bool:
-    """Render subtitle text as RGBA PNG (transparent background)."""
-    try:
-        from PIL import Image
-        img = Image.new("RGBA", (VID_W, VID_H), (0, 0, 0, 0))
-        _render_subtitle_onto(text, img)
-        img.save(out_path, "PNG")
-        return True
-    except Exception as exc:
-        logger.warning("subtitle PNG render error: %s", exc)
-        return False
-
-
-def _parse_ass_cues(ass_path: str) -> list[tuple[float, float, str]]:
-    """Return [(start_sec, end_sec, text), ...] from an ASS Dialogue file."""
-    cues: list[tuple[float, float, str]] = []
-    try:
-        with open(ass_path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line.startswith("Dialogue:"):
-                    continue
-                parts = line.split(",", 9)
-                if len(parts) < 10:
-                    continue
-                t_start = _ass_ts_to_sec(parts[1].strip())
-                t_end   = _ass_ts_to_sec(parts[2].strip())
-                text    = re.sub(r"\{[^}]*\}", "", parts[9].strip()).strip()
-                if text:
-                    cues.append((t_start, t_end, text))
-    except Exception as exc:
-        logger.warning("ASS parse error: %s", exc)
-    return cues
-
-
-def _expand_cues_to_words(
-    cues: list[tuple[float, float, str]]
-) -> list[tuple[float, float, str]]:
-    """
-    Split each sentence-level cue into individual words,
-    distributing the cue's time window evenly across its words.
-    Punctuation is stripped so only clean words appear.
-    """
-    result: list[tuple[float, float, str]] = []
-    for t_start, t_end, text in cues:
-        words = text.split()
-        if not words:
-            continue
-        word_dur = (t_end - t_start) / len(words)
-        for i, word in enumerate(words):
-            clean = word.strip(".,!?;:\"'()-–—")  # remove surrounding punctuation
-            if not clean:
-                continue
-            result.append((
-                t_start + i * word_dur,
-                t_start + (i + 1) * word_dur,
-                clean,
-            ))
-    return result
-
-
-def _script_to_timed_cues(
-    script: str,
-    audio_dur: float,
-    words_per_cue: int = 1,
-) -> list[tuple[float, float, str]]:
-    """
-    Split the script into fixed-size word groups and assign each an equal
-    time slice proportional to the audio duration.
-    This is reliable regardless of VTT/ASS parsing issues.
-    """
-    words  = script.split()
-    chunks = [" ".join(words[i: i + words_per_cue])
-              for i in range(0, len(words), words_per_cue)]
-    if not chunks:
-        return []
-    dur = audio_dur / len(chunks)
-    return [(i * dur, (i + 1) * dur, text) for i, text in enumerate(chunks)]
 
 
 async def _burn_subtitles_pillow(
@@ -693,48 +586,6 @@ def _render_subtitle_onto(text: str, img, scale: float = 1.0) -> None:
 
     # --- Composite onto caller's image ---
     img.alpha_composite(text_layer)
-
-
-def _vtt_to_ass(
-    vtt_path: str,
-    ass_path: str,
-    res_x: int = VID_W,
-    res_y: int = VID_H,
-    words_per_cue: int = 6,
-) -> None:
-    """
-    Convert word-level VTT → styled ASS subtitle file.
-    Styles are baked into the file so the ffmpeg `ass=` filter needs no
-    extra escaping — no more filtergraph parsing errors.
-    """
-    entries = _parse_vtt_entries(vtt_path)
-
-    ass_header = (
-        "[Script Info]\n"
-        "ScriptType: v4.00+\n"
-        f"PlayResX: {res_x}\n"
-        f"PlayResY: {res_y}\n"
-        "WrapStyle: 0\n\n"
-        "[V4+ Styles]\n"
-        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
-        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
-        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
-        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        # White text, black outline, no shadow, bottom-centre, large font
-        "Style: Default,Arial,56,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,"
-        "1,0,0,0,100,100,0,0,1,3,0,2,10,10,120,1\n\n"
-        "[Events]\n"
-        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-    )
-
-    with open(ass_path, "w", encoding="utf-8") as fh:
-        fh.write(ass_header)
-        for i in range(0, len(entries), words_per_cue):
-            chunk = entries[i: i + words_per_cue]
-            start = _ts_vtt_to_ass(chunk[0]["start"])
-            end   = _ts_vtt_to_ass(chunk[-1]["end"])
-            text  = " ".join(e["text"] for e in chunk)
-            fh.write(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -1229,66 +1080,6 @@ async def _synthesize_voice(
 # YouTube gameplay footage via yt-dlp
 # ---------------------------------------------------------------------------
 
-async def _fetch_youtube_clips(
-    game_query: str,
-    count: int,
-    workdir: str,
-    skip: int = 0,
-) -> list[str]:
-    """
-    Search YouTube for gameplay footage of *game_query*, download short clips.
-    Uses yt-dlp (already in requirements) — no API key needed.
-    *skip*: skip the first N search results (for regenerate diversity).
-    Returns list of local .mp4 paths.
-    """
-    clips_dir = os.path.join(workdir, "yt_clips")
-    os.makedirs(clips_dir, exist_ok=True)
-
-    # Request more results than needed so we can skip the first *skip* entries.
-    fetch_count = count + skip + 2
-    yt_search = f"ytsearch{fetch_count}:{game_query}"
-
-    # yt-dlp: download best video<=720p, no audio, max 50 MB, no playlist
-    # Randomise the clip start position for visual diversity across videos.
-    # Picks anywhere from YT_CLIP_SKIP to ~90 s into the video to vary the footage.
-    clip_start = random.randint(YT_CLIP_SKIP, YT_CLIP_SKIP + 90)
-
-    ydl_args = [
-        "yt-dlp",
-        "--no-playlist",
-        "--no-warnings",
-        "--quiet",
-        "--ignore-errors",
-        "--match-filters", "live_status=not_live",  # skip premieres (is_upcoming) and live streams
-        *_YT_COOKIE_ARGS,
-        *_YT_EXTRACTOR_ARGS,
-        *_YT_SLEEP_ARGS,
-        "--format", "bestvideo[height<=1080][ext=mp4]/bestvideo[height<=720]/best[height<=720]/best",
-        "--max-filesize", f"{YT_MAX_FILESIZE}M",
-        "--max-downloads", str(count + skip),   # download skip+count, discard first skip
-        "--output", os.path.join(clips_dir, "%(autonumber)s.%(ext)s"),
-        # Random start within the video — varies on every generation
-        "--download-sections", f"*{clip_start}-{clip_start + YT_CLIP_DURATION}",
-        "--force-keyframes-at-cuts",
-        yt_search,
-    ]
-
-    logger.info("Searching YouTube: '%s' (%d clips, skip=%d)", game_query, count, skip)
-    ok = await _run_async(ydl_args, timeout=180)
-    if not ok:
-        logger.warning("yt-dlp exited with error — checking partial downloads")
-
-    all_paths = [
-        os.path.join(clips_dir, f)
-        for f in sorted(os.listdir(clips_dir))
-        if f.endswith((".mp4", ".webm", ".mkv"))
-    ]
-    # Discard the first *skip* results, take up to *count* of the rest
-    result = all_paths[skip:][:count]
-    logger.info("Downloaded %d YouTube clips for '%s' (skipped %d)", len(result), game_query, skip)
-    return result
-
-
 async def _download_multiple_yt_videos(
     search_query: str,
     count: int,
@@ -1485,118 +1276,6 @@ def _cut_clips_from_video(
 
 
 # ---------------------------------------------------------------------------
-# Pixabay stock media (images only — used as fallback fill)
-# ---------------------------------------------------------------------------
-
-async def _download_file(
-    session: aiohttp.ClientSession, url: str, dest: str
-) -> bool:
-    try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=90), ssl=SSL_CONTEXT) as resp:
-            if resp.status == 200:
-                data = await resp.read()
-                async with aiofiles.open(dest, "wb") as fh:
-                    await fh.write(data)
-                return True
-        logger.debug("Download HTTP %s: %s", resp.status, url)
-    except Exception as exc:
-        logger.warning("Download failed for %s: %s", url, exc)
-    return False
-
-
-async def _fetch_pixabay_images(
-    query: str, count: int, workdir: str
-) -> list[str]:
-    if not PIXABAY_API_KEY:
-        return []
-    params = {
-        "key": PIXABAY_API_KEY,
-        "q": query,
-        "image_type": "photo",
-        "per_page": min(count + 5, 20),
-        "safesearch": "true",
-        "order": "popular",
-    }
-    paths: list[str] = []
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                "https://pixabay.com/api/",
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=30),
-                ssl=SSL_CONTEXT,
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning("Pixabay images HTTP %s", resp.status)
-                    return []
-                data = await resp.json()
-            for i, hit in enumerate(data.get("hits", [])[:count]):
-                img_url = hit.get("largeImageURL") or hit.get("webformatURL")
-                if not img_url:
-                    continue
-                ext = (img_url.split("?")[0].rsplit(".", 1)[-1] or "jpg")[:4]
-                dest = os.path.join(workdir, f"pb_img_{i}.{ext}")
-                if await _download_file(session, img_url, dest):
-                    paths.append(dest)
-    except Exception as exc:
-        logger.warning("Pixabay images error: %s", exc)
-    logger.info("Fetched %d Pixabay images for '%s'", len(paths), query)
-    return paths
-
-
-async def _fetch_pixabay_videos(
-    query: str, count: int, workdir: str
-) -> list[str]:
-    if not PIXABAY_API_KEY:
-        return []
-    params = {
-        "key": PIXABAY_API_KEY,
-        "q": query,
-        "video_type": "film",       # realistic footage, not animation
-        "per_page": min(count + 5, 20),
-        "safesearch": "true",
-        "order": "relevant",
-    }
-    paths: list[str] = []
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                "https://pixabay.com/api/videos/",
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=60),
-                ssl=SSL_CONTEXT,
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning("Pixabay videos HTTP %s", resp.status)
-                    return []
-                data = await resp.json()
-            downloads = []
-            for i, hit in enumerate(data.get("hits", [])[:count]):
-                videos = hit.get("videos", {})
-                video_url = (
-                    (videos.get("medium") or {}).get("url")
-                    or (videos.get("small") or {}).get("url")
-                    or (videos.get("tiny") or {}).get("url")
-                )
-                if not video_url:
-                    continue
-                dest = os.path.join(workdir, f"pb_vid_{i}.mp4")
-                downloads.append((video_url, dest))
-            # Download in parallel
-            results = await asyncio.gather(
-                *[_download_file(session, url, dest) for url, dest in downloads],
-                return_exceptions=True,
-            )
-            for (_, dest), ok in zip(downloads, results):
-                if ok is True:
-                    paths.append(dest)
-    except Exception as exc:
-        logger.warning("Pixabay videos error: %s", exc)
-    logger.info("Fetched %d Pixabay videos for '%s'", len(paths), query)
-    return paths
-
-
-# ---------------------------------------------------------------------------
 # ffmpeg segment builders
 # ---------------------------------------------------------------------------
 
@@ -1735,56 +1414,6 @@ def _find_music_track() -> str | None:
         if f.lower().endswith((".mp3", ".wav", ".flac", ".ogg", ".m4a"))
     ]
     return random.choice(tracks) if tracks else None
-
-
-async def _fetch_pixabay_music(search_query: str) -> str | None:
-    """
-    Download a royalty-free background music track via yt-dlp.
-    Searches YouTube for "royalty free gaming music no copyright" tracks.
-    Caches in music/ for reuse. Returns local mp3 path or None on failure.
-    """
-    os.makedirs(MUSIC_DIR, exist_ok=True)
-
-    # Reuse cached track if available
-    cached = _find_music_track()
-    if cached:
-        return cached
-
-    search_terms = [
-        f"{search_query} background music no copyright",
-        "gaming background music no copyright free use",
-        "electronic background music no copyright",
-        "lofi gaming music no copyright",
-    ]
-
-    for term in search_terms:
-        track_id = uuid.uuid4().hex[:8]
-        dest = os.path.join(MUSIC_DIR, f"yt_{track_id}.mp3")
-        logger.info("Searching background music: '%s'", term)
-        ok = await _run_async(
-            [
-                "yt-dlp",
-                "--no-warnings", "--quiet",
-                "--no-playlist",
-                "-x", "--audio-format", "mp3", "--audio-quality", "5",
-                "--match-filter", "duration > 30",    # skip very short clips
-                "--max-downloads", "1",
-                "-o", dest,
-                f"ytsearch3:{term}",
-            ],
-            timeout=60,
-        )
-        if ok and os.path.exists(dest):
-            logger.info("Background music cached: %s", os.path.basename(dest))
-            return dest
-        # Clean up partial file if any
-        try:
-            os.remove(dest)
-        except OSError:
-            pass
-
-    logger.warning("Could not download background music")
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2060,7 +1689,6 @@ async def _assemble_video(
     cues: list[tuple[float, float, str]],
     output_path: str,
     workdir: str,
-    search_query: str = "",
     n_article_clips: int = 0,
     use_monitor_frame: bool | None = None,
 ) -> bool:
@@ -2476,7 +2104,6 @@ async def create_short_video(
         )
         ok = await _assemble_video(
             all_images, all_clips, audio_path, cues, output_path, workdir,
-            search_query=search_query,
             n_article_clips=n_article_clips,
             use_monitor_frame=use_monitor_frame,
         )
