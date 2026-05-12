@@ -46,6 +46,10 @@ _MEDIA_DIR = "media"  # path inside the repo where files are stored
 
 
 def _cfg() -> tuple[str, str]:
+    # Re-read .env on every call so that rotating GITHUB_MEDIA_TOKEN in the
+    # file takes effect without restarting the long-running webapp/main
+    # processes (load_dotenv at import time only fires once).
+    load_dotenv(override=True)
     token = os.getenv("GITHUB_MEDIA_TOKEN", "").strip()
     repo  = os.getenv("GITHUB_MEDIA_REPO", "").strip()
     if not token or not repo:
@@ -83,6 +87,15 @@ def _request(method: str, url: str, *, token: str, data: bytes | None = None,
                                method, url, exc.code, attempt, retries, wait)
                 time.sleep(wait)
                 continue
+            if exc.code == 401:
+                # Surface enough context to diagnose stale-token / wrong-token
+                # cases without leaking the secret itself.
+                tok_fp = f"{token[:6]}…{token[-4:]}" if len(token) >= 10 else "<short>"
+                req_id = exc.headers.get("X-GitHub-Request-Id") if exc.headers else None
+                logger.error(
+                    "GitHub 401 Unauthorized: %s %s (token=%s req_id=%s)",
+                    method, url, tok_fp, req_id,
+                )
             return exc.code, exc.read()
         except (urllib.error.URLError, ssl.SSLError, ConnectionError, TimeoutError, OSError) as exc:
             last_exc = exc
