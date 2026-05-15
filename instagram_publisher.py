@@ -2,11 +2,23 @@
 Instagram Reels publisher via Instagram Graph API.
 
 Flow:
-  1. Upload MP4 (and optional cover image) to GitHub via github_uploader.
-  2. Create a REELS media container with the resulting raw.githubusercontent.com URLs.
-  3. Poll until container status == FINISHED.
-  4. Publish the container.
-  5. Delete the GitHub assets (if GITHUB_MEDIA_DELETE_AFTER_PUBLISH=1).
+  1. Upload MP4 + optional cover image to GitHub via github_uploader.
+  2. Rewrite both URLs from jsDelivr to raw.githubusercontent.com:
+     GitHub's origin is instantly available (no CDN propagation lag),
+     and Instagram's Fwdproxy fetches it reliably. We previously hosted
+     via jsDelivr to avoid Meta's 10 MB octet-stream limit, but our
+     IG-optimized Reels are 720×1280 / CRF 23 ≈ 1–4 MB, well under that
+     ceiling. raw.github also avoids the recurring jsDelivr edge issues
+     (404 for fresh files / Fwdproxy "failed to fetch headers").
+  3. Create a REELS media container with `video_url` (and `cover_url`).
+  4. Poll until status == FINISHED.
+  5. Publish the container.
+  6. Delete the GitHub assets (if GITHUB_MEDIA_DELETE_AFTER_PUBLISH=1).
+
+Why not resumable upload? Meta's `upload_type=resumable` endpoint only
+works on graph.facebook.com with Facebook Login for Business tokens.
+We use Instagram Login (graph.instagram.com), so resumable returns
+`The parameter video_url is required`.
 
 Requirements:
   - pip install aiohttp certifi
@@ -43,16 +55,52 @@ GRAPH_API_BASE = "https://graph.instagram.com/v21.0"
 _CONTAINER_POLL_INTERVAL = 5    # seconds between status checks
 _CONTAINER_POLL_TIMEOUT  = 300  # give up after 5 minutes
 
+# Meta refuses to ingest application/octet-stream payloads larger than
+# ~10 MB. raw.githubusercontent.com always serves with this Content-Type,
+# so we fall back to jsDelivr (which sets video/mp4) for bigger files.
+_RAW_GITHUB_OCTET_LIMIT = 9 * 1024 * 1024  # 9 MB, conservative
 
-# ---------------------------------------------------------------------------
-# Instagram API helpers
-# ---------------------------------------------------------------------------
 
-def _aiohttp_session() -> aiohttp.ClientSession:
+def _jsdelivr_to_raw(url: str) -> str:
+    """
+    Rewrite a jsDelivr URL produced by github_uploader to the matching
+    raw.githubusercontent.com URL. raw.github is GitHub's origin, so
+    freshly committed files are available immediately — no CDN
+    propagation lag, no third-party outages.
+
+    jsDelivr URL shape: https://cdn.jsdelivr.net/gh/{owner}/{repo}@{branch}/{path}
+    raw URL shape:      https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}
+
+    Note: {repo} here is the *repo name*, not "owner/name" — owner and
+    repo are separated by '/' in the jsDelivr path. So we partition the
+    rest on '@' to find the branch boundary first, then split the prefix
+    once on the LAST '/' to get owner/repo.
+    """
+    prefix = "https://cdn.jsdelivr.net/gh/"
+    if not url.startswith(prefix):
+        return url
+    rest = url[len(prefix):]
+    if "@" not in rest or "/" not in rest:
+        return url
+    owner_repo, _, after = rest.partition("@")  # "{owner}/{repo}", "{branch}/{path}"
+    if "/" not in owner_repo or "/" not in after:
+        return url
+    branch, _, path = after.partition("/")
+    return f"https://raw.githubusercontent.com/{owner_repo}/{branch}/{path}"
+
+
+
+async def _aiohttp_session() -> aiohttp.ClientSession:  # type: ignore[override]
+    """Legacy alias kept for backward import compatibility (unused internally now)."""
+    return _make_session()
+
+
+def _make_session() -> aiohttp.ClientSession:
     """aiohttp session with certifi SSL context (required on macOS)."""
     ctx = ssl.create_default_context(cafile=certifi.where())
     connector = aiohttp.TCPConnector(ssl=ctx)
     return aiohttp.ClientSession(connector=connector)
+
 
 
 async def _ig_create_container(
@@ -65,7 +113,7 @@ async def _ig_create_container(
 ) -> str:
     """Step 1: Create a REELS media container. Returns container ID."""
     url = f"{GRAPH_API_BASE}/{user_id}/media"
-    payload = {
+    payload: dict = {
         "media_type": "REELS",
         "video_url": video_url,
         "caption": caption,
@@ -85,7 +133,7 @@ async def _ig_wait_for_container(
     container_id: str,
     access_token: str,
 ) -> None:
-    """Step 2: Poll until Instagram has finished processing the video."""
+    """Step 3: Poll until Instagram has finished processing the video."""
     url = f"{GRAPH_API_BASE}/{container_id}"
     params = {
         "fields": "status_code,status,error_message",
@@ -120,7 +168,7 @@ async def _ig_publish_container(
     user_id: str,
     access_token: str,
 ) -> str:
-    """Step 3: Publish the container. Returns the new media ID."""
+    """Step 4: Publish the container. Returns the new media ID."""
     url = f"{GRAPH_API_BASE}/{user_id}/media_publish"
     payload = {
         "creation_id": container_id,
@@ -233,20 +281,35 @@ async def publish_reel(
     upload_video_path = await asyncio.to_thread(_optimize_for_instagram, video_path)
     optimized_tmp = upload_video_path if upload_video_path != video_path else None
 
-    # Upload video + optional cover to GitHub (Meta-friendly CDN via jsDelivr).
+    # Upload video to GitHub. Use raw.githubusercontent.com directly
+    # (GitHub origin) — it's instantly available and doesn't suffer
+    # jsDelivr's edge propagation issues / Fwdproxy 500s. raw.github
+    # serves with `Content-Type: application/octet-stream` which Meta
+    # rejects above ~10 MB; for files over that limit we fall back to
+    # the original jsDelivr URL (which sets Content-Type: video/mp4).
     logger.info("Uploading video to GitHub...")
-    video_url, video_repo_path = await asyncio.to_thread(
+    jsd_video_url, video_repo_path = await asyncio.to_thread(
         github_uploader.upload, upload_video_path
     )
-    logger.info("Public video URL: %s", video_url)
+    video_size = os.path.getsize(upload_video_path)
+    if video_size <= _RAW_GITHUB_OCTET_LIMIT:
+        video_url = _jsdelivr_to_raw(jsd_video_url)
+        logger.info("Public video URL (raw, %.2f MB): %s",
+                    video_size / (1024 * 1024), video_url)
+    else:
+        video_url = jsd_video_url
+        logger.info("Public video URL (jsDelivr, %.2f MB > raw limit): %s",
+                    video_size / (1024 * 1024), video_url)
 
+    # Cover image: tiny, always serve via raw.github (origin = no lag).
     cover_url: str | None = None
     cover_repo_path: str | None = None
     if cover_image_path and os.path.exists(cover_image_path):
         try:
-            cover_url, cover_repo_path = await asyncio.to_thread(
+            jsd_url, cover_repo_path = await asyncio.to_thread(
                 github_uploader.upload, cover_image_path
             )
+            cover_url = _jsdelivr_to_raw(jsd_url)
             logger.info("Public cover URL: %s", cover_url)
         except Exception as exc:
             logger.warning("Cover upload failed (continuing without cover): %s", exc)
@@ -257,13 +320,14 @@ async def publish_reel(
     uploaded_cover_paths: list[str] = [cover_repo_path] if cover_repo_path else []
     try:
         for attempt in range(1, 4):
-            async with _aiohttp_session() as session:
+            async with _make_session() as session:
                 try:
-                    logger.info("Creating Instagram container (attempt %d/3)...", attempt)
+                    logger.info("Creating Instagram container (attempt %d/3)…", attempt)
                     container_id = await _ig_create_container(
                         session, video_url, caption, uid, tok, cover_url
                     )
-                    logger.info("Container ID: %s — waiting for processing...", container_id)
+                    logger.info("Container ID: %s — waiting for processing…",
+                                container_id)
 
                     await _ig_wait_for_container(session, container_id, tok)
 
@@ -283,20 +347,13 @@ async def publish_reel(
                         "не удалось скачать", "payload too large",
                         "http error code 4", "http error code 5",
                         "timeout", "connection",
+                        "fwdproxy", "fetch headers",
                     )
                     if any(m in msg for m in transient_markers):
-                        logger.warning("Instagram transient error (attempt %d/3): %s", attempt, exc)
+                        logger.warning("Instagram transient error (attempt %d/3): %s",
+                                       attempt, exc)
                         if attempt < 3:
-                            try:
-                                logger.info("Re-uploading to fresh URL...")
-                                video_url, new_video_path = await asyncio.to_thread(
-                                    github_uploader.upload, upload_video_path
-                                )
-                                uploaded_video_paths.append(new_video_path)
-                                logger.info("New video URL: %s", video_url)
-                            except Exception as up_exc:
-                                logger.warning("Re-upload failed: %s", up_exc)
-                            await asyncio.sleep(15 * attempt)
+                            await asyncio.sleep(10 * attempt)
                         continue
                     raise
 
