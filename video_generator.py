@@ -199,8 +199,10 @@ MONITOR_CAMERA_LOOK = os.getenv("MONITOR_CAMERA_LOOK", "1") == "1"
 
 TTS_VOICE    = "en-US-AndrewMultilingualNeural"  # English — warm, authentic
 TTS_VOICE_RU = "ru-RU-DmitryNeural"              # Russian — Microsoft Neural TTS
-TTS_RATE  = "+15%"   # 15% faster → targets 18–25s video length for max retention (data: ≤22s = 84.8% avg)
-TTS_PITCH = "-3Hz"   # Slightly lower pitch → warmer tone
+TTS_RATE     = "+15%"   # EN: 15% faster → targets 18–25s video length for max retention
+TTS_RATE_RU  = "+25%"   # RU: Dmitry reads slower & inserts longer inter-sentence pauses;
+                        # bump rate so audio length (and per-frame seg_dur) matches EN.
+TTS_PITCH    = "-3Hz"   # Slightly lower pitch → warmer tone
 
 
 # yt-dlp cookie arguments — passes Chrome cookies to bypass YouTube bot check
@@ -1118,11 +1120,15 @@ async def _synthesize_voice(
     if not tts_text or not tts_text.strip():
         raise RuntimeError("TTS text is empty — cannot synthesize voice")
 
+    # Russian voice (Dmitry) is naturally slower & has longer inter-sentence
+    # pauses than the EN voice — use a higher rate to keep audio length comparable.
+    tts_rate = TTS_RATE_RU if whisper_lang == "ru" else TTS_RATE
+
     async def _run_edge_tts(tts_input: str) -> None:
         proc = await asyncio.create_subprocess_exec(
             "edge-tts",
             "--voice", chosen_voice,
-            f"--rate={TTS_RATE}",
+            f"--rate={tts_rate}",
             f"--pitch={TTS_PITCH}",
             "--text",  tts_input,
             "--write-media",     audio_path,
@@ -1335,11 +1341,19 @@ def _cut_clips_from_video(
     clip_name_prefix: str = "clip",
 ) -> list[str]:
     """
-    Cut n_clips random 3–4 second segments from video_path, skipping the opening
+    Cut n_clips random 5–7 second segments from video_path, skipping the opening
     and the final _OUTRO_SKIP seconds (typical outro/end-card territory).
     The available range is divided into n_clips equal buckets; a random start
     position is chosen within each bucket to ensure even coverage with variety.
     Each clip is stream-copied (no re-encode) for speed.
+
+    Why 5–7 s (not 3–4 s):
+      `_make_video_segment` uses `-stream_loop -1 -t seg_dur`. If seg_dur is
+      bigger than the source clip, ffmpeg loops the clip *inside* the segment
+      — the loop boundary looks like a visible freeze/jump on screen.
+      RU TTS is longer than EN, so seg_dur (≈ audio_dur / n_media) on RU can
+      exceed 3–4 s. Cutting clips with headroom means `-t` just trims and we
+      never hit a loop seam.
     """
     clips_dir = os.path.join(workdir, "yt_clips")
     os.makedirs(clips_dir, exist_ok=True)
@@ -1347,7 +1361,7 @@ def _cut_clips_from_video(
     duration = _get_audio_duration(video_path)  # ffprobe works on video too
     usable_end = max(0.0, duration - _OUTRO_SKIP)
     available = max(0.0, usable_end - intro_skip)
-    if available < 4.0:
+    if available < 7.0:
         # Video too short after intro skip — start from the very beginning
         intro_skip = 0.0
         available = max(0.0, usable_end)
@@ -1360,7 +1374,7 @@ def _cut_clips_from_video(
     bucket_size = available / n_clips
 
     for i in range(n_clips):
-        clip_dur = random.uniform(3.0, 4.0)
+        clip_dur = random.uniform(5.0, 7.0)
         bucket_start = intro_skip + i * bucket_size
         bucket_end   = bucket_start + max(0.0, bucket_size - clip_dur)
         start        = random.uniform(bucket_start, max(bucket_start, bucket_end))
@@ -1381,7 +1395,7 @@ def _cut_clips_from_video(
             result.append(out_path)
 
     logger.info(
-        "Cut %d random 3–4 s clips from %s (intro_skip=%.1fs)",
+        "Cut %d random 5–7 s clips from %s (intro_skip=%.1fs)",
         len(result), os.path.basename(video_path), intro_skip,
     )
     return result
