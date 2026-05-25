@@ -483,6 +483,82 @@ async def generate_thumbnail_hook(article_title: str, lang: str = "ru") -> str:
     return article_title
 
 
+async def generate_carousel_bullets(
+    article_title: str,
+    post_text: str,
+    *,
+    lang: str = "en",
+    max_bullets: int = 6,
+) -> list[str]:
+    """
+    Generate short factual bullets for an Instagram carousel.
+
+    Each bullet is one self-contained sentence, ≤90 chars, no leading "•"/"-",
+    no hashtags, no emoji. Returns up to *max_bullets* entries.
+    """
+    plain = re.sub(r'<[^>]+>', ' ', post_text or "")
+    plain = re.sub(r'#\w+', '', plain)
+    plain = re.sub(r'https?://\S+', '', plain)
+    plain = re.sub(r'\s+', ' ', plain).strip()
+
+    if lang == "en":
+        system_content = (
+            "You write SHORT factual bullet points for an Instagram carousel about gaming news. "
+            "You write ONLY in ENGLISH. Never use Cyrillic. Latin letters only."
+        )
+        lang_hint = "English only. Latin letters only. No Cyrillic."
+    else:
+        system_content = (
+            "Ты пишешь КОРОТКИЕ фактические тезисы для карусели в Instagram про игровые новости. "
+            "Пиши ТОЛЬКО на русском кириллицей."
+        )
+        lang_hint = "Только на русском, кириллицей."
+
+    user_message = (
+        f"Headline: {article_title}\n\n"
+        f"Article: {plain[:2500]}\n\n"
+        f"Write up to {max_bullets} short bullet points summarising the key facts.\n"
+        "Rules:\n"
+        f"- {lang_hint}\n"
+        "- One sentence per bullet, max 90 characters each.\n"
+        "- No emoji, no hashtags, no quotation marks, no markdown.\n"
+        "- Do NOT prefix lines with '-', '*', '•' or numbers.\n"
+        "- Each bullet on its own line.\n"
+        "- Cover different facts (release date, platforms, gameplay, reactions, numbers).\n"
+        "- Return ONLY the bullet lines, nothing else."
+    )
+    try:
+        raw = await _call_ollama_chat(
+            [{"role": "system", "content": system_content},
+             {"role": "user", "content": user_message}],
+            num_predict=400, num_ctx=4096, timeout=90,
+        )
+    except Exception as exc:
+        logger.warning("generate_carousel_bullets failed: %s", exc)
+        return []
+
+    bullets: list[str] = []
+    for line in raw.splitlines():
+        s = line.strip()
+        # strip common list markers
+        s = re.sub(r'^[\-\*•\u2022\u25CB\u25CF\d\.\)\s]+', '', s).strip()
+        s = s.strip('"\'')
+        if not s:
+            continue
+        if lang == "en" and re.search(r'[а-яёА-ЯЁ]', s):
+            continue
+        if lang == "ru" and not re.search(r'[а-яёА-ЯЁ]', s):
+            continue
+        # Soft length cap
+        if len(s) > 110:
+            s = s[:107].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+        bullets.append(s)
+        if len(bullets) >= max_bullets:
+            break
+    logger.info("carousel bullets [%s]: %d generated", lang, len(bullets))
+    return bullets
+
+
 async def generate_video_script(post_text: str, article_title: str, lang: str = "en") -> str:
     """
     Generate a spoken narration script for TikTok/Reels/Shorts.

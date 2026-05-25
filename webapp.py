@@ -21,6 +21,8 @@ import ai_adapter
 import video_generator
 import thumbnail_generator
 import instagram_publisher
+import instagram_carousel_publisher
+import carousel_builder
 import youtube_publisher
 from config import (
     TELEGRAM_BOT_TOKEN,
@@ -333,6 +335,11 @@ def api_posts():
         ru_vid = d.get("generated_video_path_ru")
         d["en_video_exists"] = bool(en_vid and os.path.exists(en_vid))
         d["ru_video_exists"] = bool(ru_vid and os.path.exists(ru_vid))
+        # Carousel slides (per language)
+        car_en = json.loads(d.get("carousel_paths_en") or "[]")
+        car_ru = json.loads(d.get("carousel_paths_ru") or "[]")
+        d["carousel_paths_en"] = [p for p in car_en if os.path.exists(p)]
+        d["carousel_paths_ru"] = [p for p in car_ru if os.path.exists(p)]
         d["published_platforms"] = json.loads(d.get("published_platforms") or "[]")
         result.append(d)
 
@@ -358,6 +365,8 @@ def api_post(post_id: int):
     ru_vid = post.get("generated_video_path_ru")
     post["en_video_exists"] = bool(en_vid and os.path.exists(en_vid))
     post["ru_video_exists"] = bool(ru_vid and os.path.exists(ru_vid))
+    post["carousel_paths_en"] = [p for p in post.get("carousel_paths_en", []) if os.path.exists(p)]
+    post["carousel_paths_ru"] = [p for p in post.get("carousel_paths_ru", []) if os.path.exists(p)]
     return jsonify(post)
 
 
@@ -521,7 +530,10 @@ def api_mark_done(post_id: int):
     post = db.get_scheduled_post(post_id)
     if not post:
         return jsonify({"error": "Post not found"}), 404
-    all_platforms = json.dumps(["instagram", "instagram-ru", "youtube", "youtube-ru"])
+    all_platforms = json.dumps([
+        "instagram", "instagram-ru", "youtube", "youtube-ru",
+        "instagram-carousel", "instagram-carousel-ru",
+    ])
     with db.get_conn() as conn:
         conn.execute(
             "UPDATE scheduled_posts SET published_platforms = ? WHERE id = ?",
@@ -767,6 +779,91 @@ def api_video_stream(post_id: int):
     )
 
 
+# ---------------------------------------------------------------------------
+# Routes: Instagram CAROUSEL generation (background thread + SSE progress)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/posts/<int:post_id>/generate-carousel", methods=["POST"])
+def api_generate_carousel(post_id: int):
+    """
+    Build slide images for an Instagram carousel.
+
+    Body: {"lang": "en" | "ru" | "both"}.
+    Runs in a background thread and reuses the existing SSE log channel
+    (`/api/posts/<id>/task-status` and `/api/posts/<id>/video-stream`) so
+    progress messages appear next to the rest of the post's task log.
+    """
+    body = request.get_json(silent=True) or {}
+    lang = body.get("lang", "both")
+    if lang not in ("en", "ru", "both"):
+        return jsonify({"error": "lang must be 'en', 'ru', or 'both'"}), 400
+
+    post = db.get_scheduled_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    with _tasks_lock:
+        if post_id in _task_queues:
+            active_threads = {t.name for t in threading.enumerate()}
+            if (f"vidgen-{post_id}" not in active_threads
+                    and f"carousel-{post_id}" not in active_threads):
+                _task_queues.pop(post_id, None)
+            else:
+                return jsonify({"error": "A task is already in progress for this post"}), 409
+        q: queue.Queue = queue.Queue()
+        _task_queues[post_id] = q
+        _task_logs[post_id] = []
+
+    def _run():
+        try:
+            _run_async(_generate_carousel(post_id, lang))
+        except Exception as exc:
+            _push(post_id, f"Fatal error: {exc}", "error")
+        finally:
+            with _tasks_lock:
+                q_ref = _task_queues.get(post_id)
+            if q_ref is not None:
+                q_ref.put(None)
+
+    threading.Thread(target=_run, daemon=True, name=f"carousel-{post_id}").start()
+    return jsonify({"success": True, "message": "Carousel generation started"})
+
+
+async def _generate_carousel(post_id: int, lang: str) -> None:
+    """Build carousel slide images for a post (lang: 'en' | 'ru' | 'both')."""
+    post = db.get_scheduled_post(post_id)
+    if not post:
+        _push(post_id, "Post not found", "error")
+        return
+
+    def progress(msg: str, type_: str = "progress") -> None:
+        _push(post_id, msg, type_)
+        logger.info("[carousel #%d] %s", post_id, msg)
+
+    targets = ["en", "ru"] if lang == "both" else [lang]
+    built: dict[str, list[str]] = {}
+    try:
+        for tgt in targets:
+            progress(f"🇬🇧 Building EN carousel…" if tgt == "en"
+                     else "🇷🇺 Building RU carousel…")
+            slides = await carousel_builder.build_slides(post, tgt, progress=progress)
+            if len(slides) < 2:
+                progress(f"❌ {tgt.upper()}: only {len(slides)} slides — need ≥ 2", "error")
+                continue
+            db.set_carousel_paths(post_id, tgt, slides)
+            built[tgt] = slides
+            progress(f"✅ {tgt.upper()}: {len(slides)} slides ready")
+
+        progress("Done!", "done")
+        _push(post_id, json.dumps({
+            "carousel_en": built.get("en", []),
+            "carousel_ru": built.get("ru", []),
+        }), "carousel_ready")
+    except Exception as exc:
+        progress(f"Error: {exc}", "error")
+        raise
+
+
 async def _generate_video(post_id: int, lang: str, include_images: bool = False, use_monitor_frame: bool = True) -> None:
     """Core video generation logic (mirrors handle_create_video in bot.py)."""
     post = db.get_scheduled_post(post_id)
@@ -907,7 +1004,11 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
 
 @app.route("/api/posts/<int:post_id>/publish/<platform>", methods=["POST"])
 def api_publish(post_id: int, platform: str):
-    valid = {"instagram", "instagram-ru", "youtube", "youtube-ru", "all", "all-ru", "all-combined"}
+    valid = {
+        "instagram", "instagram-ru", "youtube", "youtube-ru",
+        "instagram-carousel", "instagram-carousel-ru",
+        "all", "all-ru", "all-combined",
+    }
     if platform not in valid:
         return jsonify({"error": f"Unknown platform '{platform}'"}), 400
     post = db.get_scheduled_post(post_id)
@@ -931,6 +1032,8 @@ def api_publish(post_id: int, platform: str):
             _PLATFORM_KEYS = {
                 "instagram": "instagram", "instagram-ru": "instagram-ru",
                 "youtube": "youtube", "youtube-ru": "youtube-ru",
+                "instagram-carousel": "instagram-carousel",
+                "instagram-carousel-ru": "instagram-carousel-ru",
             }
             if platform in _PLATFORM_KEYS:
                 succeeded = [platform]
@@ -940,6 +1043,8 @@ def api_publish(post_id: int, platform: str):
                 label_map = {
                     "Instagram EN": "instagram", "Instagram RU": "instagram-ru",
                     "YouTube EN":   "youtube",   "YouTube RU":   "youtube-ru",
+                    "IG Carousel EN": "instagram-carousel",
+                    "IG Carousel RU": "instagram-carousel-ru",
                 }
                 for part in result.split(" | "):
                     if part.startswith("✅"):
@@ -1080,6 +1185,29 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
             cover_image_path=thumb,
         )
         return f"Instagram RU — Media ID: {media_id}"
+
+    elif platform == "instagram-carousel":
+        slides = db.get_carousel_paths(post_id, "en")
+        slides = [p for p in slides if os.path.exists(p)]
+        if len(slides) < 2:
+            raise ValueError("EN carousel not ready — generate carousel first (need ≥2 slides).")
+        progress(f"Uploading {len(slides)}-slide carousel to Instagram EN…")
+        media_id = await instagram_carousel_publisher.publish_carousel(
+            image_paths=slides, caption=_caption_en(),
+        )
+        return f"IG Carousel EN — Media ID: {media_id}"
+
+    elif platform == "instagram-carousel-ru":
+        slides = db.get_carousel_paths(post_id, "ru")
+        slides = [p for p in slides if os.path.exists(p)]
+        if len(slides) < 2:
+            raise ValueError("RU carousel not ready — generate carousel first (need ≥2 slides).")
+        progress(f"Uploading {len(slides)}-slide carousel to Instagram RU…")
+        media_id = await instagram_carousel_publisher.publish_carousel(
+            image_paths=slides, caption=_caption_ru(),
+            user_id=INSTAGRAM_USER_ID_RU, access_token=INSTAGRAM_ACCESS_TOKEN_RU,
+        )
+        return f"IG Carousel RU — Media ID: {media_id}"
 
     elif platform == "youtube":
         if not en_path or not os.path.exists(en_path):

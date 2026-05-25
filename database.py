@@ -40,6 +40,8 @@ def init_db() -> None:
             "ALTER TABLE scheduled_posts ADD COLUMN yt_skip_count INTEGER DEFAULT 0",
             "ALTER TABLE scheduled_posts ADD COLUMN ru_post_text TEXT DEFAULT NULL",
             "ALTER TABLE scheduled_posts ADD COLUMN generated_video_path_ru TEXT DEFAULT NULL",
+            "ALTER TABLE scheduled_posts ADD COLUMN carousel_paths_en TEXT DEFAULT '[]'",
+            "ALTER TABLE scheduled_posts ADD COLUMN carousel_paths_ru TEXT DEFAULT '[]'",
         ]
         for _sql in _migrations:
             try:
@@ -103,6 +105,8 @@ def get_scheduled_post(post_id: int) -> Optional[dict]:
         d = dict(row)
         d["image_paths"] = json.loads(d["image_paths"])
         d["video_paths"] = json.loads(d.get("video_paths") or "[]")
+        d["carousel_paths_en"] = json.loads(d.get("carousel_paths_en") or "[]")
+        d["carousel_paths_ru"] = json.loads(d.get("carousel_paths_ru") or "[]")
         return d
 
 
@@ -155,6 +159,33 @@ def get_generated_video_path_ru(post_id: int) -> str | None:
     return row[0] if row else None
 
 
+# --- Instagram carousel slides ---
+
+def set_carousel_paths(post_id: int, lang: str, paths: list[str]) -> None:
+    """Store ordered list of slide image paths for a post (lang='en'|'ru')."""
+    col = "carousel_paths_en" if lang == "en" else "carousel_paths_ru"
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE scheduled_posts SET {col} = ? WHERE id = ?",
+            (json.dumps(paths or []), post_id),
+        )
+
+
+def get_carousel_paths(post_id: int, lang: str) -> list[str]:
+    col = "carousel_paths_en" if lang == "en" else "carousel_paths_ru"
+    with get_conn() as conn:
+        row = conn.execute(
+            f"SELECT {col} FROM scheduled_posts WHERE id = ?",
+            (post_id,),
+        ).fetchone()
+    if not row or not row[0]:
+        return []
+    try:
+        return json.loads(row[0])
+    except Exception:
+        return []
+
+
 def increment_yt_skip(post_id: int, added: int) -> int:
     """Bump the YouTube result skip counter by *added* and return new value."""
     with get_conn() as conn:
@@ -182,6 +213,8 @@ def _row_to_post(row) -> dict:
     d = dict(row)
     d["image_paths"] = json.loads(d.get("image_paths") or "[]")
     d["video_paths"] = json.loads(d.get("video_paths") or "[]")
+    d["carousel_paths_en"] = json.loads(d.get("carousel_paths_en") or "[]")
+    d["carousel_paths_ru"] = json.loads(d.get("carousel_paths_ru") or "[]")
     return d
 
 
