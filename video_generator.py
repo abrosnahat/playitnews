@@ -18,6 +18,8 @@ import random
 import re
 import shutil
 import subprocess
+import sys
+import sysconfig
 import tempfile
 import uuid
 from typing import Optional
@@ -27,6 +29,31 @@ import ssl
 import aiohttp
 import certifi
 from dotenv import load_dotenv
+
+# ---------------------------------------------------------------------------
+# Windows: ensure ctranslate2 (used by faster-whisper) can find the CUDA
+# runtime DLLs (cuBLAS, cuDNN, NVRTC) shipped via the nvidia-* pip wheels.
+# Without this, faster-whisper on CUDA fails at first transcribe() with
+# "Library cublas64_12.dll is not found or cannot be loaded".
+# Harmless if the packages aren't installed.
+# ---------------------------------------------------------------------------
+if os.name == "nt":
+    _site_packages = sysconfig.get_paths().get("purelib", "")
+    _cuda_dll_dirs: list[str] = []
+    for _sub in ("nvidia/cublas/bin", "nvidia/cudnn/bin", "nvidia/cuda_nvrtc/bin"):
+        _p = os.path.normpath(os.path.join(_site_packages, *_sub.split("/")))
+        if os.path.isdir(_p):
+            _cuda_dll_dirs.append(_p)
+            if hasattr(os, "add_dll_directory"):
+                try:
+                    os.add_dll_directory(_p)
+                except OSError:
+                    pass
+    if _cuda_dll_dirs:
+        # Also prepend to PATH — ctranslate2's internal LoadLibrary calls in
+        # some build configs ignore the per-thread DLL search dirs and only
+        # consult PATH.
+        os.environ["PATH"] = os.pathsep.join(_cuda_dll_dirs) + os.pathsep + os.environ.get("PATH", "")
 
 # Load .env BEFORE the module-level os.getenv() calls below.
 # Required because this module is imported in webapp.py before `config`
@@ -263,6 +290,148 @@ async def _run_async(args: list[str], cwd: str | None = None, timeout: int = 160
 
 
 # ---------------------------------------------------------------------------
+# Hardware H.264 encoder auto-detection
+#
+# Falls back to libx264. On Windows 11 with a modern GPU this typically gives
+# a 4-10× speed-up over CPU encoding for our slideshow / composite passes.
+# Override with VIDEO_ENCODER env var:
+#   VIDEO_ENCODER=libx264|h264_nvenc|h264_qsv|h264_amf
+# ---------------------------------------------------------------------------
+
+def _probe_encoder(name: str) -> bool:
+    """Try a 1-frame encode to confirm the encoder actually works on this host."""
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                # 320×240 — NVENC requires at least 145×49, AMF/QSV have similar
+                # minimums, so 64×64 is too small for a generic probe.
+                "-f", "lavfi", "-i", "color=size=320x240:rate=1:duration=1",
+                "-c:v", name, "-frames:v", "1", "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _detect_h264_encoder() -> str:
+    override = (os.getenv("VIDEO_ENCODER") or "").strip()
+    if override:
+        return override
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "libx264"
+    # NVIDIA → Intel → AMD priority; NVENC is usually fastest and highest quality.
+    for name in ("h264_nvenc", "h264_qsv", "h264_amf"):
+        if name in out and _probe_encoder(name):
+            return name
+    return "libx264"
+
+
+_SELECTED_ENCODER = _detect_h264_encoder()
+logger.info("Video encoder: %s", _SELECTED_ENCODER)
+
+
+def _video_encoder_args(crf: int = 23, preset: str = "fast") -> list[str]:
+    """Return ffmpeg args for the H.264 video encoder.
+
+    Maps libx264's `-crf` to the equivalent quality knob on each HW encoder.
+    """
+    enc = _SELECTED_ENCODER
+    if enc == "h264_nvenc":
+        # p1=fastest..p7=slowest. p4 ≈ libx264 'medium'; use VBR HQ + CQ.
+        return [
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-tune", "hq",
+            "-rc", "vbr",
+            "-cq", str(crf),
+            "-b:v", "0",
+        ]
+    if enc == "h264_qsv":
+        return [
+            "-c:v", "h264_qsv",
+            "-preset", "faster",
+            "-global_quality", str(crf),
+            "-look_ahead", "0",
+        ]
+    if enc == "h264_amf":
+        return [
+            "-c:v", "h264_amf",
+            "-quality", "speed",
+            "-rc", "cqp",
+            "-qp_i", str(crf),
+            "-qp_p", str(crf),
+        ]
+    # CPU fallback. -threads 0 = auto.
+    return ["-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-threads", "0"]
+
+
+# ---------------------------------------------------------------------------
+# faster-whisper device selection + model cache
+#
+# RTX-class NVIDIA GPUs give a 5-10× speed-up over CPU for the 'small' model.
+# Override device with WHISPER_DEVICE env var:
+#   WHISPER_DEVICE=cuda|cpu|auto
+# Override compute type with WHISPER_COMPUTE_TYPE (e.g. float16/int8_float16/int8).
+# ---------------------------------------------------------------------------
+
+_WHISPER_DEVICE: str | None = None
+_WHISPER_COMPUTE_TYPE: str | None = None
+_WHISPER_MODELS: dict[str, object] = {}
+
+
+def _detect_whisper_device() -> tuple[str, str]:
+    """Return (device, compute_type). Probes CUDA via a tiny WhisperModel load."""
+    override = (os.getenv("WHISPER_DEVICE") or "").strip().lower()
+    ct_override = (os.getenv("WHISPER_COMPUTE_TYPE") or "").strip()
+    if override and override != "auto":
+        return override, (ct_override or ("float16" if override == "cuda" else "int8"))
+    # Probe CUDA by trying to load the smallest model on cuda; cheap (~1-2 s).
+    try:
+        from faster_whisper import WhisperModel
+        _probe = WhisperModel("tiny", device="cuda", compute_type="float16")
+        del _probe
+        return "cuda", (ct_override or "float16")
+    except Exception as exc:
+        logger.info("CUDA not available for faster-whisper (%s) — falling back to CPU.", exc.__class__.__name__)
+        return "cpu", (ct_override or "int8")
+
+
+def _get_whisper_model(model_name: str):
+    """Return a cached WhisperModel for the given size."""
+    global _WHISPER_DEVICE, _WHISPER_COMPUTE_TYPE
+    if _WHISPER_DEVICE is None:
+        _WHISPER_DEVICE, _WHISPER_COMPUTE_TYPE = _detect_whisper_device()
+        logger.info("Whisper device: %s (%s)", _WHISPER_DEVICE, _WHISPER_COMPUTE_TYPE)
+    cached = _WHISPER_MODELS.get(model_name)
+    if cached is not None:
+        return cached
+    try:
+        from faster_whisper import WhisperModel
+        model = WhisperModel(model_name, device=_WHISPER_DEVICE, compute_type=_WHISPER_COMPUTE_TYPE)
+    except Exception as exc:
+        # Last-ditch fallback to CPU if a previously-OK CUDA setup just broke
+        # (driver reload, OOM, etc.).
+        logger.warning("Whisper load %s on %s failed (%s); retrying on CPU.", model_name, _WHISPER_DEVICE, exc)
+        try:
+            from faster_whisper import WhisperModel
+            _WHISPER_DEVICE, _WHISPER_COMPUTE_TYPE = "cpu", "int8"
+            model = WhisperModel(model_name, device="cpu", compute_type="int8")
+        except Exception as exc2:
+            logger.error("Whisper load %s on CPU also failed: %s", model_name, exc2)
+            return None
+    _WHISPER_MODELS[model_name] = model
+    return model
+
+
+# ---------------------------------------------------------------------------
 # Audio helpers
 # ---------------------------------------------------------------------------
 
@@ -477,9 +646,7 @@ async def _burn_subtitles_pillow(
             "-map", "0:v",
             "-map", "1:a",
             "-vf", f"scale={VID_W}:{VID_H},setsar=1",
-            "-c:v", "libx264",
-            "-crf", "20",
-            "-preset", "fast",
+            *_video_encoder_args(crf=20),
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-ar", "44100",
@@ -770,7 +937,7 @@ def _run_whisper_sync(
     Returns [] if Whisper is unavailable or produces no word segments.
     """
     try:
-        import whisper as _whisper  # openai-whisper
+        from faster_whisper import WhisperModel
     except ImportError:
         return []
 
@@ -781,29 +948,32 @@ def _run_whisper_sync(
         return []
 
     model_name = "small"
+    model = _get_whisper_model(model_name)
+    if model is None:
+        return []
 
-    import ssl, certifi
     import warnings
-    _orig_ctx = ssl._create_default_https_context
-    ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=certifi.where())
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            model = _whisper.load_model(model_name)
-            result = model.transcribe(
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            segments, _info = model.transcribe(
                 audio_path,
-                word_timestamps=True,
                 language=language,
+                word_timestamps=True,
                 condition_on_previous_text=False,
+                vad_filter=False,
             )
-    finally:
-        ssl._create_default_https_context = _orig_ctx
+            # faster-whisper returns a generator — materialise it.
+            seg_list = list(segments)
+        except Exception as exc:
+            logger.warning("Whisper transcribe failed: %s", exc)
+            return []
 
     # Collect all Whisper word timings globally
     wh_timings: list[tuple[float, float]] = [
-        (float(w["start"]), float(w["end"]))
-        for seg in result.get("segments", [])
-        for w in seg.get("words", [])
+        (float(w.start), float(w.end))
+        for seg in seg_list
+        for w in (seg.words or [])
     ]
 
     if not wh_timings:
@@ -1488,9 +1658,7 @@ def _make_image_segment(
             "-vf", vf,
             "-r", str(fps),
             "-frames:v", str(n_frames),
-            "-c:v", "libx264",
-            "-crf", "23",
-            "-preset", "fast",
+            *_video_encoder_args(crf=23),
             "-pix_fmt", "yuv420p",
             "-an",
             out_path,
@@ -1524,9 +1692,7 @@ def _make_video_segment(
                 f"setsar=1,"
                 f"fps={VID_FPS}"
             ),
-            "-c:v", "libx264",
-            "-crf", "23",
-            "-preset", "fast",
+            *_video_encoder_args(crf=23),
             "-pix_fmt", "yuv420p",
             "-an",
             out_path,
@@ -1723,9 +1889,7 @@ async def _compose_monitor_scene_photo(
             "-map", "0:a?",
             "-r", str(VID_FPS),
             "-vsync", "cfr",
-            "-c:v", "libx264",
-            "-crf", "20",
-            "-preset", "fast",
+            *_video_encoder_args(crf=20),
             "-pix_fmt", "yuv420p",
             "-c:a", "copy",
             "-t", f"{audio_dur:.3f}",
@@ -1815,9 +1979,7 @@ async def _compose_monitor_scene(
             "-filter_complex", filter_complex,
             "-map", "[final]",
             "-map", "0:a?",
-            "-c:v", "libx264",
-            "-crf", "20",
-            "-preset", "fast",
+            *_video_encoder_args(crf=20),
             "-pix_fmt", "yuv420p",
             "-c:a", "copy",
             "-t", f"{audio_dur:.3f}",
@@ -1925,7 +2087,7 @@ async def _assemble_video(
     ok = await _run_async(
         ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_txt,
          "-vf", f"fps={VID_FPS},setsar=1,format=yuv420p",
-         "-c:v", "libx264", "-crf", "20", "-preset", "fast",
+         *_video_encoder_args(crf=20),
          "-pix_fmt", "yuv420p",
          "-video_track_timescale", "15360",
          "-an",
