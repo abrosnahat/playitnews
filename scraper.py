@@ -332,12 +332,14 @@ async def _download_youtube_video(video_id: str) -> Optional[str]:
         return output_path  # already downloaded
     url = f"https://www.youtube.com/watch?v={video_id}"
     env = os.environ.copy()
-    extra_paths = [
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        os.path.expanduser("~/.nvm/versions/node/v20.19.5/bin"),
-    ]
-    env["PATH"] = os.pathsep.join(extra_paths) + os.pathsep + env.get("PATH", "")
+    # On POSIX hosts add common tool dirs; on Windows we rely on PATH set by installers.
+    if os.name != "nt":
+        extra_paths = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            os.path.expanduser("~/.nvm/versions/node/v20.19.5/bin"),
+        ]
+        env["PATH"] = os.pathsep.join(extra_paths) + os.pathsep + env.get("PATH", "")
     try:
         proc = await asyncio.create_subprocess_exec(
             "yt-dlp",
@@ -386,12 +388,13 @@ async def _download_vk_video(oid: str, vid: str) -> Optional[str]:
         return output_path  # already downloaded
     url = f"https://vk.com/video{oid}_{vid}"
     env = os.environ.copy()
-    extra_paths = [
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        os.path.expanduser("~/.nvm/versions/node/v20.19.5/bin"),
-    ]
-    env["PATH"] = os.pathsep.join(extra_paths) + os.pathsep + env.get("PATH", "")
+    if os.name != "nt":
+        extra_paths = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            os.path.expanduser("~/.nvm/versions/node/v20.19.5/bin"),
+        ]
+        env["PATH"] = os.pathsep.join(extra_paths) + os.pathsep + env.get("PATH", "")
     try:
         proc = await asyncio.create_subprocess_exec(
             "yt-dlp",
@@ -430,6 +433,28 @@ async def _download_vk_video(oid: str, vid: str) -> Optional[str]:
         return None
 
 
+async def _safe_remove(path: str, attempts: int = 6, delay: float = 0.5) -> bool:
+    """Best-effort file removal that tolerates Windows file locks.
+
+    On Windows ffmpeg/yt-dlp may still hold the file handle for a moment after
+    the subprocess exits, so a naive os.remove() raises PermissionError
+    (WinError 32). Retry a few times, then log a warning and give up.
+    """
+    for i in range(attempts):
+        if not os.path.exists(path):
+            return True
+        try:
+            os.remove(path)
+            return True
+        except PermissionError:
+            await asyncio.sleep(delay * (i + 1))
+        except OSError as exc:
+            logger.debug("Не удалось удалить %s: %s", path, exc)
+            return False
+    logger.warning("Файл %s заблокирован, удаление отложено", path)
+    return False
+
+
 async def _download_hls_video(video_id: str, m3u8_url: str) -> Optional[str]:
     """Download HLS stream to mp4 using ffmpeg. Returns local path or None."""
     output_path = os.path.join(VIDEOS_DIR, f"{video_id}.mp4")
@@ -445,7 +470,7 @@ async def _download_hls_video(video_id: str, m3u8_url: str) -> Optional[str]:
         if stdout.strip() and not stderr.strip():
             return output_path  # valid cached file
         logger.warning("Кэшированный файл %s повреждён, перескачиваем", output_path)
-        os.remove(output_path)
+        await _safe_remove(output_path)
     async def _run_ffmpeg(*args: str, timeout: int) -> bool:
         nonlocal proc
         proc = await asyncio.create_subprocess_exec(
@@ -475,8 +500,7 @@ async def _download_hls_video(video_id: str, m3u8_url: str) -> Optional[str]:
         )
         if not ok:
             # Corrupt or incompatible codec — re-encode
-            if os.path.exists(output_path):
-                os.remove(output_path)
+            await _safe_remove(output_path)
             logger.info("Копирование не удалось, перекодируем %s", video_id)
             ok = await _run_ffmpeg(
                 "-i", m3u8_url,
@@ -490,8 +514,7 @@ async def _download_hls_video(video_id: str, m3u8_url: str) -> Optional[str]:
         logger.warning("Таймаут/ошибка при скачивании видео %s", video_id)
     except Exception as exc:
         logger.warning("Ошибка скачивания видео %s: %s", video_id, exc)
-    if os.path.exists(output_path):
-        os.remove(output_path)
+    await _safe_remove(output_path)
     return None
 
 

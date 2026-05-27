@@ -13,11 +13,19 @@ logger = logging.getLogger(__name__)
 # Thumbnail size: 1080×1920 (9:16) — used for Instagram Reels
 IG_W, IG_H = 1080, 1920
 
+_WIN_FONTS_DIR = os.path.join(os.environ.get("WINDIR", r"C:\\Windows"), "Fonts")
 _FONT_CANDIDATES = [
+    # Windows
+    os.path.join(_WIN_FONTS_DIR, "impact.ttf"),
+    os.path.join(_WIN_FONTS_DIR, "arialbd.ttf"),
+    os.path.join(_WIN_FONTS_DIR, "arial.ttf"),
+    os.path.join(_WIN_FONTS_DIR, "seguiemj.ttf"),
+    # macOS
     "/System/Library/Fonts/Supplemental/Impact.ttf",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     "/System/Library/Fonts/Supplemental/Arial.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
+    # Linux
     "/usr/share/fonts/truetype/msttcorefonts/Impact.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 ]
@@ -586,7 +594,20 @@ if __name__ == "__main__":
         print("  python thumbnail_generator.py <image_path> \"Title text\"")
         sys.exit(1)
 
-    import subprocess
+    import subprocess, tempfile
+
+    def _open_preview(path: str) -> None:
+        try:
+            if os.name == "nt":
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", path])
+            else:
+                subprocess.run(["xdg-open", path])
+        except Exception:
+            pass
+
+    _tmp = tempfile.gettempdir()
 
     # Generate AI hooks
     sys.path.insert(0, os.path.dirname(__file__))
@@ -595,10 +616,10 @@ if __name__ == "__main__":
     print(f"RU hook: {hook_ru}")
 
     # --- RU thumbnail (IG 1080×1920) ---
-    out_ru_ig = "/tmp/thumb_test_ru_ig.jpg"
+    out_ru_ig = os.path.join(_tmp, "thumb_test_ru_ig.jpg")
     if generate_instagram_thumbnail(source, hook_ru, out_ru_ig):
         print(f"RU Instagram thumbnail (1080×1920): {out_ru_ig}")
-        subprocess.run(["open", out_ru_ig])
+        _open_preview(out_ru_ig)
     else:
         print("RU Instagram thumbnail FAILED")
 
@@ -606,9 +627,9 @@ if __name__ == "__main__":
     if title_en:
         hook_en = asyncio.run(_ai.generate_thumbnail_hook(title_en, lang="en"))
         print(f"EN hook: {hook_en}")
-        out_en_ig = "/tmp/thumb_test_en_ig.jpg"
+        out_en_ig = os.path.join(_tmp, "thumb_test_en_ig.jpg")
         if generate_instagram_thumbnail(source, hook_en, out_en_ig):
             print(f"EN Instagram thumbnail (1080×1920): {out_en_ig}")
-            subprocess.run(["open", out_en_ig])
+            _open_preview(out_en_ig)
         else:
             print("EN Instagram thumbnail FAILED")

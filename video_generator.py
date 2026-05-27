@@ -224,12 +224,13 @@ def _run(args: list[str], cwd: str | None = None, timeout: int = 120) -> bool:
     try:
         # Extend PATH so yt-dlp can find JS runtimes (deno, node) for n-challenge solving.
         _env = os.environ.copy()
-        _extra_paths = [
-            "/opt/homebrew/bin",                                      # deno (macOS Homebrew)
-            "/usr/local/bin",
-            os.path.expanduser("~/.nvm/versions/node/v20.19.5/bin"), # node (nvm)
-        ]
-        _env["PATH"] = os.pathsep.join(_extra_paths) + os.pathsep + _env.get("PATH", "")
+        if os.name != "nt":
+            _extra_paths = [
+                "/opt/homebrew/bin",                                      # deno (macOS Homebrew)
+                "/usr/local/bin",
+                os.path.expanduser("~/.nvm/versions/node/v20.19.5/bin"), # node (nvm)
+            ]
+            _env["PATH"] = os.pathsep.join(_extra_paths) + os.pathsep + _env.get("PATH", "")
         result = subprocess.run(
             args,
             capture_output=True,
@@ -350,11 +351,19 @@ def _parse_vtt_cues(vtt_path: str) -> list[tuple[float, float, str]]:
 def _find_system_font(size: int):
     """Return a PIL ImageFont, preferring Impact on macOS."""
     from PIL import ImageFont
+    _win_fonts = os.path.join(os.environ.get("WINDIR", r"C:\\Windows"), "Fonts")
     candidates = [
+        # Windows
+        os.path.join(_win_fonts, "impact.ttf"),
+        os.path.join(_win_fonts, "arialbd.ttf"),
+        os.path.join(_win_fonts, "arial.ttf"),
+        os.path.join(_win_fonts, "seguiemj.ttf"),
+        # macOS
         "/System/Library/Fonts/Supplemental/Impact.ttf",
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/System/Library/Fonts/Helvetica.ttc",
+        # Linux
         "/usr/share/fonts/truetype/msttcorefonts/Impact.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]

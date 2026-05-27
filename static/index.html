@@ -9,6 +9,12 @@
       type="image/svg+xml"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%236366f1'/%3E%3Ctext x='32' y='46' font-size='36' text-anchor='middle' font-family='system-ui,sans-serif'%3E%F0%9F%8E%AE%3C/text%3E%3C/svg%3E"
     />
+    <!-- Twemoji country flags polyfill: Windows' Segoe UI Emoji has no flag glyphs,
+         this injects a WOFF2 font ("Twemoji Country Flags") as a fallback. -->
+    <script type="module">
+      import { polyfillCountryFlagEmojis } from "https://cdn.skypack.dev/country-flag-emoji-polyfill";
+      polyfillCountryFlagEmojis();
+    </script>
     <style>
       *,
       *::before,
@@ -16,6 +22,16 @@
         margin: 0;
         padding: 0;
         box-sizing: border-box;
+      }
+
+      /* Form controls don't inherit font-family by default in most browsers,
+         so country-flag fallback wouldn't apply to <button>, <input>, <select>. */
+      button,
+      input,
+      select,
+      textarea {
+        font-family: inherit;
+        font-size: inherit;
       }
 
       :root {
@@ -37,7 +53,9 @@
         background: var(--bg);
         color: var(--text);
         font-family:
-          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Twemoji Country Flags", "Segoe UI Emoji", "Apple Color Emoji",
+          "Noto Color Emoji", sans-serif;
         font-size: 14px;
         height: 100vh;
         display: flex;
@@ -549,7 +567,8 @@
         margin-bottom: 8px;
       }
       .progress-log {
-        font-family: "SF Mono", "Menlo", monospace;
+        font-family: "Twemoji Country Flags", "SF Mono", "Menlo",
+          "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", monospace;
         font-size: 11.5px;
         line-height: 1.7;
         max-height: 200px;

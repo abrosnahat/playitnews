@@ -4,7 +4,9 @@ Sends a brief admin notification when a new post is created.
 All management is done via the web dashboard.
 """
 import logging
-import subprocess
+import os
+import re
+import tempfile
 from typing import Optional
 
 from telegram import Bot
@@ -18,19 +20,19 @@ logger = logging.getLogger(__name__)
 
 DASHBOARD_LOCAL = "http://localhost:5003"
 
+_CLOUDFLARED_LOG = os.path.join(tempfile.gettempdir(), "cloudflared_playitnews.log")
+_CLOUDFLARED_RE = re.compile(rb"https://[a-z0-9-]+\.trycloudflare\.com")
+
 
 def _get_cloudflare_url() -> Optional[str]:
     """Read the current cloudflared tunnel URL from the log file."""
     try:
-        result = subprocess.run(
-            ["grep", "-a", "-o", "https://[a-z0-9-]*\\.trycloudflare\\.com",
-             "/tmp/cloudflared_playitnews.log"],
-            capture_output=True, text=True, timeout=3,
-        )
-        url = result.stdout.strip().split("\n")[0]
-        return url or None
-    except Exception:
+        with open(_CLOUDFLARED_LOG, "rb") as fp:
+            data = fp.read()
+    except OSError:
         return None
+    m = _CLOUDFLARED_RE.search(data)
+    return m.group(0).decode() if m else None
 
 
 async def send_admin_notification(

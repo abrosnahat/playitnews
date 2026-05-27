@@ -1,8 +1,9 @@
-import csv, statistics
+import csv, os, statistics
 
 rows = []
+_CSV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Данные из таблицы.csv')
 try:
-    with open('/Users/abrosnahat/Desktop/playitnews/Данные из таблицы.csv', encoding='utf-8') as f:
+    with open(_CSV_PATH, encoding='utf-8') as f:
         reader = csv.DictReader(f)
         for row in reader:
             rows.append(row)
