@@ -402,16 +402,22 @@ async def _send_post_to_channel(bot, chat_id: str, caption: str, footer: str,
     import asyncio
     from io import BytesIO
     from telegram import InputMediaPhoto, InputMediaVideo
-    from telegram.error import TimedOut, NetworkError
+    from telegram.error import TimedOut, NetworkError, TelegramError
     from telegram.constants import ParseMode
 
-    full_caption = caption.rstrip()
-    if footer:
-        full_caption = full_caption + f"\n\n{footer}"
-    if len(full_caption) > 1024:
-        cut = full_caption[:1024]
+    def _fit_caption(raw: str) -> str:
+        full = raw.rstrip()
+        if footer:
+            full = full + f"\n\n{footer}"
+        if len(full) <= 1024:
+            return full
+        cut = full[:1024]
         last_nl = cut.rfind("\n")
-        full_caption = cut[:last_nl].rstrip() if last_nl > 512 else cut.rstrip()
+        return cut[:last_nl].rstrip() if last_nl > 512 else cut.rstrip()
+
+    full_caption_html = _fit_caption(caption)
+    full_caption_plain = _fit_caption(_clean_text(caption))
+    use_html = True
 
     # Pre-read everything into memory so each retry can rebuild the multipart
     # body without re-streaming from disk (which is what trips WriteTimeout).
@@ -428,37 +434,58 @@ async def _send_post_to_channel(bot, chat_id: str, caption: str, footer: str,
 
     MAX_RETRIES = 3
 
-    async def _attempt() -> None:
+    async def _attempt(active_caption: str, html_mode: bool) -> None:
+        parse_mode = ParseMode.HTML if html_mode else None
         if not image_blobs and not video_blobs:
-            await bot.send_message(chat_id=chat_id, text=full_caption,
-                                   parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            kwargs = {
+                "chat_id": chat_id,
+                "text": active_caption,
+                "disable_web_page_preview": True,
+            }
+            if parse_mode:
+                kwargs["parse_mode"] = parse_mode
+            await bot.send_message(**kwargs)
             return
 
         total = len(image_blobs) + len(video_blobs)
         if total == 1:
             if image_blobs:
                 _, data = image_blobs[0]
-                await bot.send_photo(chat_id=chat_id, photo=BytesIO(data),
-                                     caption=full_caption, parse_mode=ParseMode.HTML)
+                kwargs = {
+                    "chat_id": chat_id,
+                    "photo": BytesIO(data),
+                    "caption": active_caption,
+                }
+                if parse_mode:
+                    kwargs["parse_mode"] = parse_mode
+                await bot.send_photo(**kwargs)
             else:
                 _, data, w, h = video_blobs[0]
-                await bot.send_video(chat_id=chat_id, video=BytesIO(data),
-                                     caption=full_caption, parse_mode=ParseMode.HTML,
-                                     width=w, height=h, supports_streaming=True)
+                kwargs = {
+                    "chat_id": chat_id,
+                    "video": BytesIO(data),
+                    "caption": active_caption,
+                    "width": w,
+                    "height": h,
+                    "supports_streaming": True,
+                }
+                if parse_mode:
+                    kwargs["parse_mode"] = parse_mode
+                await bot.send_video(**kwargs)
             return
 
         media = []
         for i, (_, data) in enumerate(image_blobs):
             media.append(InputMediaPhoto(
                 media=BytesIO(data),
-                caption=full_caption if i == 0 else None,
-                parse_mode=ParseMode.HTML if i == 0 else None,
+                caption=active_caption if i == 0 else None,
+                parse_mode=parse_mode if i == 0 and parse_mode else None,
             ))
         for j, (_, data, w, h) in enumerate(video_blobs):
             media.append(InputMediaVideo(
                 media=BytesIO(data),
-                caption=full_caption if not image_blobs and j == 0 else None,
-                parse_mode=ParseMode.HTML if not image_blobs and j == 0 else None,
+                caption=active_caption if not image_blobs and j == 0 else None,
+                parse_mode=parse_mode if not image_blobs and j == 0 and parse_mode else None,
                 width=w, height=h, supports_streaming=True,
             ))
         await bot.send_media_group(chat_id=chat_id, media=media)
@@ -466,8 +493,17 @@ async def _send_post_to_channel(bot, chat_id: str, caption: str, footer: str,
     last_exc: Exception | None = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            await _attempt()
+            await _attempt(full_caption_html if use_html else full_caption_plain, use_html)
             return
+        except TelegramError as exc:
+            if use_html and "can't parse entities" in str(exc).lower():
+                use_html = False
+                logger.warning(
+                    "Post #%s: malformed Telegram HTML for %s, fallback to plain text",
+                    post_id, chat_id,
+                )
+                continue
+            raise
         except (TimedOut, NetworkError) as exc:
             last_exc = exc
             logger.warning(
