@@ -1595,9 +1595,14 @@ async def _compose_monitor_scene_photo(
     rect = _parse_screen_rect(rect_spec) if rect_spec else None
 
     # Common: scale background photo to fill 1080x1920 (cover-style).
+    # Force fps=VID_FPS — without it a `-loop 1 -i image.jpg` input runs at
+    # ffmpeg's default 25 fps while the inner video is 30 fps, and overlay
+    # then has to drop/dup frames at each new bg tick. The visible artefact
+    # is a brief freeze / stutter every ~0.2 s ≈ exactly what "pauses
+    # between frame transitions" looks like.
     bg_chain = (
         f"[1:v]scale={VID_W}:{VID_H}:force_original_aspect_ratio=increase,"
-        f"crop={VID_W}:{VID_H},setsar=1[bg];"
+        f"crop={VID_W}:{VID_H},setsar=1,fps={VID_FPS}[bg];"
     )
 
     # Optional alpha-mask file path (used to clip warped video to the quad
@@ -1688,11 +1693,14 @@ async def _compose_monitor_scene_photo(
     )
 
     # Background can be a still image (jpg/png) or a looping video (mp4/mov/webm).
+    # For still images we MUST set -framerate so the synthetic stream runs at
+    # VID_FPS instead of ffmpeg's image2 default (25 fps). For video bgs the
+    # bg_chain's `fps={VID_FPS}` filter already normalises any source fps.
     is_video_bg = bg_path.lower().endswith((".mp4", ".mov", ".mkv", ".webm", ".m4v"))
     bg_input = (
         ["-stream_loop", "-1", "-i", bg_path]
         if is_video_bg
-        else ["-loop", "1", "-i", bg_path]
+        else ["-loop", "1", "-framerate", str(VID_FPS), "-i", bg_path]
     )
 
     ok = await _run_async(
@@ -1704,6 +1712,8 @@ async def _compose_monitor_scene_photo(
             "-filter_complex", filter_complex,
             "-map", "[final]",
             "-map", "0:a?",
+            "-r", str(VID_FPS),
+            "-vsync", "cfr",
             "-c:v", "libx264",
             "-crf", "20",
             "-preset", "fast",

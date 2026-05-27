@@ -57,7 +57,7 @@ async def get_latest_article_links(session: aiohttp.ClientSession) -> list[dict]
         async with session.get(
             NEWS_URL,
             headers=HEADERS,
-            cookies={"pg_post_sorting": "%7B%22news%22%3A%22creation_date%22%7D"},
+            # cookies={"pg_post_sorting": "%7B%22news%22%3A%22creation_date%22%7D"},
             timeout=aiohttp.ClientTimeout(total=30),
             ssl=SSL_CONTEXT,
         ) as resp:
