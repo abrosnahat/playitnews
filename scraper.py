@@ -473,8 +473,18 @@ async def _download_hls_video(video_id: str, m3u8_url: str) -> Optional[str]:
         await _safe_remove(output_path)
     async def _run_ffmpeg(*args: str, timeout: int) -> bool:
         nonlocal proc
+        # Reconnect options must come BEFORE -i (apply to the HTTPS demuxer)
+        reconnect_opts = (
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_on_network_error", "1",
+            "-reconnect_on_http_error", "4xx,5xx",
+            "-reconnect_delay_max", "10",
+            "-rw_timeout", "30000000",  # 30s socket I/O timeout
+            "-user_agent", "Mozilla/5.0",
+        )
         proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", *args,
+            "ffmpeg", *reconnect_opts, *args,
             "-movflags", "faststart",
             "-y", output_path,
             stdout=asyncio.subprocess.DEVNULL,

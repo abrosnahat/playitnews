@@ -318,7 +318,7 @@ def _blurred_photo_bg(source_image_path: str, w: int, h: int):
     img = Image.open(source_image_path).convert("RGB")
     img = _fit_cover(img, w, h)
     # Soft blur so the photo is still recognisable behind the text
-    img = img.filter(ImageFilter.GaussianBlur(7))
+    img = img.filter(ImageFilter.GaussianBlur(3))
     img = ImageEnhance.Brightness(img).enhance(0.78)
     return img
 

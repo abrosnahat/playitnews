@@ -248,8 +248,9 @@ async def build_slides(post: dict, lang: str, *, progress=lambda *_: None) -> li
         post_id, lang, len(article_images), len(article_videos),
     )
 
-    # Bullets — aim for enough to reach MIN_TARGET_SLIDES (cover + bullets + CTA)
-    desired_bullets = min(MAX_SLIDES - 2, max(3, MIN_TARGET_SLIDES - 2))
+    # Bullets — request up to MAX_SLIDES - 2 (cover + bullets + CTA);
+    # the LLM decides how many real facts the article actually yields.
+    desired_bullets = MAX_SLIDES - 2
     progress(f"Generating {desired_bullets} bullet points ({lang})…")
     bullets = await ai_adapter.generate_carousel_bullets(
         article_title or "", _strip_html(post_text),
