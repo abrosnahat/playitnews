@@ -1087,6 +1087,7 @@
       <button class="btn btn-outline" style="flex:1;color:#e53935;border-color:#e53935;font-size:12px;min-height:36px" onclick="markDone(${p.id}, this)">✔ Done — remove from feed</button>
       <button class="btn btn-outline" style="flex:1;color:#2e7d32;border-color:#2e7d32;font-size:12px;min-height:36px" onclick="republishEn(${p.id}, this)">🔁 Republish EN → @playitgamesnews</button>
       <button class="btn btn-outline" style="flex:1;color:#1565c0;border-color:#1565c0;font-size:12px;min-height:36px" onclick="republishRu(${p.id}, this)">🔁 Republish RU → @readitgames</button>
+      <button class="btn btn-outline" style="flex:1;color:#6a1b9a;border-color:#6a1b9a;font-size:12px;min-height:36px" onclick="redownloadMedia(${p.id}, this)" title="Re-scrape the article and re-download its images and videos">⬇ Re-download images + videos</button>
     </div>`;
           btnHtml += `<div class="btn-section">
       <div class="btn-section-label">🎬 Generate video</div>
@@ -1707,6 +1708,29 @@
           btn.style.color = "#e53935";
           btn.style.borderColor = "#e53935";
           btn.textContent = "🔁 Republish EN → @playitgamesnews";
+        }
+      }
+
+      async function redownloadMedia(id, btn) {
+        if (!confirm("Re-scrape the article and re-download all its images and videos?\nExisting cached files for this post will be deleted and the short video will be cleared so it gets rebuilt.")) return;
+        const original = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "Downloading…";
+        try {
+          const res = await fetch(`/api/posts/${id}/redownload-media`, {
+            method: "POST",
+          });
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+          toast(`Post #${id}: ${data.images} image(s), ${data.videos} video(s) re-downloaded ✅`, "success");
+          btn.textContent = `✅ ${data.images} img / ${data.videos} vid`;
+          setTimeout(() => loadPosts(), 800);
+        } catch (e) {
+          toast(`Error: ${e.message}`, "error");
+          btn.disabled = false;
+          btn.style.color = "#e53935";
+          btn.style.borderColor = "#e53935";
+          btn.textContent = original;
         }
       }
 

@@ -16,9 +16,12 @@ from typing import Optional
 from flask import Flask, Response, abort, jsonify, request, send_file
 import mimetypes
 
+import aiohttp
+
 import database as db
 import ai_adapter
 import video_generator
+import redownload_active
 import thumbnail_generator
 import instagram_publisher
 import instagram_carousel_publisher
@@ -595,6 +598,25 @@ def api_republish_ru(post_id: int):
     except Exception as exc:
         logger.exception("Republish RU failed for post #%d", post_id)
         return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/posts/<int:post_id>/redownload-media", methods=["POST"])
+def api_redownload_media(post_id: int):
+    """Re-scrape the article and re-download its images + videos."""
+    post = db.get_scheduled_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+    try:
+        imgs, vids = _run_async(_do_redownload_media(post))
+        return jsonify({"success": True, "images": imgs, "videos": vids})
+    except Exception as exc:
+        logger.exception("Re-download failed for post #%d", post_id)
+        return jsonify({"error": str(exc)}), 500
+
+
+async def _do_redownload_media(post: dict) -> tuple[int, int]:
+    async with aiohttp.ClientSession() as session:
+        return await redownload_active._redownload_one(session, post, dry=False)
 
 
 @app.route("/api/posts/<int:post_id>/republish-en", methods=["POST"])

@@ -232,8 +232,21 @@ TTS_RATE_RU  = "+25%"   # RU: Dmitry reads slower & inserts longer inter-sentenc
 TTS_PITCH    = "-3Hz"   # Slightly lower pitch → warmer tone
 
 
-# yt-dlp cookie arguments — passes Chrome cookies to bypass YouTube bot check
-_YT_COOKIE_ARGS = ["--cookies-from-browser", "chrome"]
+# yt-dlp cookie arguments — passes browser cookies to bypass YouTube bot check.
+#
+# Chrome on Windows locks its cookie DB while the browser is running, which makes
+# `--cookies-from-browser chrome` fail with "Could not copy Chrome cookie database"
+# (yt-dlp/yt-dlp#7271). To work around that, allow overriding via env:
+#   YT_COOKIES_FILE     — path to an exported cookies.txt (preferred on Windows)
+#   YT_COOKIES_BROWSER  — browser name for --cookies-from-browser (default: chrome)
+_YT_COOKIES_FILE = os.getenv("YT_COOKIES_FILE", "").strip()
+_YT_COOKIES_BROWSER = os.getenv("YT_COOKIES_BROWSER", "chrome").strip()
+if _YT_COOKIES_FILE:
+    _YT_COOKIE_ARGS = ["--cookies", _YT_COOKIES_FILE]
+elif _YT_COOKIES_BROWSER.lower() in ("", "none", "off", "0"):
+    _YT_COOKIE_ARGS = []
+else:
+    _YT_COOKIE_ARGS = ["--cookies-from-browser", _YT_COOKIES_BROWSER]
 
 # YouTube extractor args: tv_downgraded client works best with authenticated cookies
 # (per yt-dlp docs: used for free accounts when logged-in cookies are passed)
@@ -1157,7 +1170,10 @@ _RU_BRAND_MAP: list[tuple[str, str]] = [
     ("Death Stranding", "Дэт Стрэндинг"),
     ("Red Dead Redemption", "Ред Дэд Редемпшн"),
     ("Red Dead", "Ред Дэд"),
-    ("Red", "Ред"),
+    # NOTE: standalone "Red" → "Ред" removed intentionally.
+    # Silero TTS озвучивает одиночное "Ред" как "редакция" (трактует
+    # как типографское сокращение "ред."). Длинные фразы выше уже
+    # покрывают "CD Projekt Red" и "Red Dead*".
     ("GTA", "Джи Ти Эй"),
     ("Grand Theft Auto", "Гранд Тефт Авто"),
     ("The Witcher", "Ведьмак"),
@@ -1250,6 +1266,7 @@ _RU_BRAND_MAP: list[tuple[str, str]] = [
     ("Marvel", "Марвел"),
     ("Kingdom Come: Deliverance", "Кингдом Кам Деливеренс"),
     ("Kingdom Come Deliverance", "Кингдом Кам Деливеренс"),
+    ("Perceptum", "Перцептум"),
 ]
 
 # Sort keys by length DESC so the regex tries the longest phrases first.
@@ -1261,10 +1278,12 @@ _RU_BRAND_KEYS_SORTED = sorted(
 # Build compiled pattern once at module load.
 # Use lookarounds instead of \b — \b doesn't fire correctly next to punctuation
 # inside keys like "S.T.A.L.K.E.R." or "Counter-Strike".
+# Граница включает и кириллицу: иначе короткий латинский ключ (напр. "Red")
+# с IGNORECASE может зацепить кириллический фрагмент рядом и наоборот.
 _RU_BRAND_RE = re.compile(
-    r"(?<![A-Za-z0-9])("
+    r"(?<![A-Za-z0-9\u0400-\u04FF])("
     + "|".join(re.escape(k) for k in _RU_BRAND_KEYS_SORTED)
-    + r")(?![A-Za-z0-9])",
+    + r")(?![A-Za-z0-9\u0400-\u04FF])",
     re.IGNORECASE,
 )
 _RU_BRAND_LOOKUP = {k.lower(): v for k, v in _RU_BRAND_MAP}
