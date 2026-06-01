@@ -1079,6 +1079,9 @@
           btnHtml = `<div class="btn-group">
       <button class="btn btn-success" style="flex:2" onclick="approvePost(${p.id}, this)">✅ Approve</button>
       <button class="btn btn-danger" onclick="cancelPost(${p.id})">✕ Cancel</button>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+      <button class="btn btn-outline" style="flex:1;color:#6a1b9a;border-color:#6a1b9a;font-size:12px;min-height:36px" onclick="redownloadMedia(${p.id}, this)" title="Re-scrape the article and re-download its images and videos">⬇ Re-download images + videos</button>
     </div>`;
         }
         if (isActionable) {

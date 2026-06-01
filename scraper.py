@@ -340,12 +340,22 @@ async def _download_youtube_video(video_id: str) -> Optional[str]:
             os.path.expanduser("~/.nvm/versions/node/v20.19.5/bin"),
         ]
         env["PATH"] = os.pathsep.join(extra_paths) + os.pathsep + env.get("PATH", "")
+    # yt-dlp cookie args, configurable via env (Chrome locks its cookie DB on Windows
+    # while running — yt-dlp/yt-dlp#7271 — so allow YT_COOKIES_FILE / YT_COOKIES_BROWSER).
+    yt_cookies_file = os.getenv("YT_COOKIES_FILE", "").strip()
+    yt_cookies_browser = os.getenv("YT_COOKIES_BROWSER", "chrome").strip()
+    if yt_cookies_file:
+        cookie_args = ["--cookies", yt_cookies_file]
+    elif yt_cookies_browser.lower() in ("", "none", "off", "0"):
+        cookie_args = []
+    else:
+        cookie_args = ["--cookies-from-browser", yt_cookies_browser]
     try:
         proc = await asyncio.create_subprocess_exec(
             "yt-dlp",
             "--no-playlist",
             "--no-warnings",
-            "--cookies-from-browser", "chrome",
+            *cookie_args,
             "--format", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]/best",
             "--max-filesize", "1500M",
             "--merge-output-format", "mp4",
