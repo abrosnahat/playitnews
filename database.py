@@ -205,6 +205,35 @@ def get_carousel_paths(post_id: int, lang: str) -> list[str]:
         return []
 
 
+def remove_media_path(post_id: int, kind: str, path: str) -> bool:
+    """Remove a single image or video path from the post's media list.
+
+    `kind` must be 'image' or 'video'. Returns True if the path was present
+    and removed, False otherwise.
+    """
+    if kind not in ("image", "video"):
+        raise ValueError(f"kind must be 'image' or 'video', got {kind!r}")
+    col = "image_paths" if kind == "image" else "video_paths"
+    with get_conn() as conn:
+        row = conn.execute(
+            f"SELECT {col} FROM scheduled_posts WHERE id = ?", (post_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            paths = json.loads(row[0] or "[]")
+        except Exception:
+            paths = []
+        if path not in paths:
+            return False
+        paths = [p for p in paths if p != path]
+        conn.execute(
+            f"UPDATE scheduled_posts SET {col} = ? WHERE id = ?",
+            (json.dumps(paths), post_id),
+        )
+    return True
+
+
 def increment_yt_skip(post_id: int, added: int) -> int:
     """Bump the YouTube result skip counter by *added* and return new value."""
     with get_conn() as conn:

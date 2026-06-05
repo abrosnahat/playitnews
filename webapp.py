@@ -619,6 +619,51 @@ async def _do_redownload_media(post: dict) -> tuple[int, int]:
         return await redownload_active._redownload_one(session, post, dry=False)
 
 
+@app.route("/api/posts/<int:post_id>/media", methods=["DELETE"])
+def api_delete_media(post_id: int):
+    """Manually remove one image or video attached to a post.
+
+    Body JSON: {"kind": "image"|"video", "path": "<absolute or repo-relative path>"}
+    Removes the path from the post's media list and deletes the underlying file
+    if it lives inside the project directory.
+    """
+    body = request.get_json(silent=True) or {}
+    kind = body.get("kind")
+    path = body.get("path") or ""
+    if kind not in ("image", "video") or not path:
+        return jsonify({"error": "Expected JSON {kind: 'image'|'video', path: str}"}), 400
+
+    post = db.get_scheduled_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    base = os.path.abspath(os.path.dirname(__file__))
+    full = os.path.abspath(path)
+    # Security: only delete files inside the project directory.
+    if not full.startswith(base + os.sep) and full != base:
+        return jsonify({"error": "Refusing to delete file outside project"}), 403
+
+    removed = db.remove_media_path(post_id, kind, path)
+    file_deleted = False
+    if os.path.isfile(full):
+        try:
+            os.remove(full)
+            file_deleted = True
+        except OSError as exc:
+            logger.warning("Could not delete %s: %s", full, exc)
+
+    if not removed and not file_deleted:
+        return jsonify({"error": "Media not found for this post"}), 404
+
+    logger.info("Post #%d: removed %s %s (file_deleted=%s)", post_id, kind, path, file_deleted)
+    updated = db.get_scheduled_post(post_id)
+    return jsonify({
+        "success": True,
+        "image_paths": [p for p in updated.get("image_paths", []) if os.path.exists(p)],
+        "video_paths": [p for p in updated.get("video_paths", []) if os.path.exists(p)],
+    })
+
+
 @app.route("/api/posts/<int:post_id>/republish-en", methods=["POST"])
 def api_republish_en(post_id: int):
     """Re-send post_text to @playitgamesnews (main EN channel)."""
@@ -950,28 +995,60 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
         en_script: Optional[str] = None
         ru_script: Optional[str] = None
 
+        def _script_invalid(script: str) -> str | None:
+            """Return reason string if script is invalid, else None."""
+            if not script or len(script.split()) < 20:
+                return f"only {len(script.split())} words (need ≥ 20)"
+            # Detect mid-word truncation: last char must be sentence-ending punctuation
+            last = script.rstrip()[-1:]
+            if last not in '.!?…»"\')':
+                return f"truncated mid-sentence (ends with '…{script.rstrip()[-25:]}')"
+            return None
+
         if do_en:
+            progress("🇬🇧 EN: translating title…")
             en_title = await ai_adapter.translate_title_to_english(post["article_title"])
+            progress(f"🇬🇧 EN title: {en_title}")
+            progress("🇬🇧 EN: generating script…")
             en_script = await ai_adapter.generate_video_script(
                 post_text=post["post_text"], article_title=en_title, lang="en"
             )
             en_script = re.sub(r'<[^>]+>', '', en_script or '').strip()
-            fallback_en = re.sub(r'<[^>]+>', '', post["post_text"][:350]).strip()
-            if len(en_script.split()) < 20:
-                en_script = fallback_en
-            progress(f"🇬🇧 EN script: {len(en_script.split())} words")
+            reason = _script_invalid(en_script)
+            if reason:
+                progress(
+                    f"❌ EN script generation failed: {reason}. Aborting video generation.",
+                    "error",
+                )
+                if en_script:
+                    progress(f"Raw output:\n───────────────\n{en_script}\n───────────────")
+                return
+            progress(
+                f"🇬🇧 EN script ({len(en_script.split())} words):\n"
+                f"───────────────\n{en_script}\n───────────────"
+            )
 
         if do_ru:
+            progress("🇷🇺 RU: generating script…")
             ru_script = await ai_adapter.generate_video_script(
                 post_text=post.get("ru_post_text") or post["post_text"],
                 article_title=post["article_title"],
                 lang="ru",
             )
             ru_script = re.sub(r'<[^>]+>', '', ru_script or '').strip()
-            fallback_ru = re.sub(r'<[^>]+>', '', (post.get("ru_post_text") or post["post_text"])[:350]).strip()
-            if len(ru_script.split()) < 20:
-                ru_script = fallback_ru
-            progress(f"🇷🇺 RU script: {len(ru_script.split())} words")
+            reason = _script_invalid(ru_script)
+            if reason:
+                progress(
+                    f"❌ RU script generation failed: {reason}. Aborting video generation.",
+                    "error",
+                )
+                if ru_script:
+                    progress(f"Raw output:\n───────────────\n{ru_script}\n───────────────")
+                return
+            progress(
+                f"🇷🇺 RU script ({len(ru_script.split())} words):\n"
+                f"───────────────\n{ru_script}\n───────────────"
+            )
 
         # --- Step 2: Determine search query ---
         progress("Step 2/4: Synthesizing voices…")

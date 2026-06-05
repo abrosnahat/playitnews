@@ -39,7 +39,10 @@ TELEGRAM_API_HASH: str = os.getenv("TELEGRAM_API_HASH", "")
 
 # Ollama (local)
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "gemma4:e4b")
+# Default model — used for Telegram post generation, translations, filters.
+OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "gemma4:latest")
+# Separate model for video script generation (reasoning-grade for better hooks/structure).
+OLLAMA_VIDEO_MODEL: str = os.getenv("OLLAMA_VIDEO_MODEL", "qwen3.6:latest")
 
 # Monitoring
 CHECK_INTERVAL_MINUTES: int = int(os.getenv("CHECK_INTERVAL_MINUTES", "30"))

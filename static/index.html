@@ -214,6 +214,40 @@
       .card-images img:hover {
         opacity: 0.8;
       }
+      .media-item {
+        position: relative;
+        display: inline-block;
+        line-height: 0;
+      }
+      .media-item video {
+        max-height: 220px;
+        border-radius: 6px;
+      }
+      .media-del {
+        position: absolute;
+        top: 4px;
+        right: 4px;
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        background: rgba(0, 0, 0, 0.65);
+        color: #fff;
+        border: 1px solid rgba(255, 255, 255, 0.25);
+        font-size: 13px;
+        line-height: 1;
+        cursor: pointer;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        z-index: 2;
+      }
+      .media-item:hover .media-del {
+        display: flex;
+      }
+      .media-del:hover {
+        background: var(--red);
+      }
 
       /* ── Lightbox ─────────────────────────────────────────────── */
       #lightbox {
@@ -573,6 +607,8 @@
         line-height: 1.7;
         max-height: 200px;
         overflow-y: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
       }
       .progress-log::-webkit-scrollbar {
         width: 4px;
@@ -1027,12 +1063,12 @@
             ? `<div class="card-images" data-gallery-id="${p.id}">${allImgs
                 .map(
                   (img, i) =>
-                    `<img src="/api/media?path=${enc(img)}" loading="lazy" onerror="this.parentElement.removeChild(this)" onclick="openGallery(${p.id},${i})">`,
+                    `<span class="media-item"><img src="/api/media?path=${enc(img)}" loading="lazy" onerror="this.parentElement.parentElement&&this.parentElement.parentElement.removeChild(this.parentElement)" onclick="openGallery(${p.id},${i})"><button class="media-del" title="Remove this image" onclick="event.stopPropagation();deleteMedia(${p.id},'image','${enc(img)}',this)">✕</button></span>`,
                 )
                 .join("")}${allVids
                 .map(
                   (vid) =>
-                    `<video controls playsinline preload="none" style="max-height:220px;border-radius:6px"><source src="/api/media?path=${enc(vid)}" type="video/mp4"></video>`,
+                    `<span class="media-item"><video controls playsinline preload="none"><source src="/api/media?path=${enc(vid)}" type="video/mp4"></video><button class="media-del" title="Remove this video" onclick="event.stopPropagation();deleteMedia(${p.id},'video','${enc(vid)}',this)">✕</button></span>`,
                 )
                 .join("")}</div>`
             : "";
@@ -1711,6 +1747,30 @@
           btn.style.color = "#e53935";
           btn.style.borderColor = "#e53935";
           btn.textContent = "🔁 Republish EN → @playitgamesnews";
+        }
+      }
+
+      async function deleteMedia(postId, kind, encPath, btn) {
+        const path = decodeURIComponent(encPath);
+        const label = kind === "image" ? "image" : "video";
+        if (!confirm(`Remove this ${label} from post #${postId}?\nThe file will be deleted from disk.`)) return;
+        btn.disabled = true;
+        const item = btn.closest(".media-item");
+        if (item) item.style.opacity = "0.4";
+        try {
+          const res = await fetch(`/api/posts/${postId}/media`, {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ kind, path }),
+          });
+          const data = await res.json();
+          if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+          toast(`${label} removed from post #${postId} ✅`, "success");
+          await loadPosts();
+        } catch (e) {
+          toast(`Error: ${e.message}`, "error");
+          btn.disabled = false;
+          if (item) item.style.opacity = "";
         }
       }
 

@@ -1,7 +1,7 @@
 import re
 import logging
 import aiohttp
-from config import OLLAMA_BASE_URL, OLLAMA_MODEL
+from config import OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_VIDEO_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ async def adapt_article_ru(title: str, body: str) -> str:
             {"role": "user", "content": user_message},
         ],
         "stream": False,
-        "options": {"num_predict": 1500, "num_ctx": 4096},
+        "options": {"num_predict": 8000, "num_ctx": 4096},
     }
 
     try:
@@ -102,7 +102,7 @@ async def adapt_article_ru(title: str, body: str) -> str:
             async with session.post(
                 f"{OLLAMA_BASE_URL}/api/chat",
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=180),
+                timeout=aiohttp.ClientTimeout(total=300),
             ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
@@ -127,8 +127,9 @@ async def adapt_article_ru(title: str, body: str) -> str:
                 async with session.post(
                     f"{OLLAMA_BASE_URL}/api/chat",
                     json={"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": simple_prompt}],
-                          "stream": False, "options": {"num_predict": 900, "num_ctx": 4096}},
-                    timeout=aiohttp.ClientTimeout(total=180),
+                          "stream": False,
+                          "options": {"num_predict": 6000, "num_ctx": 4096}},
+                    timeout=aiohttp.ClientTimeout(total=300),
                 ) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
@@ -171,7 +172,7 @@ async def adapt_article(title: str, body: str) -> str:
             {"role": "user", "content": user_message},
         ],
         "stream": False,
-        "options": {"num_predict": 1500, "num_ctx": 4096},
+        "options": {"num_predict": 8000, "num_ctx": 4096},
     }
 
     try:
@@ -179,7 +180,7 @@ async def adapt_article(title: str, body: str) -> str:
             async with session.post(
                 f"{OLLAMA_BASE_URL}/api/chat",
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=120),
+                timeout=aiohttp.ClientTimeout(total=300),
             ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
@@ -203,8 +204,9 @@ async def adapt_article(title: str, body: str) -> str:
                 async with session.post(
                     f"{OLLAMA_BASE_URL}/api/chat",
                     json={"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": simple_prompt}],
-                          "stream": False, "options": {"num_predict": 1500, "num_ctx": 4096}},
-                    timeout=aiohttp.ClientTimeout(total=120),
+                          "stream": False,
+                          "options": {"num_predict": 8000, "num_ctx": 4096}},
+                    timeout=aiohttp.ClientTimeout(total=300),
                 ) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
@@ -274,14 +276,14 @@ async def is_gaming_related(title: str) -> bool:
         "model": OLLAMA_MODEL,
         "messages": [{"role": "user", "content": user_message}],
         "stream": False,
-        "options": {"num_predict": 5},
+        "options": {"num_predict": 2000, "num_ctx": 2048},
     }
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{OLLAMA_BASE_URL}/api/chat",
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=30),
+                timeout=aiohttp.ClientTimeout(total=120),
             ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
@@ -309,7 +311,7 @@ async def shorten_post(text: str, target_chars: int = 900) -> str:
         {"role": "user", "content": user_message},
     ]
     try:
-        raw = await _call_ollama_chat(messages, num_predict=1500, timeout=120)
+        raw = await _call_ollama_chat(messages, num_predict=8000, timeout=300)
         shortened = _sanitize_telegram_html(_md_to_html(raw))
         if len(shortened) < 50:
             logger.warning("shorten_post returned too-short result (%d chars), hard-truncating", len(shortened))
@@ -337,17 +339,27 @@ async def _call_ollama_chat(
     messages: list[dict],
     *,
     num_predict: int = 100,
-    num_ctx: int = 2048,
+    num_ctx: int = 16384,
     timeout: int = 60,
+    model: str | None = None,
+    think: bool | None = None,
 ) -> str:
     """Send a chat request to Ollama and return the model's raw content string.
-    Raises on network / HTTP errors so callers can handle them individually."""
+    Raises on network / HTTP errors so callers can handle them individually.
+
+    ``think``: when set, passed as top-level ``think`` field to Ollama's
+    ``/api/chat`` to enable/disable reasoning for hybrid models like qwen3.
+    Use ``think=False`` for reasoning models when you only want the final
+    answer (avoids the output being consumed entirely inside ``<think>``).
+    """
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": model or OLLAMA_MODEL,
         "messages": messages,
         "stream": False,
         "options": {"num_predict": num_predict, "num_ctx": num_ctx},
     }
+    if think is not None:
+        payload["think"] = think
     async with aiohttp.ClientSession() as session:
         async with session.post(
             f"{OLLAMA_BASE_URL}/api/chat",
@@ -380,7 +392,7 @@ async def extract_game_name(article_title: str) -> str:
     )
     try:
         name = (await _call_ollama_chat(
-            [{"role": "user", "content": user_message}], num_predict=20, timeout=30
+            [{"role": "user", "content": user_message}], num_predict=2000, timeout=120
         )).strip('"\'')
         if name and len(name) <= 60:
             logger.info("AI game name: '%s' ← '%s'", name, article_title[:60])
@@ -410,7 +422,7 @@ async def translate_title_to_english(article_title: str) -> str:
     try:
         translated = (await _call_ollama_chat(
             [{"role": "system", "content": system_content},
-             {"role": "user", "content": user_message}], num_predict=40, timeout=30
+             {"role": "user", "content": user_message}], num_predict=2000, timeout=120
         )).strip('"\'')
         if translated and len(translated) <= 100 and not re.search(r'[а-яёА-ЯЁ]', translated):
             logger.info("Translated title: '%s' ← '%s'", translated, article_title[:60])
@@ -452,7 +464,7 @@ async def generate_thumbnail_hook(article_title: str, lang: str = "ru") -> str:
         hook = (await _call_ollama_chat(
             [{"role": "system", "content": system_content},
              {"role": "user", "content": user_message}],
-            num_predict=20, timeout=30
+            num_predict=2000, timeout=120
         )).strip('"\'').upper()
         # Validate: for EN reject if result contains Cyrillic; for RU reject if only Latin
         if lang == "en" and re.search(r'[а-яёА-ЯЁ]', hook):
@@ -468,7 +480,7 @@ async def generate_thumbnail_hook(article_title: str, lang: str = "ru") -> str:
             hook = (await _call_ollama_chat(
                 [{"role": "system", "content": "Reply in English only."},
                  {"role": "user", "content": simple}],
-                num_predict=15, timeout=30
+                num_predict=2000, timeout=120
             )).strip('"\'').upper()
             if hook and not re.search(r'[а-яёА-ЯЁ]', hook) and len(hook) <= 60:
                 return hook
@@ -531,7 +543,7 @@ async def generate_carousel_bullets(
         raw = await _call_ollama_chat(
             [{"role": "system", "content": system_content},
              {"role": "user", "content": user_message}],
-            num_predict=400, num_ctx=4096, timeout=90,
+            num_predict=4000, num_ctx=4096, timeout=180,
         )
     except Exception as exc:
         logger.warning("generate_carousel_bullets failed: %s", exc)
@@ -588,7 +600,6 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
             "- первые 2 секунды должны содержать мощный hook\n"
             "- никакой воды\n"
             "- каждая фраза должна усиливать интригу\n"
-            "- предложения короткие и агрессивные\n"
             "- Текст будет зачитан голосовым AI — пиши чёткими литературными предложениями\n"
             "- стиль эмоциональный, как у топовых gaming Shorts каналов\n"
             "- использовать curiosity gap\n"
@@ -614,7 +625,6 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
             "- The first 2 seconds must contain a powerful hook\n"
             "- No filler\n"
             "- Every sentence must escalate the intrigue\n"
-            "- Short, aggressive sentences\n"
             "- The text will be read aloud by a voice AI — write clean, literary sentences\n"
             "- Emotional style, like top gaming Shorts channels\n"
             "- Use curiosity gap\n"
@@ -631,7 +641,20 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
         {"role": "user", "content": user_message},
     ]
     try:
-        script = await _call_ollama_chat(messages, num_predict=1500, num_ctx=2048, timeout=120)
+        script = await _call_ollama_chat(
+            messages,
+            num_predict=8000,
+            num_ctx=16384,
+            timeout=300,
+            model=OLLAMA_VIDEO_MODEL,
+            think=False,
+        )
+        # Reasoning models (qwen3, deepseek-r1, etc.) wrap chain-of-thought in <think>…</think>.
+        # Remove those blocks entirely (tag + content) before further cleanup.
+        script = re.sub(r"<think>.*?</think>", "", script, flags=re.DOTALL | re.IGNORECASE)
+        # Also handle cases where the closing tag is missing — drop everything up to last </think>
+        if "</think>" in script.lower():
+            script = re.split(r"</think>", script, maxsplit=1, flags=re.IGNORECASE)[-1]
         script = re.sub(r"<[^>]+>", "", script)
         script = re.sub(r"[*_`#]", "", script)
         script = script.strip()
@@ -641,6 +664,22 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
             # Trim to first 60 words to stay within target duration
             script = " ".join(script.split()[:60])
             logger.info("Script trimmed to 60 words for retention target")
+            word_count = 60
+        # Drop a trailing incomplete sentence (model often gets cut mid-word
+        # when it exceeds num_predict). Trim back to the last sentence-ending
+        # punctuation if the script doesn't already end on one.
+        _sentence_end = '.!?…»"\')'
+        if script and script[-1] not in _sentence_end:
+            last_idx = max(script.rfind(c) for c in '.!?…')
+            if last_idx > 0:
+                trimmed = script[: last_idx + 1].rstrip()
+                trimmed_words = len(trimmed.split())
+                if trimmed_words >= 20:
+                    logger.info(
+                        "%s script: dropped incomplete trailing sentence (%d → %d words)",
+                        lang.upper(), word_count, trimmed_words,
+                    )
+                    script = trimmed
         return script
     except Exception as exc:
         logger.error("Error generating %s video script: %s", lang.upper(), exc)
