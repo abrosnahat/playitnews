@@ -231,6 +231,12 @@ TTS_RATE_RU  = "+25%"   # RU: Dmitry reads slower & inserts longer inter-sentenc
                         # bump rate so audio length (and per-frame seg_dur) matches EN.
 TTS_PITCH    = "-3Hz"   # Slightly lower pitch → warmer tone
 
+# Optional call-to-action appended to the narration (opt-in via UI checkbox).
+# Drives viewers from Shorts/Reels to the Telegram channels. The hook is the
+# "full game trailer" — something the short clip doesn't fully show.
+CTA_PHRASE    = "Full game trailer is in our Telegram link in bio, join now!"
+CTA_PHRASE_RU = "Полный трейлер игры в нашем Telegram канале, ссылка в профиле, залетай!"
+
 
 # yt-dlp cookie arguments — passes browser cookies to bypass YouTube bot check.
 #
@@ -2421,6 +2427,7 @@ async def create_short_video(
     n_article_clips: int = 0,
     include_article_images: bool = False,
     use_monitor_frame: bool | None = None,
+    add_cta: bool = False,
 ) -> Optional[str]:
     """
     Generate a TikTok/Reels/Shorts video for an approved post.
@@ -2441,6 +2448,12 @@ async def create_short_video(
     logger.info("Video workdir: %s", workdir)
 
     tts_voice = TTS_VOICE_RU if lang == "ru" else TTS_VOICE
+
+    # Optionally append a Telegram call-to-action to the end of the narration.
+    if add_cta:
+        cta = CTA_PHRASE_RU if lang == "ru" else CTA_PHRASE
+        script = f"{script.rstrip()} {cta}"
+        logger.info("Appended Telegram CTA to narration (%s)", lang)
 
     try:
         # 1. TTS voice + word-level subtitle cues (from WordBoundary events)

@@ -571,6 +571,34 @@ async def generate_carousel_bullets(
     return bullets
 
 
+# Cliché openers that should never start a narration script (RU + EN).
+# Matches the opening sentence/clause and removes it so the script starts
+# with the next sentence instead.
+_CLICHE_OPENER_RE = re.compile(
+    r"^\s*(?:"
+    r"забудьте(?:\s+обо?)?[^.!?…]*[.!?…]+"                       # «Забудьте всё, что вы знали…»
+    r"|forget\s+(?:about\s+)?(?:everything|all)[^.!?…]*[.!?…]+"   # «Forget everything you knew…»
+    r")\s*",
+    re.IGNORECASE,
+)
+
+
+def _strip_cliche_opener(script: str) -> str:
+    """Remove a tired clichéd opening sentence from a narration script.
+
+    If, after removal, nothing meaningful remains, the original script is
+    returned unchanged so we never produce an empty narration.
+    """
+    if not script:
+        return script
+    stripped = _CLICHE_OPENER_RE.sub("", script, count=1).lstrip()
+    if stripped and len(stripped.split()) >= 10:
+        if stripped != script:
+            logger.info("Removed clichéd opener from narration script")
+        return stripped
+    return script
+
+
 async def generate_video_script(post_text: str, article_title: str, lang: str = "en") -> str:
     """
     Generate a spoken narration script for TikTok/Reels/Shorts.
@@ -605,7 +633,10 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
             "- использовать curiosity gap\n"
             "- добавлять ощущение срочности и хайпа\n"
             "- обязательно: HOOK → CONTEXT → ESCALATION → PAYOFF → LOOP END\n"  
-            "- ЗАПРЕЩЕНО: мат, сленг, грубые выражения, фамильярное обращение\n\n"
+            "- ЗАПРЕЩЕНО: мат, сленг, грубые выражения, фамильярное обращение\n"
+            "- ЗАПРЕЩЕНО начинать с избитых клише, особенно "
+            "«Забудьте всё, что вы знали…», «Забудьте о…», «Представьте…». "
+            "Hook должен быть оригинальным и конкретным по сути новости\n\n"
             f"Заголовок: {article_title}\n\n"
             f"Текст поста:\n{clean_text[:1800]}\n\n"
             "Напиши сценарий (СТРОГО 45–60 слов):"
@@ -630,7 +661,10 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
             "- Use curiosity gap\n"
             "- Add a sense of urgency and hype\n"
             "- Mandatory structure: HOOK → CONTEXT → ESCALATION → PAYOFF → LOOP END\n"
-            "- FORBIDDEN: profanity, slang, rude expressions, familiar tone\n\n"
+            "- FORBIDDEN: profanity, slang, rude expressions, familiar tone\n"
+            "- FORBIDDEN to open with tired clichés, especially "
+            "'Forget everything you knew...', 'Forget about...', 'Imagine...'. "
+            "The hook must be original and specific to the news itself\n\n"
             f"Article title: {article_title}\n\n"
             f"Post content:\n{clean_text[:1800]}\n\n"
             "Write the script (STRICTLY 45–60 words):"
@@ -658,6 +692,9 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
         script = re.sub(r"<[^>]+>", "", script)
         script = re.sub(r"[*_`#]", "", script)
         script = script.strip()
+        # Strip the overused "Forget everything you knew…" clichéd opener if the
+        # model used it anyway, despite the prompt forbidding it.
+        script = _strip_cliche_opener(script)
         word_count = len(script.split())
         logger.info("%s video script generated: %d words", lang.upper(), word_count)
         if word_count > 75:

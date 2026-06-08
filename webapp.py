@@ -773,6 +773,7 @@ def api_generate_video(post_id: int):
 
     include_images = bool(body.get("include_images", False))
     use_monitor_frame = bool(body.get("monitor_frame", True))
+    add_cta = bool(body.get("add_cta", False))
 
     # Optional custom YT search query override
     yt_query_override = (body.get("yt_query") or "").strip() or None
@@ -797,7 +798,7 @@ def api_generate_video(post_id: int):
 
     def _run():
         try:
-            _run_async(_generate_video(post_id, lang, include_images=include_images, use_monitor_frame=use_monitor_frame))
+            _run_async(_generate_video(post_id, lang, include_images=include_images, use_monitor_frame=use_monitor_frame, add_cta=add_cta))
         except Exception as exc:
             _push(post_id, f"Fatal error: {exc}", "error")
         finally:
@@ -967,7 +968,7 @@ async def _generate_carousel(post_id: int, lang: str) -> None:
         raise
 
 
-async def _generate_video(post_id: int, lang: str, include_images: bool = False, use_monitor_frame: bool = True) -> None:
+async def _generate_video(post_id: int, lang: str, include_images: bool = False, use_monitor_frame: bool = True, add_cta: bool = False) -> None:
     """Core video generation logic (mirrors handle_create_video in bot.py)."""
     post = db.get_scheduled_post(post_id)
     if not post:
@@ -1091,6 +1092,7 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
                     n_article_clips=len(article_videos),
                     include_article_images=include_images,
                     use_monitor_frame=use_monitor_frame,
+                    add_cta=add_cta,
                 )
                 if en_path:
                     db.set_generated_video_path(post_id, en_path)
@@ -1110,6 +1112,7 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
                     n_article_clips=len(article_videos),
                     include_article_images=include_images,
                     use_monitor_frame=use_monitor_frame,
+                    add_cta=add_cta,
                 )
                 if ru_path:
                     db.set_generated_video_path_ru(post_id, ru_path)

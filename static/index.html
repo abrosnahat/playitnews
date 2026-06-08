@@ -1143,6 +1143,10 @@
         <input id="monFrame_${p.id}" type="checkbox" checked>
         <span>🖥️ Use monitor frame</span>
       </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:6px 0;cursor:pointer;">
+        <input id="cta_${p.id}" type="checkbox">
+        <span>📢 Add Telegram CTA (voiced at end)</span>
+      </label>
       <div class="btn-group">
         <button class="btn btn-primary" onclick="generateVideo(${p.id},'both')">🎬 EN+RU</button>
         <button class="btn btn-outline" onclick="generateVideo(${p.id},'en')">🇬🇧 EN only</button>
@@ -1327,6 +1331,8 @@
         const includeImages = !!(incImgEl && incImgEl.checked);
         const monFrameEl = document.getElementById(`monFrame_${id}`);
         const monitorFrame = monFrameEl ? !!monFrameEl.checked : true;
+        const ctaEl = document.getElementById(`cta_${id}`);
+        const addCta = !!(ctaEl && ctaEl.checked);
         progressLogs[id] = [];
         area.innerHTML = `
     <div class="progress-panel">
@@ -1359,6 +1365,7 @@
               lang,
               include_images: includeImages,
               monitor_frame: monitorFrame,
+              add_cta: addCta,
               ...(ytQuery ? { yt_query: ytQuery } : {}),
             }),
           });
