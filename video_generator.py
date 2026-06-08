@@ -11,8 +11,10 @@ Output: 1080 × 1920 portrait video (~18–25 s target for max retention.
 from __future__ import annotations
 
 import asyncio
+import bisect
 import concurrent.futures
 import logging
+import math
 import os
 import random
 import re
@@ -1542,6 +1544,51 @@ _OUTRO_SKIP = 5.0  # don't take material from the last 5 s of a source video
 _SMART_CLIPS = (os.getenv("SMART_CLIP_SELECTION", "1").strip().lower()
                 not in ("0", "false", "no", "off", ""))
 
+# Tuning for smart clip scoring. A static text/title card produces near-zero
+# scene_scores; an editing cut produces a single big spike. To avoid picking
+# windows that merely *start* on a cut into a static screen we:
+#   * cap each sample so one cut spike can't "carry" an otherwise static window
+#   * penalise windows that are mostly static (many near-zero samples)
+_STATIC_SCORE   = float(os.getenv("SMART_STATIC_SCORE", "0.012"))   # below this = "static" frame
+_SPIKE_CAP      = float(os.getenv("SMART_SPIKE_CAP", "0.35"))       # clamp per-sample motion
+_STATIC_PENALTY = float(os.getenv("SMART_STATIC_PENALTY", "0.6"))   # weight of static-ratio penalty
+
+# Text-density penalty. Even action-packed windows sometimes contain big
+# title/lower-third/text-card frames. We densely sample frames across each
+# candidate window and run the EAST deep-learning text detector on them; the
+# fraction of frame area covered by detected text boxes is the "text ratio".
+# Windows that show text at ANY sampled frame get their motion score scaled
+# down (trailer text fades in/out, so sparse sampling misses it — we sample at
+# _TEXT_PROBE_FPS and take the worst frame). Disable with SMART_TEXT_PENALTY=0.
+# Needs opencv (cv2.dnn) + the EAST model file; if either is missing or a frame
+# can't be analysed it's treated as text-free (no penalty), so the pipeline
+# degrades gracefully.
+_TEXT_PENALTY   = float(os.getenv("SMART_TEXT_PENALTY", "0.7"))     # weight of text-ratio penalty
+_TEXT_TOPN      = int(os.getenv("SMART_TEXT_TOPN", "4"))            # candidate pool = n_clips * this
+_TEXT_PROBE_FPS = float(os.getenv("SMART_TEXT_PROBE_FPS", "2.0"))  # frames/sec sampled per window
+_TEXT_FRAME_W   = int(os.getenv("SMART_TEXT_FRAME_W", "320"))      # downscale width for frame extraction
+_EAST_MODEL     = os.getenv(
+    "SMART_EAST_MODEL",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "assets", "frozen_east_text_detection.pb"),
+)
+_EAST_CONF      = float(os.getenv("SMART_EAST_CONF", "0.5"))       # min text-box confidence
+_EAST_SIZE      = int(os.getenv("SMART_EAST_SIZE", "320"))         # EAST input size (multiple of 32)
+# Text coverage (fraction of frame area inside text boxes) that we treat as
+# "definitely a text/title card" → normalised text signal of 1.0. Real title
+# cards cover ~0.10–0.45; gameplay is ~0.00. Tune via SMART_TEXT_FULL_COVER.
+_TEXT_FULL_COVER = float(os.getenv("SMART_TEXT_FULL_COVER", "0.10"))
+# Normalised text signal at/above which a frame counts as "has text" when
+# building the busy-times map (0.5 ⇒ coverage ≥ 0.05).
+_TEXT_CLEAN_THR  = float(os.getenv("SMART_TEXT_CLEAN_THR", "0.5"))
+# Safety margin (s) added around a clip window when checking it against the
+# text map, so a clip never starts/ends right on a text flash.
+_TEXT_MARGIN     = float(os.getenv("SMART_TEXT_MARGIN", "0.4"))
+# EAST output layer names (frozen graph).
+_EAST_LAYERS = ["feature_fusion/Conv_7/Sigmoid", "feature_fusion/concat_3"]
+# Lazily-loaded singleton: None = not tried, False = unavailable, else cv2 net.
+_east_net = None
+
 
 def _scene_scores(
     video_path: str,
@@ -1599,22 +1646,218 @@ def _best_window_start(
     lo: float,
     hi: float,
     clip_dur: float,
-) -> float | None:
+    top_n: int = 1,
+) -> list[tuple[float, float]]:
     """
-    Within [lo, hi], find the clip start whose [start, start+clip_dur] window
-    has the highest total scene-score (most action). Candidate starts are the
-    scored timestamps inside the bucket. Returns None if no scores fall in range.
+    Within [lo, hi], rank clip starts by how much *sustained* motion their
+    [start, start+clip_dur] window contains and return the best `top_n` as
+    [(start, motion_score), ...] (highest first).
+
+    We don't just sum scene-scores — that rewards a single editing cut spike
+    that often jumps straight to a static title/text card. Instead, for each
+    candidate window we:
+
+      * clamp every sample to _SPIKE_CAP so one big cut can't dominate;
+      * measure the fraction of near-static samples (< _STATIC_SCORE) and
+        subtract a penalty proportional to it.
+
+    Candidate starts are the scored timestamps inside the bucket. Returns an
+    empty list if no scores fall in range.
     """
     cands = [t for t, _ in scores if lo <= t <= max(lo, hi)]
     if not cands:
-        return None
-    best_start, best_sum = None, -1.0
+        return []
+    ranked: list[tuple[float, float]] = []
     for start in cands:
         window_end = start + clip_dur
-        total = sum(s for t, s in scores if start <= t < window_end)
-        if total > best_sum:
-            best_sum, best_start = total, start
-    return best_start
+        window = [s for t, s in scores if start <= t < window_end]
+        if not window:
+            continue
+        motion = sum(min(s, _SPIKE_CAP) for s in window)
+        static_ratio = sum(1 for s in window if s < _STATIC_SCORE) / len(window)
+        score = motion * (1.0 - _STATIC_PENALTY * static_ratio)
+        ranked.append((start, score))
+    ranked.sort(key=lambda x: x[1], reverse=True)
+    return ranked[:max(1, top_n)]
+
+
+def _get_east_net():
+    """
+    Lazily load the EAST text-detector once and cache it. Returns the cv2 DNN
+    net, or None if OpenCV/the model file is unavailable (callers then skip the
+    text penalty gracefully).
+    """
+    global _east_net
+    if _east_net is not None:
+        return _east_net or None
+    try:
+        import cv2  # type: ignore
+    except Exception:
+        logger.info("Text penalty disabled: OpenCV not available")
+        _east_net = False
+        return None
+    if not os.path.exists(_EAST_MODEL):
+        logger.info("Text penalty disabled: EAST model not found at %s", _EAST_MODEL)
+        _east_net = False
+        return None
+    try:
+        net = cv2.dnn.readNet(_EAST_MODEL)
+    except Exception as exc:
+        logger.warning("Text penalty disabled: failed to load EAST model: %s", exc)
+        _east_net = False
+        return None
+    _east_net = net
+    logger.info("EAST text detector loaded (%s)", os.path.basename(_EAST_MODEL))
+    return net
+
+
+def _frame_text_ratio(img_path: str) -> float:
+    """
+    Estimate how "text-heavy" a single frame is, in [0.0, 1.0], using the EAST
+    deep-learning text detector (cv2.dnn). EAST was trained to find real text
+    regions, so unlike edge/MSER heuristics it does NOT fire on building
+    windows, fences or HUD textures — it reliably separates gameplay from
+    title/lower-third/text cards.
+
+    The frame is run through EAST, detected text boxes are NMS-merged and
+    rasterised into a mask, and the returned ratio is the fraction of frame
+    area covered by text.
+
+    Returns 0.0 on any failure or if no text is found (i.e. no penalty).
+    """
+    net = _get_east_net()
+    if net is None:
+        return 0.0
+    try:
+        import cv2  # type: ignore
+        import numpy as np
+    except Exception:
+        return 0.0
+    try:
+        img = cv2.imread(img_path)
+    except Exception:
+        return 0.0
+    if img is None or img.size == 0:
+        return 0.0
+
+    inp = max(32, (_EAST_SIZE // 32) * 32)
+    try:
+        blob = cv2.dnn.blobFromImage(
+            img, 1.0, (inp, inp),
+            (123.68, 116.78, 103.94), swapRB=True, crop=False,
+        )
+        net.setInput(blob)
+        scores, geometry = net.forward(_EAST_LAYERS)
+    except Exception:
+        return 0.0
+
+    n_rows, n_cols = scores.shape[2], scores.shape[3]
+    rects: list[tuple[int, int, int, int]] = []
+    confs: list[float] = []
+    for y in range(n_rows):
+        s = scores[0, 0, y]
+        d0, d1, d2, d3 = (geometry[0, 0, y], geometry[0, 1, y],
+                          geometry[0, 2, y], geometry[0, 3, y])
+        angles = geometry[0, 4, y]
+        for x in range(n_cols):
+            sc = float(s[x])
+            if sc < _EAST_CONF:
+                continue
+            off_x, off_y = x * 4.0, y * 4.0
+            a = float(angles[x])
+            cos_a, sin_a = math.cos(a), math.sin(a)
+            h = float(d0[x] + d2[x])
+            w = float(d1[x] + d3[x])
+            end_x = off_x + cos_a * d1[x] + sin_a * d2[x]
+            end_y = off_y - sin_a * d1[x] + cos_a * d2[x]
+            start_x = end_x - w
+            start_y = end_y - h
+            rects.append((int(start_x), int(start_y), int(w), int(h)))
+            confs.append(sc)
+
+    if not rects:
+        return 0.0
+    try:
+        idxs = cv2.dnn.NMSBoxes(rects, confs, _EAST_CONF, 0.4)
+    except Exception:
+        return 0.0
+    if idxs is None or len(idxs) == 0:
+        return 0.0
+
+    mask = np.zeros((inp, inp), dtype=np.uint8)
+    for i in np.array(idxs).flatten():
+        x, y, w, h = rects[int(i)]
+        x0 = max(0, x); y0 = max(0, y)
+        x1 = min(inp, x + w); y1 = min(inp, y + h)
+        if x1 > x0 and y1 > y0:
+            mask[y0:y1, x0:x1] = 255
+    return float((mask > 0).sum()) / float(inp * inp)
+
+
+def _text_busy_times(
+    video_path: str,
+    workdir: str,
+    fps: float = _TEXT_PROBE_FPS,
+) -> list[float]:
+    """
+    Scan the whole video once (one ffmpeg pass at `fps` frames/sec) and return
+    the sorted list of timestamps (seconds) whose frame shows on-screen text
+    (normalised EAST signal ≥ _TEXT_CLEAN_THR).
+
+    Doing a single full-video pass is both cheaper and more accurate than
+    re-probing every candidate window: trailer text fades in/out, so we need
+    dense temporal coverage to know exactly which moments are clean. Callers
+    use the returned "busy" times to reject any clip window that overlaps text.
+    Returns an empty list if text detection is unavailable (→ no windows are
+    considered texty, i.e. the penalty is effectively off).
+    """
+    if _get_east_net() is None:
+        return []
+    fps = max(0.5, fps)
+    tmp = os.path.join(workdir, "_textscan")
+    os.makedirs(tmp, exist_ok=True)
+    _run(
+        [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-vf", f"fps={fps:.3f},scale={_TEXT_FRAME_W}:-1",
+            "-q:v", "5",
+            os.path.join(tmp, "f_%05d.jpg"),
+        ],
+        timeout=240,
+    )
+    busy: list[float] = []
+    try:
+        frames = sorted(f for f in os.listdir(tmp) if f.endswith(".jpg"))
+        for idx, fname in enumerate(frames):
+            fp = os.path.join(tmp, fname)
+            if os.path.getsize(fp) <= 256:
+                continue
+            cov = _frame_text_ratio(fp)
+            sig = min(1.0, cov / max(1e-6, _TEXT_FULL_COVER))
+            if sig >= _TEXT_CLEAN_THR:
+                busy.append(idx / fps)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return busy
+
+
+def _window_has_text(
+    busy_times: list[float],
+    start: float,
+    clip_dur: float,
+    margin: float = _TEXT_MARGIN,
+) -> bool:
+    """
+    True if any known text timestamp falls within [start-margin, start+clip_dur+margin].
+    `busy_times` must be sorted. Empty list ⇒ always False (no text known).
+    """
+    if not busy_times:
+        return False
+    lo = start - margin
+    hi = start + clip_dur + margin
+    i = bisect.bisect_left(busy_times, lo)
+    return i < len(busy_times) and busy_times[i] <= hi
 
 
 def _cut_clips_from_video(
@@ -1625,11 +1868,16 @@ def _cut_clips_from_video(
     clip_name_prefix: str = "clip",
 ) -> list[str]:
     """
-    Cut n_clips random 5–7 second segments from video_path, skipping the opening
-    and the final _OUTRO_SKIP seconds (typical outro/end-card territory).
-    The available range is divided into n_clips equal buckets; a random start
-    position is chosen within each bucket to ensure even coverage with variety.
-    Each clip is stream-copied (no re-encode) for speed.
+    Cut n_clips 5–7 second segments from video_path, skipping the opening and
+    the final _OUTRO_SKIP seconds (typical outro/end-card territory).
+
+    With scene analysis enabled, start positions are chosen GLOBALLY: candidate
+    windows are ranked by sustained motion, the strongest are scored for
+    on-screen text (EAST), and the least-texty / most-active windows are picked
+    greedily while kept spaced out for coverage. This lets the picker skip
+    whole text/title regions instead of being forced to take one clip per
+    fixed time bucket. Without scene scores it falls back to even random
+    buckets. Each clip is stream-copied (no re-encode) for speed.
 
     Why 5–7 s (not 3–4 s):
       `_make_video_segment` uses `-stream_loop -1 -t seg_dur`. If seg_dur is
@@ -1666,16 +1914,87 @@ def _cut_clips_from_video(
 
     result: list[str] = []
     bucket_size = available / n_clips
+    text_penalty_on = _SMART_CLIPS and _TEXT_PENALTY > 0.0
+    nominal_dur = 6.0                       # window length used for ranking
+    cut_max = 7.0                           # longest clip we may cut
+    max_start = max(intro_skip, usable_end - cut_max)  # leave room for a cut
+
+    # ------------------------------------------------------------------
+    # Pick n_clips start positions.
+    #
+    # Old behaviour cut exactly one clip per equal-size bucket, so a bucket
+    # that was entirely a title/text card produced a text clip no matter what.
+    # Instead we now (1) scan the whole video ONCE for on-screen text, then
+    # (2) rank candidate windows by motion and keep only those that fall
+    # entirely inside text-free stretches. Several clips may come from one long
+    # clean run, and text regions are skipped outright. If the source is mostly
+    # text we relax gracefully (see passes below).
+    # ------------------------------------------------------------------
+    starts: list[float] = []
+    if scores:
+        busy_times = _text_busy_times(video_path, workdir) if text_penalty_on else []
+        ranked = _best_window_start(
+            scores, intro_skip, max_start, nominal_dur, top_n=10_000,
+        )
+        ranked = [(s, m) for s, m in ranked if m > 0]
+
+        def _clean(start: float) -> bool:
+            return not _window_has_text(busy_times, start, cut_max)
+
+        # Pass 1: highest-motion windows that are fully text-free, spaced by one
+        # clip length so we don't cut overlapping footage (but several clips may
+        # share a long clean run).
+        for s, m in ranked:
+            if len(starts) >= n_clips:
+                break
+            if any(abs(s - u) < cut_max for u in starts):
+                continue
+            if not _clean(s):
+                continue
+            starts.append(s)
+        # Pass 2: relax spacing to allow tighter packing of clean runs.
+        if len(starts) < n_clips:
+            for s, m in ranked:
+                if len(starts) >= n_clips:
+                    break
+                if s in starts or any(abs(s - u) < nominal_dur * 0.5 for u in starts):
+                    continue
+                if not _clean(s):
+                    continue
+                starts.append(s)
+        # Pass 3: source is mostly text — accept highest-motion windows even if
+        # they contain some text, still avoiding duplicates.
+        if len(starts) < n_clips:
+            for s, m in ranked:
+                if len(starts) >= n_clips:
+                    break
+                if s in starts or any(abs(s - u) < nominal_dur * 0.5 for u in starts):
+                    continue
+                starts.append(s)
+        # Last resort: still short → random fill.
+        guard = 0
+        while len(starts) < n_clips and guard < n_clips * 4:
+            starts.append(random.uniform(intro_skip, max_start))
+            guard += 1
+        starts = starts[:n_clips]
+        starts.sort()
+
+        if text_penalty_on:
+            texty = sum(1 for s in starts if _window_has_text(busy_times, s, cut_max))
+            logger.info(
+                "Clip selection: %d windows, %d busy-text frames in source, "
+                "%d clips still overlap text",
+                len(starts), len(busy_times), texty,
+            )
 
     for i in range(n_clips):
         clip_dur = random.uniform(5.0, 7.0)
-        bucket_start = intro_skip + i * bucket_size
-        bucket_end   = bucket_start + max(0.0, bucket_size - clip_dur)
-
-        start = None
-        if scores:
-            start = _best_window_start(scores, bucket_start, bucket_end, clip_dur)
-        if start is None:
+        if i < len(starts):
+            start = min(starts[i], max_start)
+        else:
+            # Fallback (no scene scores): even-coverage random buckets.
+            bucket_start = intro_skip + i * bucket_size
+            bucket_end = bucket_start + max(0.0, bucket_size - clip_dur)
             start = random.uniform(bucket_start, max(bucket_start, bucket_end))
 
         out_path = os.path.join(clips_dir, f"{clip_name_prefix}_{i:02d}.mp4")
