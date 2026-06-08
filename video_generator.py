@@ -1530,6 +1530,86 @@ async def _download_full_yt_video(
 
 _OUTRO_SKIP = 5.0  # don't take material from the last 5 s of a source video
 
+# Smart clip selection: pick the most visually active windows (scene cuts /
+# fast motion / action) instead of random positions. Disable with
+# SMART_CLIP_SELECTION=0 to fall back to the old random-bucket behaviour.
+_SMART_CLIPS = (os.getenv("SMART_CLIP_SELECTION", "1").strip().lower()
+                not in ("0", "false", "no", "off", ""))
+
+
+def _scene_scores(
+    video_path: str,
+    sample_fps: float = 4.0,
+    timeout: int = 180,
+) -> list[tuple[float, float]]:
+    """
+    Analyse a video and return [(timestamp, scene_score), ...].
+
+    Uses ffmpeg's built-in scene-change detector. A high score means a big
+    visual change between consecutive sampled frames — i.e. a cut, fast camera
+    movement, explosion or other "action", which is a cheap proxy for the most
+    interesting moments. The video is first downsampled to `sample_fps` so the
+    analysis pass stays fast even on long sources.
+
+    Returns an empty list if ffmpeg fails or nothing could be parsed (callers
+    then fall back to random selection).
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "info",
+                "-i", video_path,
+                "-vf", f"fps={sample_fps},select='gte(scene,0)',"
+                       "metadata=print:file=-",
+                "-an", "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except Exception as exc:
+        logger.warning("Scene analysis failed for %s: %s",
+                       os.path.basename(video_path), exc)
+        return []
+
+    scores: list[tuple[float, float]] = []
+    cur_t: float | None = None
+    # metadata=print emits pairs of lines:
+    #   frame:0    pts:7616    pts_time:7.616
+    #   lavfi.scene_score=0.045339
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("frame:"):
+            m = re.search(r"pts_time:([0-9.]+)", line)
+            cur_t = float(m.group(1)) if m else None
+        elif "lavfi.scene_score=" in line and cur_t is not None:
+            try:
+                scores.append((cur_t, float(line.split("=", 1)[1])))
+            except ValueError:
+                pass
+    return scores
+
+
+def _best_window_start(
+    scores: list[tuple[float, float]],
+    lo: float,
+    hi: float,
+    clip_dur: float,
+) -> float | None:
+    """
+    Within [lo, hi], find the clip start whose [start, start+clip_dur] window
+    has the highest total scene-score (most action). Candidate starts are the
+    scored timestamps inside the bucket. Returns None if no scores fall in range.
+    """
+    cands = [t for t, _ in scores if lo <= t <= max(lo, hi)]
+    if not cands:
+        return None
+    best_start, best_sum = None, -1.0
+    for start in cands:
+        window_end = start + clip_dur
+        total = sum(s for t, s in scores if start <= t < window_end)
+        if total > best_sum:
+            best_sum, best_start = total, start
+    return best_start
+
 
 def _cut_clips_from_video(
     video_path: str,
@@ -1568,6 +1648,16 @@ def _cut_clips_from_video(
         logger.warning("Video too short to cut clips: %.1f s", duration)
         return []
 
+    # Optionally analyse the video and prefer the most action-packed windows.
+    scores: list[tuple[float, float]] = []
+    if _SMART_CLIPS:
+        scores = _scene_scores(video_path)
+        if scores:
+            logger.info(
+                "Scene analysis: %d samples for %s — selecting interesting moments",
+                len(scores), os.path.basename(video_path),
+            )
+
     result: list[str] = []
     bucket_size = available / n_clips
 
@@ -1575,7 +1665,12 @@ def _cut_clips_from_video(
         clip_dur = random.uniform(5.0, 7.0)
         bucket_start = intro_skip + i * bucket_size
         bucket_end   = bucket_start + max(0.0, bucket_size - clip_dur)
-        start        = random.uniform(bucket_start, max(bucket_start, bucket_end))
+
+        start = None
+        if scores:
+            start = _best_window_start(scores, bucket_start, bucket_end, clip_dur)
+        if start is None:
+            start = random.uniform(bucket_start, max(bucket_start, bucket_end))
 
         out_path = os.path.join(clips_dir, f"{clip_name_prefix}_{i:02d}.mp4")
         ok = _run(
@@ -1593,8 +1688,9 @@ def _cut_clips_from_video(
             result.append(out_path)
 
     logger.info(
-        "Cut %d random 5–7 s clips from %s (intro_skip=%.1fs)",
-        len(result), os.path.basename(video_path), intro_skip,
+        "Cut %d %s 5–7 s clips from %s (intro_skip=%.1fs)",
+        len(result), "smart" if scores else "random",
+        os.path.basename(video_path), intro_skip,
     )
     return result
 
@@ -2248,8 +2344,6 @@ async def fetch_gameplay_clips(
     """
     workdir = tempfile.mkdtemp(dir=VIDEOS_DIR, prefix="clips_")
     N_CLIPS_ARTICLE = 8    # ~7 × 3–4 s ≈ 24–32 s — fits the target short duration
-    N_YT_VIDEOS     = 4    # source videos when no article video available
-    CLIPS_PER_VIDEO = 2    # cuts per YT video → 4 × 3 = 12 clips total
 
     source_video: str | None = None
 
@@ -2294,25 +2388,24 @@ async def fetch_gameplay_clips(
             len(clips), search_query,
         )
     else:
-        # ── No article video: download N_YT_VIDEOS and cut from each ──────
+        # ── No article video: download ONE YT video and cut clips from it ──
         logger.info(
-            "No article video — downloading %d YT videos for '%s' (skip=%d)",
-            N_YT_VIDEOS, search_query, yt_skip,
+            "No article video — downloading 1 YT video for '%s' (skip=%d)",
+            search_query, yt_skip,
         )
-        yt_videos = await _download_multiple_yt_videos(
-            search_query, N_YT_VIDEOS, workdir, skip=yt_skip,
+        yt_video = await _download_full_yt_video(
+            search_query, workdir, skip=yt_skip,
         )
         clips: list[str] = []
-        for vi, vid_path in enumerate(yt_videos):
-            segs = await asyncio.to_thread(
+        if yt_video:
+            clips = await asyncio.to_thread(
                 _cut_clips_from_video,
-                vid_path, CLIPS_PER_VIDEO, workdir, float(YT_CLIP_SKIP),
-                f"yt{vi}_clip",
+                yt_video, N_CLIPS_ARTICLE, workdir, float(YT_CLIP_SKIP),
+                "yt_clip",
             )
-            clips.extend(segs)
         logger.info(
-            "Prepared %d clips from %d YT videos for '%s'",
-            len(clips), len(yt_videos), search_query,
+            "Prepared %d clips from 1 YT video for '%s'",
+            len(clips), search_query,
         )
 
     return [], clips, workdir
