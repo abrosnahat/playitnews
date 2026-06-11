@@ -17,3 +17,4 @@ tiktok_session/
 musetalk_repo/.venv-musetalk/
 musetalk_repo/models/
 musetalk_repo/results/
+musetalk_repo/test_head_*.mp4

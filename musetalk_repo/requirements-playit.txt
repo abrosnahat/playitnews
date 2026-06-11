@@ -1,0 +1,24 @@
+# Trimmed MuseTalk deps for PlayItNews talking-head integration.
+# Excludes: tensorflow / tensorboard (never imported by inference code) and
+# gradio (no web UI needed — we drive scripts headlessly). torch/torchvision/
+# torchaudio are installed separately from the cu128 index (Blackwell sm_120).
+# mmcv/mmdet/mmpose are intentionally NOT installed — dwpose landmark
+# detection is replaced by the pure-torch `face-alignment` package, avoiding
+# an impossible mmcv source build (no CUDA toolkit / no cu128 mmcv wheel).
+diffusers==0.30.2
+accelerate==0.28.0
+numpy==1.26.4
+opencv-python==4.9.0.80
+soundfile==0.12.1
+transformers==4.39.2
+huggingface_hub==0.30.2
+librosa==0.11.0
+einops==0.8.1
+gdown
+requests
+imageio[ffmpeg]
+omegaconf
+ffmpeg-python
+moviepy
+tqdm
+face-alignment
