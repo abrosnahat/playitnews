@@ -85,6 +85,14 @@ VID_FPS = 30
 # ---------------------------------------------------------------------------
 USE_MONITOR_FRAME = os.getenv("USE_MONITOR_FRAME", "1") not in ("0", "false", "False", "no", "")
 
+# ---------------------------------------------------------------------------
+# Talking-head mode (mutually exclusive with monitor mode): render the gameplay
+# in the TOP half of the 9:16 frame and a realistic MuseTalk lip-synced avatar
+# in the BOTTOM half, driven by the narration audio. Off by default; enabled
+# per-call (webapp toggle) or via env USE_TALKING_HEAD=1.
+# ---------------------------------------------------------------------------
+USE_TALKING_HEAD = os.getenv("USE_TALKING_HEAD", "0") not in ("0", "false", "False", "no", "")
+
 # Inner ("on-screen") content size — 16:9, rendered first, then placed on monitor.
 INNER_W = 1600
 INNER_H = 900
@@ -229,7 +237,7 @@ MONITOR_CAMERA_LOOK = os.getenv("MONITOR_CAMERA_LOOK", "1") == "1"
 TTS_VOICE    = "en-US-AndrewMultilingualNeural"  # English — warm, authentic
 TTS_VOICE_RU = "ru-RU-DmitryNeural"              # Russian — Microsoft Neural TTS
 TTS_RATE     = "+15%"   # EN: 15% faster → targets 18–25s video length for max retention
-TTS_RATE_RU  = "+25%"   # RU: Dmitry reads slower & inserts longer inter-sentence pauses;
+TTS_RATE_RU  = "+15%"   # RU: Dmitry reads slower & inserts longer inter-sentence pauses;
                         # bump rate so audio length (and per-frame seg_dur) matches EN.
 TTS_PITCH    = "-3Hz"   # Slightly lower pitch → warmer tone
 
@@ -1278,6 +1286,7 @@ _RU_BRAND_MAP: list[tuple[str, str]] = [
     ("Kingdom Come: Deliverance", "Кингдом Кам Деливеренс"),
     ("Kingdom Come Deliverance", "Кингдом Кам Деливеренс"),
     ("Perceptum", "Перцептум"),
+    ("Meccha Chameleon", "Мекча Хамелеон")
 ]
 
 # Sort keys by length DESC so the regex tries the longest phrases first.
@@ -2432,6 +2441,168 @@ async def _compose_monitor_scene(
     )
 
 
+# ---------------------------------------------------------------------------
+# Talking-head compose (bottom half = MuseTalk lip-synced avatar)
+# ---------------------------------------------------------------------------
+
+def _head_windows_from_plan(
+    show_head: list[bool], seg_dur: float
+) -> list[tuple[float, float]]:
+    """Merge consecutive head-on segments into (start, end) time windows."""
+    windows: list[tuple[float, float]] = []
+    start = None
+    end = 0.0
+    for k, on in enumerate(show_head):
+        s, e = k * seg_dur, (k + 1) * seg_dur
+        if on:
+            if start is None:
+                start = s
+            end = e
+        elif start is not None:
+            windows.append((start, end))
+            start = None
+    if start is not None:
+        windows.append((start, end))
+    return windows
+
+
+async def _compose_talking_head_overlay(
+    gameplay_mp4: str,
+    audio_path: str,
+    output_mp4: str,
+    audio_dur: float,
+    workdir: str,
+    windows: list[tuple[float, float]],
+) -> bool:
+    """
+    Overlay a MuseTalk lip-synced head onto the BOTTOM half of a full-height
+    gameplay video, but only during the given time windows (the scene cuts where
+    the head should appear). Outside those windows the full-height gameplay
+    shows. ``gameplay_mp4`` already carries the final mixed audio; the head's
+    own audio is discarded. Returns False (caller keeps gameplay-only) if the
+    head could not be generated.
+    """
+    try:
+        import musetalk_avatar
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Talking-head unavailable (import failed): %s", exc)
+        return False
+    if not musetalk_avatar.is_available():
+        logger.warning("Talking-head unavailable (env/avatar video missing) — skipping")
+        return False
+
+    head_mp4 = os.path.join(workdir, "head.mp4")
+    logger.info("Generating talking-head avatar (lip-sync to narration)...")
+    ok_head = await musetalk_avatar.render_talking_head(audio_path, head_mp4)
+    if not ok_head or not os.path.exists(head_mp4):
+        logger.warning("Talking-head generation failed — keeping gameplay only")
+        return False
+
+    half_h = VID_H // 2
+    enable_expr = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in windows)
+
+    # Optional systematic lip-sync nudge (see MUSETALK_LIPSYNC_OFFSET_MS).
+    offset_ms = 0.0
+    try:
+        offset_ms = float(os.environ.get("MUSETALK_LIPSYNC_OFFSET_MS", "0"))
+    except ValueError:
+        offset_ms = 0.0
+    head_input_args = ["-i", head_mp4]
+    if abs(offset_ms) > 0.5:
+        head_input_args = ["-itsoffset", f"{offset_ms / 1000.0:.3f}", "-i", head_mp4]
+
+    ok = await _run_async(
+        [
+            "ffmpeg", "-y",
+            "-i", gameplay_mp4,
+            *head_input_args,
+            "-filter_complex",
+            (
+                f"[0:v]setsar=1,fps={VID_FPS}[base];"
+                f"[1:v]scale={VID_W}:{half_h}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"crop={VID_W}:{half_h},setsar=1,fps={VID_FPS}[head];"
+                f"[base][head]overlay=0:{half_h}:enable='{enable_expr}'[v]"
+            ),
+            "-map", "[v]", "-map", "0:a",
+            *_video_encoder_args(crf=18),
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-t", f"{audio_dur:.3f}",
+            output_mp4,
+        ],
+        timeout=300,
+    )
+    return ok and os.path.exists(output_mp4)
+
+
+async def _compose_talking_head_scene(
+    gameplay_mp4: str,
+    audio_path: str,
+    output_mp4: str,
+    audio_dur: float,
+    workdir: str,
+) -> bool:
+    """
+    Stack gameplay (top half) over a MuseTalk lip-synced talking head
+    (bottom half) into the 1080x1920 portrait frame. ``gameplay_mp4`` already
+    carries the final mixed audio (TTS + music); the head's own audio is
+    discarded. Returns False (caller keeps gameplay-only) if the head could
+    not be generated.
+    """
+    try:
+        import musetalk_avatar
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Talking-head unavailable (import failed): %s", exc)
+        return False
+    if not musetalk_avatar.is_available():
+        logger.warning("Talking-head unavailable (env/avatar video missing) — skipping")
+        return False
+
+    head_mp4 = os.path.join(workdir, "head.mp4")
+    logger.info("Generating talking-head avatar (lip-sync to narration)...")
+    ok_head = await musetalk_avatar.render_talking_head(audio_path, head_mp4)
+    if not ok_head or not os.path.exists(head_mp4):
+        logger.warning("Talking-head generation failed — keeping gameplay only")
+        return False
+
+    half_h = VID_H // 2
+    # MuseTalk is trained on en/zh; on other languages (e.g. Russian) the mouth
+    # can sit a couple of frames early/late. MUSETALK_LIPSYNC_OFFSET_MS lets the
+    # operator nudge the talking-head video relative to the narration audio:
+    # positive = lips later, negative = lips earlier.
+    offset_ms = 0.0
+    try:
+        offset_ms = float(os.environ.get("MUSETALK_LIPSYNC_OFFSET_MS", "0"))
+    except ValueError:
+        offset_ms = 0.0
+    head_input_args = ["-i", head_mp4]
+    if abs(offset_ms) > 0.5:
+        head_input_args = ["-itsoffset", f"{offset_ms / 1000.0:.3f}", "-i", head_mp4]
+    ok = await _run_async(
+        [
+            "ffmpeg", "-y",
+            "-i", gameplay_mp4,
+            *head_input_args,
+            "-filter_complex",
+            (
+                f"[0:v]scale={VID_W}:{half_h}:force_original_aspect_ratio=increase,"
+                f"crop={VID_W}:{half_h},setsar=1,fps={VID_FPS}[top];"
+                f"[1:v]scale={VID_W}:{half_h}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"crop={VID_W}:{half_h},setsar=1,fps={VID_FPS}[bot];"
+                f"[top][bot]vstack=inputs=2[v]"
+            ),
+            "-map", "[v]", "-map", "0:a",
+            *_video_encoder_args(crf=18),
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-t", f"{audio_dur:.3f}",
+            output_mp4,
+        ],
+        timeout=300,
+    )
+    return ok and os.path.exists(output_mp4)
+
+
 async def _assemble_video(
     image_paths: list[str],
     video_clip_paths: list[str],
@@ -2441,6 +2612,7 @@ async def _assemble_video(
     workdir: str,
     n_article_clips: int = 0,
     use_monitor_frame: bool | None = None,
+    use_talking_head: bool = False,
 ) -> bool:
     """
     Assemble portrait video:
@@ -2456,6 +2628,24 @@ async def _assemble_video(
     # Per-call override of the module-level USE_MONITOR_FRAME default.
     if use_monitor_frame is None:
         use_monitor_frame = USE_MONITOR_FRAME
+
+    # Talking-head and monitor frame are mutually exclusive — head wins.
+    if use_talking_head:
+        use_monitor_frame = False
+
+    # Talking-head display modes (env MUSETALK_HEAD_MODE):
+    #   always   — head fills the bottom half for the WHOLE clip (gameplay top half)
+    #   segments — head appears only over some gameplay segments (scene cuts);
+    #              the remaining segments show gameplay at full height
+    #   off      — disable the head entirely (full-height gameplay only)
+    th_segments_mode = False
+    show_head_plan: list[bool] = []
+    if use_talking_head:
+        th_mode = os.getenv("MUSETALK_HEAD_MODE", "always").strip().lower()
+        if th_mode == "off":
+            use_talking_head = False
+        elif th_mode == "segments":
+            th_segments_mode = True
 
     # Order: first clip → images (pan animation) → remaining clips.
     # This keeps the video opening with motion footage and returns to gameplay after images.
@@ -2477,12 +2667,33 @@ async def _assemble_video(
 
     seg_dur = audio_dur / len(all_media)       # equal time per media item
 
+    # In SEGMENTS mode decide, per scene cut, whether the head appears there.
+    if th_segments_mode:
+        try:
+            head_prob = float(os.getenv("MUSETALK_HEAD_PROBABILITY", "0.5"))
+        except ValueError:
+            head_prob = 0.5
+        head_prob = min(1.0, max(0.0, head_prob))
+        show_head_plan = [random.random() < head_prob for _ in all_media]
+        # Guarantee at least one head segment so the (expensive) generation pays off.
+        if not any(show_head_plan):
+            show_head_plan[random.randrange(len(all_media))] = True
+        logger.info(
+            "Talking-head SEGMENTS mode — head on %d/%d segments (p=%.2f)",
+            sum(show_head_plan), len(all_media), head_prob,
+        )
+
     # Inner segments are rendered at 16:9 when monitor mode is on; otherwise
     # they are rendered directly at portrait 9:16 as before.
     if use_monitor_frame:
         seg_w, seg_h = INNER_W, INNER_H
         logger.info("Monitor mode ON — rendering inner content at %dx%d", seg_w, seg_h)
+    elif use_talking_head and not th_segments_mode:
+        seg_w, seg_h = VID_W, VID_H // 2
+        logger.info("Talking-head mode ON — rendering gameplay at %dx%d (top half)", seg_w, seg_h)
     else:
+        # Full height. In SEGMENTS mode, head segments are overridden per-build
+        # to render the top half and then padded to full height.
         seg_w, seg_h = VID_W, VID_H
 
     # ── Step 1: build segments (parallel) ────────────────────────────────
@@ -2492,24 +2703,52 @@ async def _assemble_video(
 
     async def _build_segment(i, media, img_flag):
         seg_path = os.path.join(workdir, f"seg_{i:03d}.mp4")
+        # In SEGMENTS mode, head segments render gameplay into the TOP half and
+        # are then padded to full height (black bottom, later covered by the
+        # head overlay); other segments render gameplay at full height.
+        head_here = bool(th_segments_mode and show_head_plan and show_head_plan[i])
+        if head_here:
+            cw, ch = VID_W, VID_H // 2
+            build_path = os.path.join(workdir, f"seg_raw_{i:03d}.mp4")
+        else:
+            cw, ch = seg_w, seg_h
+            build_path = seg_path
         if img_flag:
             ok = await asyncio.to_thread(
-                _make_image_segment, media, seg_dur, seg_path, seg_w, seg_h,
+                _make_image_segment, media, seg_dur, build_path, cw, ch,
             )
         else:
             skip = YT_CLIP_SKIP if media in article_clip_set else 0.0
             ok = await asyncio.to_thread(
-                _make_video_segment, media, seg_dur, seg_path, skip, seg_w, seg_h,
+                _make_video_segment, media, seg_dur, build_path, skip, cw, ch,
             )
-        return seg_path if ok else None
+        if not ok:
+            return None
+        if head_here:
+            # Pad the top-half gameplay onto a full-height canvas (black bottom).
+            ok = await _run_async(
+                ["ffmpeg", "-y", "-i", build_path,
+                 "-vf", f"pad={VID_W}:{VID_H}:0:0:color=black,setsar=1,fps={VID_FPS}",
+                 *_video_encoder_args(crf=20),
+                 "-pix_fmt", "yuv420p", "-an", seg_path],
+                timeout=120,
+            )
+            if not ok:
+                return None
+        return seg_path
 
     seg_results = await asyncio.gather(
         *[_build_segment(i, media, img_flag) for i, (media, img_flag) in enumerate(zip(all_media, is_image))]
     )
-    segments = [p for p in seg_results if p is not None]
+    segments = []
+    show_head_final: list[bool] = []
     for i, p in enumerate(seg_results):
         if p is None:
             logger.warning("Skipping failed segment %d", i)
+            continue
+        segments.append(p)
+        if th_segments_mode:
+            show_head_final.append(bool(show_head_plan[i]))
 
     if not segments:
         logger.error("All segments failed — cannot build video")
@@ -2629,6 +2868,28 @@ async def _assemble_video(
             mixed_mp4 = scene_mp4
         else:
             logger.warning("Monitor compose failed — falling back to raw 16:9 output")
+    elif use_talking_head:
+        th_mp4 = os.path.join(workdir, "talkinghead.mp4")
+        if th_segments_mode:
+            # Head appears only over selected segments; gameplay is full-height
+            # elsewhere. Visibility windows come from the scene-cut boundaries.
+            windows = _head_windows_from_plan(show_head_final, seg_dur)
+            if windows:
+                ok_th = await _compose_talking_head_overlay(
+                    mixed_mp4, audio_path, th_mp4, audio_dur, workdir, windows,
+                )
+            else:
+                ok_th = False
+        else:
+            # Stack gameplay (top half) over the head (bottom half) for the whole clip.
+            ok_th = await _compose_talking_head_scene(
+                mixed_mp4, audio_path, th_mp4, audio_dur, workdir,
+            )
+        if ok_th:
+            mixed_mp4 = th_mp4
+            logger.info("Talking-head scene composed")
+        else:
+            logger.warning("Talking-head compose failed — falling back to gameplay-only 9:16")
 
     # ── Step 4: burn subtitles (Pillow PNG → ffmpeg overlay) ───────────────
     # Uses only the always-available `overlay` filter — no libass/libfreetype.
@@ -2749,6 +3010,7 @@ async def create_short_video(
     n_article_clips: int = 0,
     include_article_images: bool = False,
     use_monitor_frame: bool | None = None,
+    use_talking_head: bool = False,
     add_cta: bool = False,
 ) -> Optional[str]:
     """
@@ -2860,6 +3122,7 @@ async def create_short_video(
             all_images, all_clips, audio_path, cues, output_path, workdir,
             n_article_clips=n_article_clips,
             use_monitor_frame=use_monitor_frame,
+            use_talking_head=use_talking_head,
         )
         return output_path if ok else None
 

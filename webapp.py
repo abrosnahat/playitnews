@@ -773,6 +773,10 @@ def api_generate_video(post_id: int):
 
     include_images = bool(body.get("include_images", False))
     use_monitor_frame = bool(body.get("monitor_frame", True))
+    use_talking_head = bool(body.get("talking_head", False))
+    # Talking-head and monitor frame are mutually exclusive — head wins.
+    if use_talking_head:
+        use_monitor_frame = False
     add_cta = bool(body.get("add_cta", False))
 
     # Optional custom YT search query override
@@ -798,7 +802,7 @@ def api_generate_video(post_id: int):
 
     def _run():
         try:
-            _run_async(_generate_video(post_id, lang, include_images=include_images, use_monitor_frame=use_monitor_frame, add_cta=add_cta))
+            _run_async(_generate_video(post_id, lang, include_images=include_images, use_monitor_frame=use_monitor_frame, use_talking_head=use_talking_head, add_cta=add_cta))
         except Exception as exc:
             _push(post_id, f"Fatal error: {exc}", "error")
         finally:
@@ -968,7 +972,7 @@ async def _generate_carousel(post_id: int, lang: str) -> None:
         raise
 
 
-async def _generate_video(post_id: int, lang: str, include_images: bool = False, use_monitor_frame: bool = True, add_cta: bool = False) -> None:
+async def _generate_video(post_id: int, lang: str, include_images: bool = False, use_monitor_frame: bool = True, use_talking_head: bool = False, add_cta: bool = False) -> None:
     """Core video generation logic (mirrors handle_create_video in bot.py)."""
     post = db.get_scheduled_post(post_id)
     if not post:
@@ -1092,6 +1096,7 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
                     n_article_clips=len(article_videos),
                     include_article_images=include_images,
                     use_monitor_frame=use_monitor_frame,
+                    use_talking_head=use_talking_head,
                     add_cta=add_cta,
                 )
                 if en_path:
@@ -1112,6 +1117,7 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
                     n_article_clips=len(article_videos),
                     include_article_images=include_images,
                     use_monitor_frame=use_monitor_frame,
+                    use_talking_head=use_talking_head,
                     add_cta=add_cta,
                 )
                 if ru_path:

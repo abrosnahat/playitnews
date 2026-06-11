@@ -1140,8 +1140,12 @@
         <span>🖼 Include article images in video</span>
       </label>
       <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:6px 0;cursor:pointer;">
-        <input id="monFrame_${p.id}" type="checkbox" checked>
+        <input id="monFrame_${p.id}" type="checkbox" checked onchange="onMonFrameToggle(${p.id})">
         <span>🖥️ Use monitor frame</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:6px 0;cursor:pointer;">
+        <input id="talkHead_${p.id}" type="checkbox" onchange="onTalkHeadToggle(${p.id})">
+        <span>🗣️ Talking-head avatar (bottom half, lip-synced)</span>
       </label>
       <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:6px 0;cursor:pointer;">
         <input id="cta_${p.id}" type="checkbox">
@@ -1321,6 +1325,18 @@
   </div>`;
       }
 
+      // ─── Talking-head / monitor-frame mutual exclusion ──────────────────────────
+      function onMonFrameToggle(id) {
+        const mon = document.getElementById(`monFrame_${id}`);
+        const th = document.getElementById(`talkHead_${id}`);
+        if (mon && th && mon.checked) th.checked = false;
+      }
+      function onTalkHeadToggle(id) {
+        const mon = document.getElementById(`monFrame_${id}`);
+        const th = document.getElementById(`talkHead_${id}`);
+        if (mon && th && th.checked) mon.checked = false;
+      }
+
       // ─── Generate video ────────────────────────────────────────────────────────
       async function generateVideo(id, lang) {
         const area = document.getElementById(`progressArea_${id}`);
@@ -1331,6 +1347,8 @@
         const includeImages = !!(incImgEl && incImgEl.checked);
         const monFrameEl = document.getElementById(`monFrame_${id}`);
         const monitorFrame = monFrameEl ? !!monFrameEl.checked : true;
+        const talkHeadEl = document.getElementById(`talkHead_${id}`);
+        const talkingHead = !!(talkHeadEl && talkHeadEl.checked);
         const ctaEl = document.getElementById(`cta_${id}`);
         const addCta = !!(ctaEl && ctaEl.checked);
         progressLogs[id] = [];
@@ -1365,6 +1383,7 @@
               lang,
               include_images: includeImages,
               monitor_frame: monitorFrame,
+              talking_head: talkingHead,
               add_cta: addCta,
               ...(ytQuery ? { yt_query: ytQuery } : {}),
             }),
