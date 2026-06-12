@@ -4,6 +4,7 @@ Run:  python webapp.py
 Open: http://localhost:5000
 """
 import asyncio
+import glob
 import json
 import logging
 import os
@@ -37,6 +38,7 @@ from config import (
     TG_MAX_BYTES,
     INSTAGRAM_USER_ID_RU,
     INSTAGRAM_ACCESS_TOKEN_RU,
+    VIDEOS_DIR,
 )
 
 app = Flask(__name__, static_folder="static", static_url_path="")
@@ -552,6 +554,95 @@ async def _do_publish_telegram(post_id: int) -> None:
 
 
 
+# ---------------------------------------------------------------------------
+# Post-publish cleanup: once a post is distributed everywhere, drop its files
+# ---------------------------------------------------------------------------
+
+# Video platforms that (together with Telegram) mean a post is fully published.
+_REQUIRED_VIDEO_PLATFORMS = {"instagram", "instagram-ru", "youtube", "youtube-ru"}
+
+
+def _published_platforms(post: dict) -> set:
+    """Parse the post's `published_platforms` JSON column into a set."""
+    raw = post.get("published_platforms")
+    if not raw:
+        return set()
+    try:
+        return set(json.loads(raw))
+    except Exception:
+        return set()
+
+
+def _maybe_cleanup_post_files(post_id: int) -> None:
+    """Delete all working files of a post once it's published everywhere.
+
+    "Everywhere" = sent to Telegram (status == 'sent') AND every video
+    platform (Instagram EN/RU, YouTube EN/RU). Removes article images,
+    downloaded/article videos, the generated videos (plus their thumbnails)
+    and the carousel slides. Idempotent and safe to call multiple times —
+    it skips files that are already gone and only acts when the post is
+    fully published.
+    """
+    post = db.get_scheduled_post(post_id)
+    if not post:
+        return
+    if post.get("status") != "sent":
+        return
+    if not _REQUIRED_VIDEO_PLATFORMS.issubset(_published_platforms(post)):
+        return
+
+    base = os.path.abspath(os.path.dirname(__file__))
+
+    def _safe_remove(path: str) -> None:
+        if not path:
+            return
+        full = os.path.abspath(path)
+        # Security: never touch files outside the project directory.
+        if not full.startswith(base + os.sep):
+            return
+        try:
+            if os.path.isfile(full):
+                os.remove(full)
+                logger.info("Cleanup #%d: removed file %s", post_id, full)
+        except OSError as exc:
+            logger.warning("Cleanup #%d: could not delete %s: %s", post_id, full, exc)
+
+    def _safe_rmtree(path: str) -> None:
+        if not path:
+            return
+        full = os.path.abspath(path)
+        if not full.startswith(base + os.sep):
+            return
+        if os.path.isdir(full):
+            shutil.rmtree(full, ignore_errors=True)
+            logger.info("Cleanup #%d: removed dir %s", post_id, full)
+
+    # 1. Article images
+    for p in post.get("image_paths", []):
+        _safe_remove(p)
+    # 2. Article / downloaded videos (yt_*, vk_*, HLS)
+    for p in post.get("video_paths", []):
+        _safe_remove(p)
+    # 3. Generated videos + their thumbnail siblings
+    for gen in (post.get("generated_video_path"), post.get("generated_video_path_ru")):
+        if gen:
+            _safe_remove(gen)
+            stem = os.path.splitext(gen)[0]
+            _safe_remove(f"{stem}_thumb_en.jpg")
+            _safe_remove(f"{stem}_thumb_ru.jpg")
+    # 3b. Catch any orphaned renders for this post id
+    for extra in glob.glob(os.path.join(VIDEOS_DIR, f"short_{post_id}_*")):
+        _safe_remove(extra)
+    # 4. Carousel slides (post-scoped directory)
+    for lang in ("en", "ru"):
+        for p in post.get(f"carousel_paths_{lang}", []):
+            _safe_remove(p)
+    _safe_rmtree(os.path.join("images", "carousels", f"post_{post_id}"))
+
+    logger.info("Cleanup #%d: post fully published — working files removed", post_id)
+
+
+
 @app.route("/api/posts/<int:post_id>/cancel", methods=["POST"])
 def api_cancel(post_id: int):
     post = db.get_scheduled_post(post_id)
@@ -578,6 +669,7 @@ def api_mark_done(post_id: int):
             "UPDATE scheduled_posts SET published_platforms = ? WHERE id = ?",
             (all_platforms, post_id),
         )
+    _maybe_cleanup_post_files(post_id)
     return jsonify({"success": True})
 
 
@@ -1209,6 +1301,7 @@ def api_publish(post_id: int, platform: str):
                         "UPDATE scheduled_posts SET published_platforms = ? WHERE id = ?",
                         (json.dumps(platforms_list), post_id),
                     )
+                _maybe_cleanup_post_files(post_id)
         except Exception as exc:
             progress(f"❌ Error: {exc}", "error")
             logger.exception("Social publish failed: post #%d platform %s", post_id, platform)

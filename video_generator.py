@@ -245,7 +245,7 @@ TTS_PITCH    = "-3Hz"   # Slightly lower pitch → warmer tone
 # Drives viewers from Shorts/Reels to the Telegram channels. The hook is the
 # "full game trailer" — something the short clip doesn't fully show.
 CTA_PHRASE    = "Full game trailer is in our Telegram link in bio, join now!"
-CTA_PHRASE_RU = "Полный трейлер игры в нашем Telegram канале, ссылка в профиле, залетай!"
+CTA_PHRASE_RU = "Полный трейлер игры в нашем Telegram канале, ссылка в профиле!"
 
 
 # yt-dlp cookie arguments — passes browser cookies to bypass YouTube bot check.
