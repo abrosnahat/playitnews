@@ -58,7 +58,10 @@ _CONTAINER_POLL_TIMEOUT  = 300  # give up after 5 minutes
 # Meta refuses to ingest application/octet-stream payloads larger than
 # ~10 MB. raw.githubusercontent.com always serves with this Content-Type,
 # so we fall back to jsDelivr (which sets video/mp4) for bigger files.
-_RAW_GITHUB_OCTET_LIMIT = 9 * 1024 * 1024  # 9 MB, conservative
+# Kept at 10 MB (Meta's real ceiling) so typical ~9 MB Reels go through the
+# fast raw.github origin instead of jsDelivr, whose CDN propagation lag was
+# making fresh containers hang for the full 300 s poll timeout.
+_RAW_GITHUB_OCTET_LIMIT = 10 * 1024 * 1024  # 10 MB (Meta octet-stream ceiling)
 
 
 def _jsdelivr_to_raw(url: str) -> str:
@@ -101,6 +104,43 @@ def _make_session() -> aiohttp.ClientSession:
     connector = aiohttp.TCPConnector(ssl=ctx)
     return aiohttp.ClientSession(connector=connector)
 
+
+async def _wait_for_url_ready(
+    session: aiohttp.ClientSession,
+    url: str,
+    *,
+    timeout: int = 90,
+    interval: int = 5,
+) -> None:
+    """
+    Poll *url* until it returns HTTP 200 with a non-empty body.
+
+    Freshly committed files served via jsDelivr's CDN are not immediately
+    available on every edge node. If we create the Instagram container while
+    the URL still 404s, Meta's fetcher silently fails and the container hangs
+    until our 300 s poll times out. Verifying the URL is reachable first
+    turns that 5-minute dead end into a quick, recoverable wait.
+    """
+    elapsed = 0
+    last_status: int | str = "n/a"
+    while elapsed < timeout:
+        try:
+            # Range request: only fetch the first byte so we don't download
+            # the whole video just to confirm availability.
+            async with session.get(url, headers={"Range": "bytes=0-0"}) as resp:
+                last_status = resp.status
+                if resp.status in (200, 206):
+                    await resp.read()
+                    logger.info("Media URL ready (HTTP %s): %s", resp.status, url)
+                    return
+        except Exception as exc:  # noqa: BLE001 — transient network/DNS hiccup
+            last_status = repr(exc)
+        await asyncio.sleep(interval)
+        elapsed += interval
+    logger.warning(
+        "Media URL not confirmed ready after %ds (last=%s): %s — "
+        "creating container anyway", timeout, last_status, url,
+    )
 
 
 async def _ig_create_container(
@@ -322,6 +362,12 @@ async def publish_reel(
         for attempt in range(1, 4):
             async with _make_session() as session:
                 try:
+                    # Verify the public URL is actually fetchable before asking
+                    # Meta to ingest it. A fresh jsDelivr URL that hasn't
+                    # propagated would otherwise make the container hang for the
+                    # full 300 s poll timeout.
+                    await _wait_for_url_ready(session, video_url)
+
                     logger.info("Creating Instagram container (attempt %d/3)…", attempt)
                     container_id = await _ig_create_container(
                         session, video_url, caption, uid, tok, cover_url

@@ -1286,7 +1286,8 @@ _RU_BRAND_MAP: list[tuple[str, str]] = [
     ("Kingdom Come: Deliverance", "Кингдом Кам Деливеренс"),
     ("Kingdom Come Deliverance", "Кингдом Кам Деливеренс"),
     ("Perceptum", "Перцептум"),
-    ("Meccha Chameleon", "Мекча Хамелеон")
+    ("Meccha Chameleon", "Мекча Хамелеон"),
+    ("Genshin Impact", "Геншин Импакт"),
 ]
 
 # Sort keys by length DESC so the regex tries the longest phrases first.

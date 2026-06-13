@@ -2,15 +2,21 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>PlayItNews Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0a0a0f" />
+    <title>PlayItNews · Studio</title>
     <link
       rel="icon"
       type="image/svg+xml"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%236366f1'/%3E%3Ctext x='32' y='46' font-size='36' text-anchor='middle' font-family='system-ui,sans-serif'%3E%F0%9F%8E%AE%3C/text%3E%3C/svg%3E"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%237c5cff'/%3E%3Cstop offset='1' stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23g)'/%3E%3Ctext x='32' y='46' font-size='34' text-anchor='middle' font-family='system-ui,sans-serif'%3E%F0%9F%8E%AE%3C/text%3E%3C/svg%3E"
     />
-    <!-- Twemoji country flags polyfill: Windows' Segoe UI Emoji has no flag glyphs,
-         this injects a WOFF2 font ("Twemoji Country Flags") as a fallback. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <!-- Twemoji country flags polyfill for Windows -->
     <script type="module">
       import { polyfillCountryFlagEmojis } from "https://cdn.skypack.dev/country-flag-emoji-polyfill";
       polyfillCountryFlagEmojis();
@@ -24,8 +30,6 @@
         box-sizing: border-box;
       }
 
-      /* Form controls don't inherit font-family by default in most browsers,
-         so country-flag fallback wouldn't apply to <button>, <input>, <select>. */
       button,
       input,
       select,
@@ -35,184 +39,415 @@
       }
 
       :root {
-        --bg: #0d0d0d;
-        --surface: #181818;
-        --surface2: #222;
-        --border: #2e2e2e;
-        --text: #e4e4e4;
-        --muted: #777;
-        --accent: #6366f1;
-        --accent2: #818cf8;
-        --green: #22c55e;
-        --red: #ef4444;
-        --yellow: #f59e0b;
-        --blue: #3b82f6;
+        /* Surfaces */
+        --bg: #07070b;
+        --bg-2: #0b0b12;
+        --surface: rgba(22, 22, 32, 0.72);
+        --surface-solid: #14141d;
+        --surface-2: rgba(38, 38, 54, 0.6);
+        --border: rgba(255, 255, 255, 0.08);
+        --border-strong: rgba(255, 255, 255, 0.14);
+        --glass-blur: 18px;
+
+        /* Text */
+        --text: #ecedf4;
+        --text-dim: #a9abbd;
+        --muted: #6b6d82;
+
+        /* Brand */
+        --violet: #7c5cff;
+        --violet-2: #9d7bff;
+        --cyan: #22d3ee;
+        --grad: linear-gradient(135deg, #7c5cff 0%, #22d3ee 100%);
+        --grad-soft: linear-gradient(135deg, rgba(124, 92, 255, 0.16), rgba(34, 211, 238, 0.12));
+
+        /* Status */
+        --green: #2bd97a;
+        --red: #ff5470;
+        --yellow: #ffb02e;
+        --blue: #3b9dff;
+        --pink: #ff4d8d;
+
+        --radius: 18px;
+        --radius-sm: 11px;
+        --shadow: 0 18px 50px -18px rgba(0, 0, 0, 0.8);
+        --shadow-glow: 0 0 0 1px rgba(124, 92, 255, 0.25),
+          0 14px 40px -12px rgba(124, 92, 255, 0.35);
+      }
+
+      html {
+        -webkit-text-size-adjust: 100%;
       }
 
       body {
         background: var(--bg);
         color: var(--text);
-        font-family:
-          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-          "Twemoji Country Flags", "Segoe UI Emoji", "Apple Color Emoji",
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+          Roboto, "Twemoji Country Flags", "Segoe UI Emoji", "Apple Color Emoji",
           "Noto Color Emoji", sans-serif;
         font-size: 14px;
+        line-height: 1.5;
         height: 100vh;
+        height: 100dvh;
         display: flex;
         flex-direction: column;
         overflow: hidden;
+        -webkit-font-smoothing: antialiased;
+        position: relative;
+      }
+
+      /* Animated ambient background */
+      body::before,
+      body::after {
+        content: "";
+        position: fixed;
+        z-index: -2;
+        border-radius: 50%;
+        filter: blur(90px);
+        opacity: 0.5;
+        pointer-events: none;
+      }
+      body::before {
+        width: 50vw;
+        height: 50vw;
+        max-width: 620px;
+        max-height: 620px;
+        top: -16vh;
+        left: -10vw;
+        background: radial-gradient(circle, rgba(124, 92, 255, 0.55), transparent 70%);
+        animation: float1 18s ease-in-out infinite;
+      }
+      body::after {
+        width: 46vw;
+        height: 46vw;
+        max-width: 560px;
+        max-height: 560px;
+        bottom: -18vh;
+        right: -12vw;
+        background: radial-gradient(circle, rgba(34, 211, 238, 0.4), transparent 70%);
+        animation: float2 22s ease-in-out infinite;
+      }
+      @keyframes float1 {
+        0%, 100% { transform: translate(0, 0) scale(1); }
+        50% { transform: translate(6vw, 8vh) scale(1.12); }
+      }
+      @keyframes float2 {
+        0%, 100% { transform: translate(0, 0) scale(1); }
+        50% { transform: translate(-7vw, -6vh) scale(1.1); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        body::before, body::after { animation: none; }
+      }
+
+      ::selection {
+        background: rgba(124, 92, 255, 0.4);
+        color: #fff;
       }
 
       /* ── Header ──────────────────────────────────────────────── */
       .header {
-        background: var(--surface);
-        border-bottom: 1px solid var(--border);
-        padding: 10px 18px;
+        position: sticky;
+        top: 0;
+        z-index: 30;
         display: flex;
         align-items: center;
-        gap: 14px;
+        gap: 16px;
+        padding: 12px 22px;
+        background: rgba(10, 10, 16, 0.6);
+        backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+        -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+        border-bottom: 1px solid var(--border);
         flex-shrink: 0;
-        z-index: 10;
       }
-      .header-logo {
-        font-size: 17px;
-        font-weight: 700;
-        color: var(--accent2);
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 11px;
         white-space: nowrap;
       }
-
-      .filter-tabs {
-        display: flex;
-        gap: 4px;
+      .brand-mark {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        background: var(--grad);
+        display: grid;
+        place-items: center;
+        font-size: 18px;
+        box-shadow: 0 6px 18px -4px rgba(124, 92, 255, 0.6);
+        flex-shrink: 0;
       }
-      .filter-tab {
-        padding: 5px 13px;
-        border-radius: 6px;
-        border: 1px solid var(--border);
-        background: transparent;
+      .brand-name {
+        font-size: 16px;
+        font-weight: 800;
+        letter-spacing: -0.3px;
+        background: linear-gradient(90deg, #fff, #c9c5ff 60%, #9bf3ff);
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+      .brand-sub {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 1.4px;
         color: var(--muted);
-        font-size: 12px;
-        font-weight: 500;
-        cursor: pointer;
-        transition: all 0.15s;
+        text-transform: uppercase;
       }
-      .filter-tab:hover {
-        background: var(--surface2);
+
+      /* Segmented filter */
+      .seg {
+        display: flex;
+        gap: 3px;
+        padding: 4px;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+      }
+      .seg-btn {
+        border: none;
+        background: transparent;
+        color: var(--text-dim);
+        font-weight: 600;
+        font-size: 12.5px;
+        padding: 7px 16px;
+        border-radius: 9px;
+        cursor: pointer;
+        transition: color 0.2s, background 0.2s, box-shadow 0.2s;
+        white-space: nowrap;
+      }
+      .seg-btn:hover {
         color: var(--text);
       }
-      .filter-tab.active {
-        background: var(--accent);
+      .seg-btn.active {
         color: #fff;
-        border-color: var(--accent);
+        background: var(--grad);
+        box-shadow: 0 6px 16px -6px rgba(124, 92, 255, 0.7);
       }
 
       .header-right {
         margin-left: auto;
         display: flex;
-        gap: 8px;
+        gap: 10px;
         align-items: center;
       }
       .count-badge {
-        background: var(--surface2);
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: var(--surface-2);
         border: 1px solid var(--border);
-        border-radius: 20px;
-        padding: 3px 10px;
-        font-size: 11px;
-        color: var(--muted);
+        border-radius: 999px;
+        padding: 6px 13px;
+        font-size: 11.5px;
+        font-weight: 600;
+        color: var(--text-dim);
+      }
+      .count-badge::before {
+        content: "";
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--green);
+        box-shadow: 0 0 8px var(--green);
+      }
+      .icon-btn {
+        display: inline-grid;
+        place-items: center;
+        width: 38px;
+        height: 38px;
+        border-radius: 11px;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        color: var(--text-dim);
+        cursor: pointer;
+        font-size: 16px;
+        transition: all 0.18s;
+      }
+      .icon-btn:hover {
+        color: #fff;
+        border-color: var(--border-strong);
+        transform: translateY(-1px);
+      }
+      .icon-btn.spinning {
+        animation: spin 0.8s linear infinite;
       }
 
       /* ── Feed ────────────────────────────────────────────────── */
       .feed {
         flex: 1;
         overflow-y: auto;
-        padding: 16px;
+        padding: 22px 16px 40px;
+        scrollbar-width: thin;
+        scrollbar-color: var(--border-strong) transparent;
       }
       .feed::-webkit-scrollbar {
-        width: 5px;
+        width: 8px;
       }
       .feed::-webkit-scrollbar-thumb {
-        background: var(--border);
-        border-radius: 3px;
+        background: var(--border-strong);
+        border-radius: 8px;
+        border: 2px solid transparent;
+        background-clip: content-box;
       }
       .feed-inner {
-        max-width: 1200px;
+        max-width: 1180px;
         margin: 0 auto;
         display: flex;
         flex-direction: column;
-        gap: 12px;
+        gap: 18px;
       }
+
       .empty-state {
-        padding: 60px 20px;
+        padding: 80px 20px;
         text-align: center;
         color: var(--muted);
         display: flex;
         flex-direction: column;
         align-items: center;
-        gap: 10px;
+        gap: 14px;
       }
       .empty-icon {
-        font-size: 40px;
-        opacity: 0.4;
+        font-size: 52px;
+        opacity: 0.5;
+        filter: grayscale(0.2);
+      }
+      .empty-state .empty-title {
+        font-size: 16px;
+        font-weight: 600;
+        color: var(--text-dim);
+      }
+
+      /* Skeleton */
+      .skeleton-card {
+        height: 220px;
+        border-radius: var(--radius);
+        background: linear-gradient(
+          100deg,
+          var(--surface-solid) 30%,
+          rgba(60, 60, 80, 0.4) 50%,
+          var(--surface-solid) 70%
+        );
+        background-size: 220% 100%;
+        animation: shimmer 1.4s ease-in-out infinite;
+        border: 1px solid var(--border);
+      }
+      @keyframes shimmer {
+        from { background-position: 200% 0; }
+        to { background-position: -120% 0; }
       }
 
       /* ── Card ────────────────────────────────────────────────── */
       .card {
         background: var(--surface);
+        backdrop-filter: blur(var(--glass-blur));
+        -webkit-backdrop-filter: blur(var(--glass-blur));
         border: 1px solid var(--border);
-        border-radius: 12px;
+        border-radius: var(--radius);
         overflow: hidden;
+        box-shadow: var(--shadow);
+        transition: border-color 0.25s, transform 0.25s, box-shadow 0.25s;
+        animation: cardIn 0.4s cubic-bezier(0.22, 1, 0.36, 1);
       }
+      .card:hover {
+        border-color: var(--border-strong);
+      }
+      @keyframes cardIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
       .card-header {
-        padding: 14px 16px 12px;
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        padding: 16px 18px 14px;
       }
+      .status-dot {
+        flex-shrink: 0;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        margin-top: 6px;
+        box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.04);
+      }
+      .status-dot.pending { background: var(--yellow); box-shadow: 0 0 10px var(--yellow); }
+      .status-dot.approved { background: var(--violet-2); box-shadow: 0 0 10px var(--violet); }
+      .status-dot.sent { background: var(--green); box-shadow: 0 0 10px var(--green); }
+      .status-dot.cancelled { background: var(--red); }
       .card-info {
         min-width: 0;
+        flex: 1;
       }
       .card-title {
-        font-size: 14px;
-        font-weight: 600;
+        font-size: 15px;
+        font-weight: 700;
         line-height: 1.4;
-        margin-bottom: 7px;
+        letter-spacing: -0.2px;
+        margin-bottom: 8px;
       }
       .card-meta {
         display: flex;
         flex-wrap: wrap;
         align-items: center;
-        gap: 7px;
+        gap: 8px;
         font-size: 11.5px;
         color: var(--muted);
       }
       .card-meta a {
-        color: var(--accent2);
+        color: var(--cyan);
         text-decoration: none;
+        font-weight: 500;
       }
       .card-meta a:hover {
         text-decoration: underline;
       }
-      .card-id {
-        color: var(--text);
-        font-size: 10px;
+      .meta-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
       }
-      .card-content {
-        padding: 0 16px;
+      .card-id {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 10.5px;
+        color: var(--text-dim);
+        background: var(--surface-2);
+        border-radius: 5px;
+        padding: 1px 6px;
       }
 
-      /* ── Card: images row ─────────────────────────────────────── */
+      /* ── Badges ──────────────────────────────────────────────── */
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 3px 9px;
+        border-radius: 6px;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+      }
+      .badge-pending { background: rgba(255, 176, 46, 0.16); color: var(--yellow); }
+      .badge-approved { background: rgba(124, 92, 255, 0.18); color: var(--violet-2); }
+      .badge-sent { background: rgba(43, 217, 122, 0.16); color: var(--green); }
+      .badge-cancelled { background: rgba(255, 84, 112, 0.16); color: var(--red); }
+
+      /* ── Media row ───────────────────────────────────────────── */
       .card-images {
         display: flex;
-        gap: 8px;
+        gap: 9px;
         flex-wrap: wrap;
-        padding: 0 16px 12px;
+        padding: 0 18px 14px;
       }
       .card-images img {
-        height: 100px;
-        border-radius: 7px;
+        height: 104px;
+        border-radius: 10px;
         object-fit: cover;
         cursor: zoom-in;
-        transition: opacity 0.15s;
+        border: 1px solid var(--border);
+        transition: transform 0.2s, box-shadow 0.2s;
       }
       .card-images img:hover {
-        opacity: 0.8;
+        transform: scale(1.03);
+        box-shadow: var(--shadow);
       }
       .media-item {
         position: relative;
@@ -221,16 +456,18 @@
       }
       .media-item video {
         max-height: 220px;
-        border-radius: 6px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
       }
       .media-del {
         position: absolute;
-        top: 4px;
-        right: 4px;
-        width: 22px;
-        height: 22px;
+        top: 6px;
+        right: 6px;
+        width: 24px;
+        height: 24px;
         border-radius: 50%;
-        background: rgba(0, 0, 0, 0.65);
+        background: rgba(0, 0, 0, 0.7);
+        backdrop-filter: blur(4px);
         color: #fff;
         border: 1px solid rgba(255, 255, 255, 0.25);
         font-size: 13px;
@@ -241,6 +478,7 @@
         justify-content: center;
         padding: 0;
         z-index: 2;
+        transition: background 0.15s;
       }
       .media-item:hover .media-del {
         display: flex;
@@ -249,87 +487,31 @@
         background: var(--red);
       }
 
-      /* ── Lightbox ─────────────────────────────────────────────── */
-      #lightbox {
-        display: none;
-        position: fixed;
-        inset: 0;
-        z-index: 9999;
-        background: rgba(0, 0, 0, 0.92);
-        align-items: center;
-        justify-content: center;
-      }
-      #lightbox.open {
-        display: flex;
-      }
-      #lb-img {
-        max-width: 92vw;
-        max-height: 88vh;
-        object-fit: contain;
-        border-radius: 8px;
-        user-select: none;
-        -webkit-user-drag: none;
-      }
-      #lb-close {
-        position: fixed;
-        top: 14px;
-        right: 18px;
-        font-size: 28px;
-        color: #fff;
-        cursor: pointer;
-        line-height: 1;
-        opacity: 0.8;
-        z-index: 10000;
-      }
-      #lb-close:hover {
-        opacity: 1;
-      }
-      .lb-arrow {
-        position: fixed;
-        top: 50%;
-        transform: translateY(-50%);
-        font-size: 36px;
-        color: #fff;
-        cursor: pointer;
-        opacity: 0.6;
-        padding: 12px 16px;
-        user-select: none;
-        transition: opacity 0.15s;
-      }
-      .lb-arrow:hover {
-        opacity: 1;
-      }
-      #lb-prev {
-        left: 8px;
-      }
-      #lb-next {
-        right: 8px;
-      }
-      #lb-counter {
-        position: fixed;
-        bottom: 18px;
-        left: 50%;
-        transform: translateX(-50%);
-        color: rgba(255, 255, 255, 0.6);
-        font-size: 13px;
-      }
-
-      /* ── Card: lang row: [RU text | RU vid | EN text | EN vid] ── */
+      /* ── Language row ────────────────────────────────────────── */
       .card-lang-row {
         display: grid;
         grid-template-columns: 2fr 1fr 2fr 1fr;
-        gap: 12px;
-        padding: 0 16px 12px;
+        gap: 14px;
+        padding: 4px 18px 16px;
         align-items: start;
       }
       .text-col {
         min-width: 0;
       }
       .text-lang-label {
-        font-size: 11px;
-        font-weight: 600;
-        color: var(--muted);
-        margin-bottom: 5px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 10.5px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+        color: var(--text-dim);
+        margin-bottom: 8px;
+        padding: 3px 9px;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 999px;
       }
       .vid-item {
         min-width: 0;
@@ -337,229 +519,393 @@
       .vid-item video {
         width: 100%;
         max-height: 700px;
-        border-radius: 8px;
+        border-radius: 12px;
         background: #000;
-      }
-
-      /* ── Card: YT query row ─────────────────────────────────────── */
-      .yt-query-row {
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        padding: 6px 16px 0;
-      }
-      .yt-query-row input {
-        flex: 1;
-        background: var(--surface2);
         border: 1px solid var(--border);
-        border-radius: 6px;
-        padding: 5px 9px;
-        color: var(--text);
-        font-size: 12px;
-      }
-      .yt-query-row input::placeholder {
-        color: var(--muted);
-      }
-      .yt-query-row input:focus {
-        outline: none;
-        border-color: var(--accent);
-      }
-      .yt-skip-badge {
-        font-size: 10px;
-        color: var(--muted);
-        background: var(--surface2);
-        border: 1px solid var(--border);
-        border-radius: 4px;
-        padding: 2px 6px;
-        white-space: nowrap;
-      }
-      .card-btn-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 7px;
       }
       .text-body {
         font-size: 12.5px;
-        line-height: 1.65;
+        line-height: 1.7;
+        color: var(--text-dim);
         white-space: pre-wrap;
         word-break: break-word;
       }
       .text-body b,
       .text-body strong {
         color: #fff;
+        font-weight: 700;
       }
       .text-body i,
       .text-body em {
-        color: #c4c4c4;
+        color: #d6d8e6;
       }
 
-      /* ── Badges ──────────────────────────────────────────────── */
-      .badge {
-        display: inline-block;
-        padding: 2px 7px;
-        border-radius: 4px;
-        font-size: 10.5px;
-        font-weight: 600;
-        letter-spacing: 0.3px;
-      }
-      .badge-pending {
-        background: rgba(245, 158, 11, 0.18);
-        color: var(--yellow);
-      }
-      .badge-approved {
-        background: rgba(99, 102, 241, 0.18);
-        color: var(--accent2);
-      }
-      .badge-sent {
-        background: rgba(34, 197, 94, 0.15);
-        color: var(--green);
-      }
-      .badge-cancelled {
-        background: rgba(239, 68, 68, 0.13);
-        color: var(--red);
-      }
-
-      /* ── Buttons ─────────────────────────────────────────────── */
-      .btn {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        gap: 7px;
-        padding: 11px 16px;
-        border-radius: 9px;
-        border: 1px solid transparent;
-        font-size: 14px;
-        font-weight: 500;
-        cursor: pointer;
-        transition: all 0.15s;
-        white-space: nowrap;
-        min-height: 44px;
-      }
-      .btn:disabled {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
-      .btn-primary {
-        background: var(--accent);
-        color: #fff;
-      }
-      .btn-primary:hover:not(:disabled) {
-        background: var(--accent2);
-      }
-      .btn-success {
-        background: var(--green);
-        color: #fff;
-      }
-      .btn-success:hover:not(:disabled) {
-        background: #16a34a;
-      }
-      .btn-danger {
-        background: transparent;
-        color: var(--red);
-        border-color: var(--red);
-      }
-      .btn-danger:hover:not(:disabled) {
-        background: rgba(239, 68, 68, 0.1);
-      }
-      .btn-outline {
-        background: transparent;
-        color: var(--text);
-        border-color: var(--border);
-      }
-      .btn-outline:hover:not(:disabled) {
-        background: var(--surface2);
-      }
-      .btn-ig {
-        background: #e1306c;
-        color: #fff;
-      }
-      .btn-ig:hover:not(:disabled) {
-        background: #c2255a;
-      }
-      .btn-yt {
-        background: #ff0000;
-        color: #fff;
-      }
-      .btn-yt:hover:not(:disabled) {
-        background: #cc0000;
-      }
-      .btn-sm {
-        padding: 6px 12px;
-        font-size: 12px;
-        min-height: 34px;
-      }
-      .btn-published {
-        opacity: 0.6;
-      }
-      .pub-done {
-        font-size: 14px;
-        pointer-events: none;
-      }
-
-      /* ── Card actions area ───────────────────────────────────── */
+      /* ── Card actions ────────────────────────────────────────── */
       .card-actions {
         display: flex;
         flex-direction: column;
-        gap: 10px;
-        padding: 12px 16px 16px;
+        gap: 14px;
+        padding: 16px 18px 18px;
         border-top: 1px solid var(--border);
-        margin-top: 4px;
+        background: rgba(0, 0, 0, 0.18);
       }
       .btn-section {
         display: flex;
         flex-direction: column;
-        gap: 8px;
+        gap: 10px;
+        padding: 13px;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 14px;
       }
       .btn-section-label {
-        font-size: 10px;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 10.5px;
         font-weight: 700;
         text-transform: uppercase;
-        letter-spacing: 0.6px;
-        color: var(--muted);
+        letter-spacing: 0.8px;
+        color: var(--text-dim);
       }
       .btn-group {
         display: flex;
         flex-wrap: wrap;
-        gap: 7px;
+        gap: 8px;
       }
       .btn-group .btn {
         flex: 1 1 0;
-        min-width: 90px;
+        min-width: 96px;
+      }
+      .btn-row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      /* ── Buttons ─────────────────────────────────────────────── */
+      .btn {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 11px 16px;
+        border-radius: 11px;
+        border: 1px solid transparent;
+        font-size: 13.5px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: transform 0.14s, box-shadow 0.18s, background 0.18s,
+          border-color 0.18s, opacity 0.18s;
+        white-space: nowrap;
+        min-height: 44px;
+        color: #fff;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .btn:active:not(:disabled) {
+        transform: scale(0.97);
+      }
+      .btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      .btn-primary {
+        background: var(--grad);
+        box-shadow: 0 8px 22px -10px rgba(124, 92, 255, 0.8);
+      }
+      .btn-primary:hover:not(:disabled) {
+        box-shadow: 0 12px 28px -10px rgba(124, 92, 255, 0.95);
+        transform: translateY(-1px);
+      }
+      .btn-success {
+        background: linear-gradient(135deg, #22c55e, #16a34a);
+        box-shadow: 0 8px 22px -10px rgba(43, 217, 122, 0.7);
+      }
+      .btn-success:hover:not(:disabled) {
+        transform: translateY(-1px);
+      }
+      .btn-danger {
+        background: rgba(255, 84, 112, 0.08);
+        color: var(--red);
+        border-color: rgba(255, 84, 112, 0.4);
+      }
+      .btn-danger:hover:not(:disabled) {
+        background: rgba(255, 84, 112, 0.16);
+      }
+      .btn-outline {
+        background: rgba(255, 255, 255, 0.03);
+        color: var(--text);
+        border-color: var(--border-strong);
+      }
+      .btn-outline:hover:not(:disabled) {
+        background: rgba(255, 255, 255, 0.07);
+        border-color: rgba(255, 255, 255, 0.25);
+        transform: translateY(-1px);
+      }
+      .btn-ig {
+        background: linear-gradient(135deg, #f9407b, #c2255a);
+      }
+      .btn-ig:hover:not(:disabled) {
+        transform: translateY(-1px);
+      }
+      .btn-yt {
+        background: linear-gradient(135deg, #ff2d2d, #cc0000);
+      }
+      .btn-yt:hover:not(:disabled) {
+        transform: translateY(-1px);
+      }
+      .btn-sm {
+        padding: 7px 13px;
+        font-size: 12px;
+        min-height: 36px;
+        border-radius: 9px;
+      }
+      .btn-tinted {
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid var(--border-strong);
+      }
+      .btn-published {
+        opacity: 0.55;
+      }
+      .pub-done {
+        font-size: 13px;
+        pointer-events: none;
+      }
+
+      /* ── Custom toggle switch ─────────────────────────────────── */
+      .switch-grid {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .switch-row {
+        flex: 1 1 0;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+        cursor: pointer;
+        padding: 12px 13px;
+        border-radius: 13px;
+        background: rgba(0, 0, 0, 0.2);
+        border: 1px solid var(--border);
+        transition: background 0.18s, border-color 0.18s;
+        user-select: none;
+      }
+      .switch-row:hover {
+        background: rgba(255, 255, 255, 0.04);
+        border-color: var(--border-strong);
+      }
+      .switch-row:has(input:checked) {
+        border-color: rgba(124, 92, 255, 0.5);
+        background: var(--grad-soft);
+      }
+      .switch-row input {
+        position: absolute;
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .switch-head {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        width: 100%;
+      }
+      .switch-icon {
+        display: grid;
+        place-items: center;
+        width: 30px;
+        height: 30px;
+        flex-shrink: 0;
+        border-radius: 9px;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        color: var(--text-dim);
+        transition: color 0.18s, background 0.18s, border-color 0.18s;
+      }
+      .switch-icon svg {
+        width: 16px;
+        height: 16px;
+      }
+      .switch-row:has(input:checked) .switch-icon {
+        background: var(--grad);
+        border-color: transparent;
+        color: #fff;
+      }
+      .switch-track {
+        position: relative;
+        flex-shrink: 0;
+        width: 40px;
+        height: 23px;
+        border-radius: 999px;
+        background: var(--surface-2);
+        border: 1px solid var(--border-strong);
+        transition: background 0.2s, border-color 0.2s;
+      }
+      .switch-track::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 17px;
+        height: 17px;
+        border-radius: 50%;
+        background: #d6d8e6;
+        transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s;
+      }
+      .switch-row input:checked ~ .switch-track {
+        background: var(--grad);
+        border-color: transparent;
+      }
+      .switch-row input:checked ~ .switch-track::after {
+        transform: translateX(17px);
+        background: #fff;
+      }
+      .switch-label {
+        font-size: 12.5px;
+        line-height: 1.4;
+        color: var(--text-dim);
+        font-weight: 500;
+      }
+
+      /* ── Inline icon sizing ──────────────────────────────────── */
+      .btn svg,
+      .seg-btn svg,
+      .meta-chip svg,
+      .car-row-label svg,
+      .btn-section-label svg,
+      .progress-label svg,
+      .text-lang-label svg,
+      .pg-btn svg {
+        width: 15px;
+        height: 15px;
+        flex-shrink: 0;
+      }
+      .seg-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .car-row-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .card-meta a {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .card-meta a svg {
+        width: 13px;
+        height: 13px;
+      }
+      .brand-mark svg {
+        width: 19px;
+        height: 19px;
+        color: #fff;
+      }
+      .icon-btn svg {
+        width: 17px;
+        height: 17px;
+      }
+      .empty-icon svg {
+        width: 52px;
+        height: 52px;
+      }
+      .pub-done {
+        display: inline-flex;
+        align-items: center;
+      }
+      .pub-done svg {
+        width: 14px;
+        height: 14px;
+      }
+      #lb-close svg {
+        width: 20px;
+        height: 20px;
+      }
+      .media-del svg {
+        width: 13px;
+        height: 13px;
+      }
+
+      /* ── YT query row ────────────────────────────────────────── */
+      .yt-query-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .input {
+        flex: 1;
+        background: rgba(0, 0, 0, 0.25);
+        border: 1px solid var(--border-strong);
+        border-radius: 10px;
+        padding: 9px 12px;
+        color: var(--text);
+        font-size: 13px;
+        transition: border-color 0.15s, box-shadow 0.15s;
+      }
+      .input::placeholder {
+        color: var(--muted);
+      }
+      .input:focus {
+        outline: none;
+        border-color: var(--violet);
+        box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.18);
+      }
+      .yt-skip-badge {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 10.5px;
+        color: var(--text-dim);
+        background: rgba(0, 0, 0, 0.25);
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        padding: 5px 9px;
+        white-space: nowrap;
       }
 
       /* ── Carousel preview ────────────────────────────────────── */
       .car-preview {
         display: flex;
         flex-direction: column;
-        gap: 8px;
-        margin: 4px 0 4px;
+        gap: 10px;
       }
       .car-row {
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: 6px;
       }
       .car-row-label {
         font-size: 11px;
-        color: var(--muted);
+        color: var(--text-dim);
+        font-weight: 500;
       }
       .car-slides {
         display: flex;
         flex-wrap: wrap;
-        gap: 4px;
+        gap: 6px;
       }
       .car-slide-thumb {
         display: inline-block;
-        width: 64px;
-        height: 80px;
-        border-radius: 4px;
+        width: 62px;
+        height: 78px;
+        border-radius: 8px;
         overflow: hidden;
-        border: 1px solid var(--border);
+        border: 1px solid var(--border-strong);
         background: #000;
         cursor: pointer;
         position: relative;
+        transition: transform 0.15s;
       }
-      .car-slide-thumb video {
+      .car-slide-thumb:hover {
+        transform: scale(1.06);
+      }
+      .car-slide-thumb video,
+      .car-slide-thumb img {
         width: 100%;
         height: 100%;
         object-fit: cover;
@@ -574,117 +920,404 @@
         justify-content: center;
         color: #fff;
         font-size: 18px;
-        text-shadow: 0 0 6px rgba(0, 0, 0, 0.7);
+        text-shadow: 0 0 8px rgba(0, 0, 0, 0.8);
         pointer-events: none;
       }
-      .car-slide-thumb img {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        display: block;
-      }
 
-      /* ── Progress ────────────────────────────────────────────── */
+      /* ── Progress panel ──────────────────────────────────────── */
       .progress-panel {
-        background: #0a0a0a;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 12px 14px;
-        margin-bottom: 10px;
+        background: rgba(0, 0, 0, 0.4);
+        border: 1px solid var(--border-strong);
+        border-radius: 14px;
+        padding: 14px 16px;
+        margin: 0 18px 14px;
       }
       .progress-label {
-        font-size: 11px;
-        font-weight: 600;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 10.5px;
+        font-weight: 700;
         text-transform: uppercase;
-        letter-spacing: 0.5px;
-        color: var(--muted);
-        margin-bottom: 8px;
+        letter-spacing: 0.7px;
+        color: var(--text-dim);
+        margin-bottom: 10px;
       }
       .progress-log {
-        font-family: "Twemoji Country Flags", "SF Mono", "Menlo",
-          "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", monospace;
+        font-family: "JetBrains Mono", "Twemoji Country Flags", monospace;
         font-size: 11.5px;
+        line-height: 1.75;
+        max-height: 210px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        scrollbar-width: thin;
+      }
+      .progress-log::-webkit-scrollbar {
+        width: 5px;
+      }
+      .progress-log::-webkit-scrollbar-thumb {
+        background: var(--border-strong);
+        border-radius: 3px;
+      }
+      .log-progress { color: var(--text-dim); }
+      .log-done { color: var(--green); font-weight: 600; }
+      .log-error { color: var(--red); }
+
+      /* ── Animated generation progress ────────────────────────── */
+      .gen {
+        background: rgba(8, 8, 14, 0.55);
+        border: 1px solid var(--border-strong);
+        border-radius: 16px;
+        padding: 15px 16px 12px;
+        margin: 0 18px 14px;
+        backdrop-filter: blur(var(--glass-blur));
+        -webkit-backdrop-filter: blur(var(--glass-blur));
+      }
+      .gen-top {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+      .gen-name {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 700;
+        font-size: 13px;
+        letter-spacing: 0.2px;
+      }
+      .gen-name svg { width: 17px; height: 17px; color: var(--violet-2); }
+      .gen-meta { display: flex; align-items: center; gap: 9px; margin-left: auto; }
+      .gen-pct {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--cyan);
+        min-width: 34px;
+        text-align: right;
+      }
+      .gen-orb {
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+      }
+      .gen-orb svg { width: 13px; height: 13px; }
+      .gen-orb.is-run { background: var(--grad); animation: genPulse 1.7s ease-out infinite; }
+      .gen-orb.is-done { background: rgba(43, 217, 122, 0.18); color: var(--green); }
+      .gen-orb.is-error { background: rgba(255, 84, 112, 0.18); color: var(--red); }
+      @keyframes genPulse {
+        0%   { box-shadow: 0 0 0 0 rgba(124, 92, 255, 0.5); }
+        70%  { box-shadow: 0 0 0 9px rgba(124, 92, 255, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(124, 92, 255, 0); }
+      }
+      .gen-cancel { margin-left: 2px; }
+      .gen-track {
+        height: 6px;
+        border-radius: 99px;
+        background: rgba(255, 255, 255, 0.07);
+        overflow: hidden;
+      }
+      .gen-fill {
+        height: 100%;
+        width: 0;
+        border-radius: 99px;
+        background: var(--grad);
+        position: relative;
+        overflow: hidden;
+        transition: width 0.7s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+      .gen-fill::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent);
+        background-size: 150px 100%;
+        background-repeat: no-repeat;
+        animation: genShimmer 1.3s linear infinite;
+      }
+      .gen-fill.is-static::after { animation: none; opacity: 0; }
+      @keyframes genShimmer {
+        0%   { background-position: -150px 0; }
+        100% { background-position: calc(100% + 150px) 0; }
+      }
+      .gen-now {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 12px 0 4px;
+        font-size: 12.5px;
+        color: var(--text);
+        min-height: 18px;
+      }
+      .gen-now-ic { display: inline-flex; color: var(--cyan); }
+      .gen-now-ic svg { width: 14px; height: 14px; }
+      .gen-now-tx { animation: genFade 0.3s ease; }
+      @keyframes genFade { from { opacity: 0; } to { opacity: 1; } }
+      .gen-steps { list-style: none; margin: 10px 0 0; padding: 0; }
+      .gen-step {
+        display: flex;
+        gap: 11px;
+        padding: 4px 0;
+        position: relative;
+      }
+      .gen-step::before {
+        content: "";
+        position: absolute;
+        left: 10px;
+        top: 25px;
+        bottom: -4px;
+        width: 2px;
+        background: var(--border-strong);
+      }
+      .gen-step:last-child::before { display: none; }
+      .gen-step-ic {
+        flex: 0 0 21px;
+        width: 21px;
+        height: 21px;
+        border-radius: 50%;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--muted);
+        z-index: 1;
+        transition: background 0.3s, color 0.3s;
+      }
+      .gen-step-ic svg { width: 13px; height: 13px; }
+      .gen-step.is-active .gen-step-ic { background: var(--grad-soft); color: #fff; }
+      .gen-step.is-done .gen-step-ic { background: rgba(43, 217, 122, 0.16); color: var(--green); }
+      .gen-step.is-error .gen-step-ic { background: rgba(255, 84, 112, 0.16); color: var(--red); }
+      .gen-step-main { flex: 1; min-width: 0; }
+      .gen-step-label {
+        font-weight: 600;
+        font-size: 12.5px;
+        color: var(--muted);
+        padding-top: 3px;
+        transition: color 0.3s;
+      }
+      .gen-step.is-active .gen-step-label,
+      .gen-step.is-done .gen-step-label,
+      .gen-step.is-error .gen-step-label { color: var(--text); }
+      .gen-substeps {
+        list-style: none;
+        margin: 5px 0 3px;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .gen-sub {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 11.5px;
+        color: var(--text-dim);
+        animation: genSubIn 0.35s ease;
+      }
+      .gen-sub-ic { display: inline-flex; opacity: 0.85; flex-shrink: 0; }
+      .gen-sub-ic svg { width: 13px; height: 13px; }
+      .gen-sub.is-done { color: var(--text); }
+      .gen-sub.is-done .gen-sub-ic { color: var(--green); opacity: 1; }
+      .gen-sub.is-error { color: var(--red); }
+      .gen-sub.is-error .gen-sub-ic { color: var(--red); opacity: 1; }
+      .gen-sub.is-live { color: var(--text); }
+      @keyframes genSubIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+      .gen-enter { animation: genStepIn 0.4s ease; }
+      @keyframes genStepIn { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
+      .gen-spin {
+        width: 12px;
+        height: 12px;
+        border: 2px solid rgba(255, 255, 255, 0.28);
+        border-top-color: #fff;
+        border-radius: 50%;
+        animation: spin 0.65s linear infinite;
+        display: inline-block;
+      }
+      .gen-spin-sm { width: 10px; height: 10px; border-top-color: var(--cyan); }
+      .gen-rawwrap {
+        margin-top: 12px;
+        border-top: 1px solid var(--border);
+        padding-top: 9px;
+      }
+      .gen-rawwrap summary {
+        cursor: pointer;
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        color: var(--text-dim);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        list-style: none;
+        user-select: none;
+      }
+      .gen-rawwrap summary::-webkit-details-marker { display: none; }
+      .gen-rawwrap summary svg { width: 13px; height: 13px; }
+      .gen-raw {
+        font-family: "JetBrains Mono", "Twemoji Country Flags", monospace;
+        font-size: 11px;
         line-height: 1.7;
         max-height: 200px;
         overflow-y: auto;
         white-space: pre-wrap;
         word-break: break-word;
+        margin-top: 8px;
+        scrollbar-width: thin;
       }
-      .progress-log::-webkit-scrollbar {
-        width: 4px;
+      .gen-raw::-webkit-scrollbar { width: 5px; }
+      .gen-raw::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+      .gen-raw--tall { max-height: 260px; }
+      .rl-line { color: var(--text-dim); }
+      .rl-detail { color: rgba(255, 255, 255, 0.42); }
+      .rl-done { color: var(--green); font-weight: 600; }
+      .rl-error { color: var(--red); }
+      @media (prefers-reduced-motion: reduce) {
+        .gen-fill::after,
+        .gen-orb.is-run { animation: none; }
       }
-      .progress-log::-webkit-scrollbar-thumb {
-        background: var(--border);
-        border-radius: 2px;
+
+      /* ── Lightbox ────────────────────────────────────────────── */
+      #lightbox {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        background: rgba(0, 0, 0, 0.92);
+        backdrop-filter: blur(8px);
+        align-items: center;
+        justify-content: center;
+        animation: fadeIn 0.2s ease;
       }
-      .log-progress {
-        color: var(--text);
+      @keyframes fadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
       }
-      .log-done {
-        color: var(--green);
-        font-weight: 600;
+      #lightbox.open {
+        display: flex;
       }
-      .log-error {
-        color: var(--red);
+      #lb-img {
+        max-width: 92vw;
+        max-height: 88vh;
+        object-fit: contain;
+        border-radius: 12px;
+        user-select: none;
+        -webkit-user-drag: none;
+        box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.9);
+      }
+      #lb-close {
+        position: fixed;
+        top: 18px;
+        right: 22px;
+        width: 42px;
+        height: 42px;
+        display: grid;
+        place-items: center;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.08);
+        font-size: 22px;
+        color: #fff;
+        cursor: pointer;
+        z-index: 10000;
+        transition: background 0.15s;
+      }
+      #lb-close:hover {
+        background: rgba(255, 255, 255, 0.18);
+      }
+      .lb-arrow {
+        position: fixed;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 52px;
+        height: 52px;
+        display: grid;
+        place-items: center;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.06);
+        font-size: 26px;
+        color: #fff;
+        cursor: pointer;
+        user-select: none;
+        transition: background 0.15s;
+      }
+      .lb-arrow:hover {
+        background: rgba(255, 255, 255, 0.16);
+      }
+      #lb-prev { left: 14px; }
+      #lb-next { right: 14px; }
+      #lb-counter {
+        position: fixed;
+        bottom: 22px;
+        left: 50%;
+        transform: translateX(-50%);
+        color: rgba(255, 255, 255, 0.7);
+        font-size: 13px;
+        font-family: "JetBrains Mono", monospace;
+        background: rgba(0, 0, 0, 0.5);
+        padding: 5px 14px;
+        border-radius: 999px;
       }
 
       /* ── Toast ───────────────────────────────────────────────── */
       .toast-wrap {
         position: fixed;
-        bottom: 20px;
-        right: 20px;
+        bottom: 22px;
+        right: 22px;
         display: flex;
         flex-direction: column-reverse;
-        gap: 8px;
-        z-index: 9999;
+        gap: 10px;
+        z-index: 9998;
         pointer-events: none;
       }
       .toast {
         pointer-events: auto;
-        padding: 11px 16px;
-        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 13px 17px;
+        border-radius: 13px;
         font-size: 13px;
-        background: var(--surface2);
-        border: 1px solid var(--border);
+        font-weight: 500;
+        background: rgba(20, 20, 29, 0.92);
+        backdrop-filter: blur(14px);
+        border: 1px solid var(--border-strong);
         max-width: 380px;
-        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
-        animation: toastIn 0.2s ease;
-        line-height: 1.5;
+        box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.7);
+        animation: toastIn 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+        line-height: 1.45;
       }
-      .toast-success {
-        border-left: 3px solid var(--green);
+      .toast::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
       }
-      .toast-error {
-        border-left: 3px solid var(--red);
-      }
-      .toast-info {
-        border-left: 3px solid var(--accent);
-      }
+      .toast-success::before { background: var(--green); box-shadow: 0 0 10px var(--green); }
+      .toast-error::before { background: var(--red); box-shadow: 0 0 10px var(--red); }
+      .toast-info::before { background: var(--violet-2); box-shadow: 0 0 10px var(--violet); }
       @keyframes toastIn {
-        from {
-          transform: translateX(16px);
-          opacity: 0;
-        }
-        to {
-          transform: translateX(0);
-          opacity: 1;
-        }
+        from { transform: translateX(30px); opacity: 0; }
+        to { transform: translateX(0); opacity: 1; }
       }
 
       /* ── Spinner ─────────────────────────────────────────────── */
       .spin {
         display: inline-block;
-        width: 13px;
-        height: 13px;
+        width: 14px;
+        height: 14px;
         border: 2px solid rgba(255, 255, 255, 0.3);
         border-top-color: #fff;
         border-radius: 50%;
         animation: spin 0.65s linear infinite;
       }
       @keyframes spin {
-        to {
-          transform: rotate(360deg);
-        }
+        to { transform: rotate(360deg); }
       }
 
       /* ── Pagination ──────────────────────────────────────────── */
@@ -692,133 +1325,98 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        gap: 6px;
-        padding: 16px 0 8px;
+        gap: 7px;
+        padding: 4px 16px 20px;
+        flex-wrap: wrap;
       }
       .pg-btn {
-        padding: 6px 12px;
-        border-radius: 7px;
+        min-width: 38px;
+        padding: 8px 13px;
+        border-radius: 10px;
         border: 1px solid var(--border);
-        background: transparent;
+        background: var(--surface-2);
         color: var(--text);
         font-size: 13px;
+        font-weight: 600;
         cursor: pointer;
         transition: all 0.15s;
-        min-width: 36px;
         text-align: center;
       }
       .pg-btn:hover:not(:disabled) {
-        background: var(--surface2);
+        border-color: var(--border-strong);
+        background: rgba(255, 255, 255, 0.06);
       }
       .pg-btn:disabled {
-        opacity: 0.35;
+        opacity: 0.3;
         cursor: not-allowed;
       }
       .pg-btn.active {
-        background: var(--accent);
+        background: var(--grad);
         color: #fff;
-        border-color: var(--accent);
+        border-color: transparent;
+        box-shadow: 0 6px 16px -6px rgba(124, 92, 255, 0.7);
       }
       .pg-info {
         font-size: 12px;
         color: var(--muted);
-        padding: 0 6px;
+        padding: 0 8px;
       }
-      @media (max-width: 640px) {
-        body {
-          height: 100dvh;
-        }
+
+      /* ── Mobile ──────────────────────────────────────────────── */
+      @media (max-width: 680px) {
         .header {
           flex-wrap: wrap;
-          padding: 8px 12px 6px;
-          gap: 8px;
+          padding: 10px 14px;
+          gap: 10px;
         }
-        .header-logo {
-          font-size: 15px;
-        }
-        .count-badge {
-          display: none;
-        }
-        .filter-tabs {
+        .brand-sub { display: none; }
+        .seg {
           order: 3;
           width: 100%;
           overflow-x: auto;
           -webkit-overflow-scrolling: touch;
           scrollbar-width: none;
-          gap: 5px;
         }
-        .filter-tabs::-webkit-scrollbar {
-          display: none;
-        }
-        .filter-tab {
-          flex-shrink: 0;
-        }
+        .seg::-webkit-scrollbar { display: none; }
+        .seg-btn { flex: 1 0 auto; }
         .feed {
-          padding: 8px;
+          padding: 14px 10px calc(40px + env(safe-area-inset-bottom));
         }
-        .card {
-          border-radius: 10px;
-        }
-        .card-title {
-          font-size: 14px;
-        }
-        .card-images img {
-          height: 80px;
-        }
-        /* Stack lang row to single column on mobile */
+        .feed-inner { gap: 14px; }
+        .card-images img { height: 84px; }
         .card-lang-row {
           grid-template-columns: 1fr !important;
+          gap: 16px;
         }
-        /* Full-width buttons on mobile */
-        .btn-group {
-          gap: 8px;
-        }
+        .btn-group { gap: 9px; }
         .btn-group .btn {
-          flex: 1 1 140px;
+          flex: 1 1 130px;
           min-height: 48px;
-          font-size: 14px;
         }
-        .btn {
-          min-height: 48px;
-          font-size: 14px;
-        }
-        .btn-sm {
-          min-height: 38px;
-          font-size: 12px;
-        }
-        /* YT query row wraps on mobile */
-        .yt-query-row {
-          flex-wrap: wrap;
-        }
-        .yt-query-row input {
-          flex: 1 1 120px;
-          min-width: 0;
-        }
+        .switch-row { flex: 1 1 100%; }
+        .btn { min-height: 48px; font-size: 14px; }
+        .btn-sm { min-height: 38px; font-size: 12px; }
+        .yt-query-row { flex-wrap: wrap; }
+        .input { flex: 1 1 120px; min-width: 0; }
         .toast-wrap {
-          left: 10px;
-          right: 10px;
-          bottom: 10px;
+          left: 12px;
+          right: 12px;
+          bottom: 12px;
         }
-        .toast {
-          max-width: 100%;
-        }
+        .toast { max-width: 100%; }
+        .lb-arrow { width: 44px; height: 44px; font-size: 22px; }
       }
     </style>
   </head>
   <body>
     <!-- Lightbox overlay -->
     <div id="lightbox" onclick="lbClose(event)">
-      <span id="lb-close" onclick="closeLightbox()">✕</span>
+      <span id="lb-close" onclick="closeLightbox()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
       <span class="lb-arrow" id="lb-prev" onclick="lbStep(-1)">&#8249;</span>
       <img id="lb-img" src="" alt="" />
       <video
         id="lb-vid"
-        style="
-          display: none;
-          max-height: 90vh;
-          max-width: 90vw;
-          border-radius: 6px;
-        "
+        style="display: none; max-height: 90vh; max-width: 90vw; border-radius: 12px"
         controls
         playsinline
       ></video>
@@ -827,35 +1425,28 @@
     </div>
 
     <!-- Header -->
-    <div class="header">
-      <div class="header-logo">🎮 PlayItNews</div>
-      <div class="filter-tabs">
-        <button
-          class="filter-tab active"
-          data-status="active"
-          onclick="setFilter('active')"
-        >
-          ⚡ Active
-        </button>
-        <button class="filter-tab" data-status="all" onclick="setFilter('all')">
-          All
-        </button>
+    <header class="header">
+      <div class="brand">
+        <div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" x2="10" y1="11" y2="11"/><line x1="8" x2="8" y1="9" y2="13"/><line x1="15" x2="15.01" y1="12" y2="12"/><line x1="18" x2="18.01" y1="10" y2="10"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/></svg></div>
+        <div>
+          <div class="brand-name">PlayItNews</div>
+          <div class="brand-sub">Content Studio</div>
+        </div>
       </div>
       <div class="header-right">
         <span class="count-badge" id="countBadge">0 posts</span>
-        <button class="btn btn-outline btn-sm" onclick="loadPosts()">
-          ↻ Refresh
+        <button class="icon-btn" id="refreshBtn" title="Refresh" onclick="loadPosts(true)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
         </button>
       </div>
-    </div>
+    </header>
 
     <!-- Feed -->
     <div class="feed" id="feed">
       <div class="feed-inner">
-        <div class="empty-state">
-          <div class="empty-icon">⏳</div>
-          <div>Loading…</div>
-        </div>
+        <div class="skeleton-card"></div>
+        <div class="skeleton-card"></div>
+        <div class="skeleton-card"></div>
       </div>
     </div>
     <div class="pagination" id="pagination" style="display: none"></div>
@@ -865,6 +1456,60 @@
 
     <script>
       "use strict";
+
+      // ─── Inline SVG icons (Lucide-style, stroke = currentColor) ───────────────
+      const ICON = {
+        gamepad:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" x2="10" y1="11" y2="11"/><line x1="8" x2="8" y1="9" y2="13"/><line x1="15" x2="15.01" y1="12" y2="12"/><line x1="18" x2="18.01" y1="10" y2="10"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/></svg>',
+        zap:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
+        layers:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></svg>',
+        refresh:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>',
+        inbox:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>',
+        clock:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+        externalLink:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>',
+        check:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+        x:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>',
+        download:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>',
+        repeat:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>',
+        film:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 3v18"/><path d="M3 7.5h4"/><path d="M3 12h18"/><path d="M3 16.5h4"/><path d="M17 3v18"/><path d="M17 7.5h4"/><path d="M17 16.5h4"/></svg>',
+        rotateCcw:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>',
+        instagram:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="20" x="2" y="2" rx="5" ry="5"/><path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"/><line x1="17.5" x2="17.51" y1="6.5" y2="6.5"/></svg>',
+        youtube:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 17a24.12 24.12 0 0 1 0-10 2 2 0 0 1 1.4-1.4 49.56 49.56 0 0 1 16.2 0A2 2 0 0 1 21.5 7a24.12 24.12 0 0 1 0 10 2 2 0 0 1-1.4 1.4 49.55 49.55 0 0 1-16.2 0A2 2 0 0 1 2.5 17"/><path d="m10 15 5-3-5-3z"/></svg>',
+        play:
+          '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="6 3 20 12 6 21 6 3"/></svg>',
+        globe:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>',
+        camera:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>',
+        upload:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>',
+        gear:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>',
+        ban:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>',
+        image:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg>',
+        monitor:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>',
+        mic:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>',
+        megaphone:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg>',
+      };
 
       // ─── Global fetch wrapper (adds ngrok bypass header) ──────────────────────
       const _origFetch = window.fetch.bind(window);
@@ -877,30 +1522,20 @@
       };
 
       // ─── State ────────────────────────────────────────────────────────────────
-      let currentFilter = "active";
+      const currentFilter = "active";
       let currentPage = 1;
       const PER_PAGE = 20;
       let totalPages = 1;
       let totalPosts = 0;
       let posts = [];
       let activeSSE = null;
-      const progressLogs = {}; // postId -> [{msg, cls}]
+      const progressLogs = {}; // postId -> { kind:'video'|'carousel', events:[{type,message}] }
       const _cardHashes = {}; // postId -> JSON fingerprint for dirty-check
 
-      // ─── Filter ───────────────────────────────────────────────────────────────
-      function setFilter(status) {
-        currentFilter = status;
-        currentPage = 1;
-        document
-          .querySelectorAll(".filter-tab")
-          .forEach((t) =>
-            t.classList.toggle("active", t.dataset.status === status),
-          );
-        loadPosts();
-      }
-
       // ─── Load post list ────────────────────────────────────────────────────────
-      async function loadPosts() {
+      async function loadPosts(spin) {
+        const rBtn = document.getElementById("refreshBtn");
+        if (spin && rBtn) rBtn.classList.add("spinning");
         try {
           const res = await fetch(
             `/api/posts?status=${currentFilter}&page=${currentPage}&per_page=${PER_PAGE}`,
@@ -932,6 +1567,8 @@
         } catch (e) {
           console.error("loadPosts error:", e);
           toast(`Failed to load posts: ${e.message}`, "error");
+        } finally {
+          if (rBtn) rBtn.classList.remove("spinning");
         }
       }
 
@@ -946,7 +1583,6 @@
         const p = currentPage;
         const t = totalPages;
 
-        // Build page numbers to show: always first, last, current ±2
         const show = new Set(
           [1, t, p, p - 1, p - 2, p + 1, p + 2].filter((n) => n >= 1 && n <= t),
         );
@@ -989,24 +1625,22 @@
         const feed = document.getElementById("feed");
         if (!posts.length) {
           feed.innerHTML = `<div class="feed-inner"><div class="empty-state">
-      <div class="empty-icon">📭</div>
-      <div>No ${currentFilter === "all" ? "" : "active "}posts</div>
+      <div class="empty-icon">${ICON.inbox}</div>
+      <div class="empty-title">No active posts</div>
+      <div>New posts will appear here automatically.</div>
     </div></div>`;
           return;
         }
 
         let inner = feed.querySelector(".feed-inner");
-        // First render or filter/page change: build from scratch
-        if (!inner) {
+        // Rebuild from scratch if missing or if it still holds skeletons
+        if (!inner || inner.querySelector(".skeleton-card")) {
           inner = document.createElement("div");
           inner.className = "feed-inner";
           feed.innerHTML = "";
           feed.appendChild(inner);
         }
 
-        const existingIds = new Set(
-          [...inner.children].map((el) => Number(el.dataset.pid)),
-        );
         const newIds = new Set(posts.map((p) => p.id));
 
         // Remove cards no longer in this page
@@ -1020,13 +1654,11 @@
           const cur = inner.children[i];
 
           if (cur && Number(cur.dataset.pid) === p.id) {
-            // Same position — only patch if data changed
             if (_cardHashes[p.id] !== fp) {
               _cardHashes[p.id] = fp;
               cur.outerHTML = renderCard(p);
             }
           } else {
-            // New card or order changed — insert
             _cardHashes[p.id] = fp;
             const tmp = document.createElement("div");
             tmp.innerHTML = renderCard(p);
@@ -1057,18 +1689,17 @@
         const allImgs = p.image_paths || [];
         const allVids = p.video_paths || [];
         const galleryUrls = allImgs.map((x) => "/api/media?path=" + enc(x));
-        // Store urls for this card's gallery (will be set after render via _galleryMap)
         const imagesHtml =
           allImgs.length > 0 || allVids.length > 0
             ? `<div class="card-images" data-gallery-id="${p.id}">${allImgs
                 .map(
                   (img, i) =>
-                    `<span class="media-item"><img src="/api/media?path=${enc(img)}" loading="lazy" onerror="this.parentElement.parentElement&&this.parentElement.parentElement.removeChild(this.parentElement)" onclick="openGallery(${p.id},${i})"><button class="media-del" title="Remove this image" onclick="event.stopPropagation();deleteMedia(${p.id},'image','${enc(img)}',this)">✕</button></span>`,
+                    `<span class="media-item"><img src="/api/media?path=${enc(img)}" loading="lazy" onerror="this.parentElement.parentElement&&this.parentElement.parentElement.removeChild(this.parentElement)" onclick="openGallery(${p.id},${i})"><button class="media-del" title="Remove this image" onclick="event.stopPropagation();deleteMedia(${p.id},'image','${enc(img)}',this)">${ICON.x}</button></span>`,
                 )
                 .join("")}${allVids
                 .map(
                   (vid) =>
-                    `<span class="media-item"><video controls playsinline preload="none"><source src="/api/media?path=${enc(vid)}" type="video/mp4"></video><button class="media-del" title="Remove this video" onclick="event.stopPropagation();deleteMedia(${p.id},'video','${enc(vid)}',this)">✕</button></span>`,
+                    `<span class="media-item"><video controls playsinline preload="none"><source src="/api/media?path=${enc(vid)}" type="video/mp4"></video><button class="media-del" title="Remove this video" onclick="event.stopPropagation();deleteMedia(${p.id},'video','${enc(vid)}',this)">${ICON.x}</button></span>`,
                 )
                 .join("")}</div>`
             : "";
@@ -1077,7 +1708,6 @@
         const progressHtml = _renderProgress(p.id);
 
         // One row: [RU text | RU vid | EN text | EN vid]
-        // Text is hidden for posts already sent to Telegram (status sent/approved)
         const tgPublished = p.status === "sent" || p.status === "approved";
         const enText = p.post_text || "";
         const ruText = p.ru_post_text || "";
@@ -1085,23 +1715,22 @@
         if (enText || ruText || hasEnVid || hasRuVid) {
           const ruTextCol =
             !tgPublished && ruText
-              ? `<div class="text-col"><div class="text-lang-label">🇷🇺 Russian</div><div class="text-body">${sanitizeTg(ruText)}</div></div>`
+              ? `<div class="text-col"><span class="text-lang-label">🇷🇺 Russian</span><div class="text-body">${sanitizeTg(ruText)}</div></div>`
               : "";
           const ruVidEl = hasRuVid
-            ? `<div class="vid-item"><div class="text-lang-label">🇷🇺 Russian</div><video controls playsinline preload="none" poster="/api/media?path=${enc(p.image_paths?.[0] || "")}"><source src="/api/media?path=${enc(p.generated_video_path_ru)}" type="video/mp4"></video></div>`
+            ? `<div class="vid-item"><span class="text-lang-label">🇷🇺 Russian</span><video controls playsinline preload="none" poster="/api/media?path=${enc(p.image_paths?.[0] || "")}"><source src="/api/media?path=${enc(p.generated_video_path_ru)}" type="video/mp4"></video></div>`
             : tgPublished
               ? ""
               : `<div class="vid-item"></div>`;
           const enTextCol =
             !tgPublished && enText
-              ? `<div class="text-col"><div class="text-lang-label">🇬🇧 English</div><div class="text-body">${sanitizeTg(enText)}</div></div>`
+              ? `<div class="text-col"><span class="text-lang-label">🇬🇧 English</span><div class="text-body">${sanitizeTg(enText)}</div></div>`
               : "";
           const enVidEl = hasEnVid
-            ? `<div class="vid-item"><div class="text-lang-label">🇬🇧 English</div><video controls playsinline preload="none" poster="/api/media?path=${enc(p.image_paths?.[0] || "")}"><source src="/api/media?path=${enc(p.generated_video_path)}" type="video/mp4"></video></div>`
+            ? `<div class="vid-item"><span class="text-lang-label">🇬🇧 English</span><video controls playsinline preload="none" poster="/api/media?path=${enc(p.image_paths?.[0] || "")}"><source src="/api/media?path=${enc(p.generated_video_path)}" type="video/mp4"></video></div>`
             : tgPublished
               ? ""
               : `<div class="vid-item"></div>`;
-          // Grid columns depend on whether text is shown
           const gridCols = tgPublished
             ? hasRuVid && hasEnVid
               ? "grid-template-columns:1fr 1fr"
@@ -1113,69 +1742,75 @@
         let btnHtml = "";
         if (isPending) {
           btnHtml = `<div class="btn-group">
-      <button class="btn btn-success" style="flex:2" onclick="approvePost(${p.id}, this)">✅ Approve</button>
-      <button class="btn btn-danger" onclick="cancelPost(${p.id})">✕ Cancel</button>
+      <button class="btn btn-success" style="flex:2" onclick="approvePost(${p.id}, this)">${ICON.check} Approve</button>
+      <button class="btn btn-danger" onclick="cancelPost(${p.id})">${ICON.x} Cancel</button>
     </div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
-      <button class="btn btn-outline" style="flex:1;color:#6a1b9a;border-color:#6a1b9a;font-size:12px;min-height:36px" onclick="redownloadMedia(${p.id}, this)" title="Re-scrape the article and re-download its images and videos">⬇ Re-download images + videos</button>
+    <div class="btn-row">
+      <button class="btn btn-outline btn-sm" style="flex:1" onclick="redownloadMedia(${p.id}, this)" title="Re-scrape the article and re-download its images and videos">${ICON.download} Re-download images + videos</button>
     </div>`;
         }
         if (isActionable) {
           const ytSkip = p.yt_skip_count || 0;
-          btnHtml += `<div style="display:flex;gap:8px;flex-wrap:wrap;">
-      <button class="btn btn-outline" style="flex:1;color:#e53935;border-color:#e53935;font-size:12px;min-height:36px" onclick="markDone(${p.id}, this)">✔ Done — remove from feed</button>
-      <button class="btn btn-outline" style="flex:1;color:#2e7d32;border-color:#2e7d32;font-size:12px;min-height:36px" onclick="republishEn(${p.id}, this)">🔁 Republish EN → @playitgamesnews</button>
-      <button class="btn btn-outline" style="flex:1;color:#1565c0;border-color:#1565c0;font-size:12px;min-height:36px" onclick="republishRu(${p.id}, this)">🔁 Republish RU → @readitgames</button>
-      <button class="btn btn-outline" style="flex:1;color:#6a1b9a;border-color:#6a1b9a;font-size:12px;min-height:36px" onclick="redownloadMedia(${p.id}, this)" title="Re-scrape the article and re-download its images and videos">⬇ Re-download images + videos</button>
+          btnHtml += `<div class="btn-row">
+      <button class="btn btn-danger btn-sm" style="flex:1" onclick="markDone(${p.id}, this)">${ICON.check} Done — remove</button>
+      <button class="btn btn-outline btn-sm" style="flex:1" onclick="republishEn(${p.id}, this)">${ICON.repeat} EN → @playitgamesnews</button>
+      <button class="btn btn-outline btn-sm" style="flex:1" onclick="republishRu(${p.id}, this)">${ICON.repeat} RU → @readitgames</button>
+      <button class="btn btn-outline btn-sm" style="flex:1" onclick="redownloadMedia(${p.id}, this)" title="Re-scrape the article and re-download its images and videos">${ICON.download} Re-download media</button>
     </div>`;
           btnHtml += `<div class="btn-section">
-      <div class="btn-section-label">🎬 Generate video</div>
+      <div class="btn-section-label">${ICON.film} Generate video</div>
       <div class="yt-query-row">
-        <input id="ytq_${p.id}" type="text" placeholder="YouTube search query (auto)" value="">
+        <input id="ytq_${p.id}" class="input" type="text" placeholder="YouTube search query (auto)" value="">
         <span class="yt-skip-badge" title="YT skip offset">skip: ${ytSkip}</span>
-        <button class="btn btn-outline btn-sm" onclick="resetYtSkip(${p.id})" title="Reset skip to 0">↺</button>
+        <button class="btn btn-outline btn-sm" onclick="resetYtSkip(${p.id})" title="Reset skip to 0">${ICON.rotateCcw}</button>
       </div>
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:6px 0;cursor:pointer;">
-        <input id="incImg_${p.id}" type="checkbox">
-        <span>🖼 Include article images in video</span>
-      </label>
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:6px 0;cursor:pointer;">
-        <input id="monFrame_${p.id}" type="checkbox" checked onchange="onMonFrameToggle(${p.id})">
-        <span>🖥️ Use monitor frame</span>
-      </label>
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:6px 0;cursor:pointer;">
-        <input id="talkHead_${p.id}" type="checkbox" onchange="onTalkHeadToggle(${p.id})">
-        <span>🗣️ Talking-head avatar (bottom half, lip-synced)</span>
-      </label>
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:6px 0;cursor:pointer;">
-        <input id="cta_${p.id}" type="checkbox">
-        <span>📢 Add Telegram CTA (voiced at end)</span>
-      </label>
+      <div class="switch-grid">
+        <label class="switch-row">
+          <input id="incImg_${p.id}" type="checkbox">
+          <span class="switch-head"><span class="switch-icon">${ICON.image}</span><span class="switch-label">Include article images</span></span>
+          <span class="switch-track"></span>
+        </label>
+        <label class="switch-row">
+          <input id="monFrame_${p.id}" type="checkbox" onchange="onMonFrameToggle(${p.id})">
+          <span class="switch-head"><span class="switch-icon">${ICON.monitor}</span><span class="switch-label">Use monitor frame</span></span>
+          <span class="switch-track"></span>
+        </label>
+        <label class="switch-row">
+          <input id="talkHead_${p.id}" type="checkbox" checked onchange="onTalkHeadToggle(${p.id})">
+          <span class="switch-head"><span class="switch-icon">${ICON.mic}</span><span class="switch-label">Talking-head avatar</span></span>
+          <span class="switch-track"></span>
+        </label>
+        <label class="switch-row">
+          <input id="cta_${p.id}" type="checkbox">
+          <span class="switch-head"><span class="switch-icon">${ICON.megaphone}</span><span class="switch-label">Add Telegram CTA</span></span>
+          <span class="switch-track"></span>
+        </label>
+      </div>
       <div class="btn-group">
-        <button class="btn btn-primary" onclick="generateVideo(${p.id},'both')">🎬 EN+RU</button>
-        <button class="btn btn-outline" onclick="generateVideo(${p.id},'en')">🇬🇧 EN only</button>
-        <button class="btn btn-outline" onclick="generateVideo(${p.id},'ru')">🇷🇺 RU only</button>
+        <button class="btn btn-primary" onclick="generateVideo(${p.id},'both')">${ICON.film} EN+RU</button>
+        <button class="btn btn-tinted" onclick="generateVideo(${p.id},'en')">🇬🇧 EN only</button>
+        <button class="btn btn-tinted" onclick="generateVideo(${p.id},'ru')">🇷🇺 RU only</button>
       </div>
     </div>`;
           if (hasEnVid || hasRuVid) {
             const pub = new Set(p.published_platforms || []);
             const done = (k) =>
               pub.has(k)
-                ? ' <span class="pub-done" title="Already published">✅</span>'
+                ? ` <span class="pub-done" title="Already published">${ICON.check}</span>`
                 : "";
             let pubBtns = "";
             if (hasEnVid) {
-              pubBtns += `<button class="btn btn-ig${pub.has("instagram") ? " btn-published" : ""}" onclick="publishTo(${p.id},'instagram',this)">📲 Instagram EN${done("instagram")}</button>`;
-              pubBtns += `<button class="btn btn-yt${pub.has("youtube") ? " btn-published" : ""}" onclick="publishTo(${p.id},'youtube',this)">▶️ YouTube EN${done("youtube")}</button>`;
+              pubBtns += `<button class="btn btn-ig${pub.has("instagram") ? " btn-published" : ""}" onclick="publishTo(${p.id},'instagram',this)">${ICON.instagram} Instagram EN${done("instagram")}</button>`;
+              pubBtns += `<button class="btn btn-yt${pub.has("youtube") ? " btn-published" : ""}" onclick="publishTo(${p.id},'youtube',this)">${ICON.youtube} YouTube EN${done("youtube")}</button>`;
             }
             if (hasRuVid) {
-              pubBtns += `<button class="btn btn-ig${pub.has("instagram-ru") ? " btn-published" : ""}" onclick="publishTo(${p.id},'instagram-ru',this)">📲 Instagram RU${done("instagram-ru")}</button>`;
-              pubBtns += `<button class="btn btn-yt${pub.has("youtube-ru") ? " btn-published" : ""}" onclick="publishTo(${p.id},'youtube-ru',this)">▶️ YouTube RU${done("youtube-ru")}</button>`;
+              pubBtns += `<button class="btn btn-ig${pub.has("instagram-ru") ? " btn-published" : ""}" onclick="publishTo(${p.id},'instagram-ru',this)">${ICON.instagram} Instagram RU${done("instagram-ru")}</button>`;
+              pubBtns += `<button class="btn btn-yt${pub.has("youtube-ru") ? " btn-published" : ""}" onclick="publishTo(${p.id},'youtube-ru',this)">${ICON.youtube} YouTube RU${done("youtube-ru")}</button>`;
             }
             if (hasEnVid && hasRuVid)
-              pubBtns += `<button class="btn btn-outline" onclick="publishTo(${p.id},'all-combined',this)">🌍 Publish All</button>`;
+              pubBtns += `<button class="btn btn-tinted" onclick="publishTo(${p.id},'all-combined',this)">${ICON.globe} Publish All</button>`;
             btnHtml += `<div class="btn-section">
-        <div class="btn-section-label">📤 Publish</div>
+        <div class="btn-section-label">${ICON.upload} Publish</div>
         <div class="btn-group">${pubBtns}</div>
       </div>`;
           }
@@ -1183,8 +1818,6 @@
           // ─── Instagram CAROUSEL section ─────────────────────────────────────
           const carEn = (p.carousel_paths_en || []).filter(Boolean);
           const carRu = (p.carousel_paths_ru || []).filter(Boolean);
-          // Register a dedicated lightbox gallery for each language so slides open
-          // in the same fullscreen viewer as post images.
           const carEnGalKey = `${p.id}-car-en`;
           const carRuGalKey = `${p.id}-car-ru`;
           _galleryMap[carEnGalKey] = carEn.map(
@@ -1196,9 +1829,7 @@
           const _isVid = (path) => /\.(mp4|mov|m4v)$/i.test(path);
           const carThumb = (path, galKey, idx) => {
             if (_isVid(path)) {
-              // Click on the wrapper, not the video element, so playback toggle
-              // doesn't fight with opening the gallery.
-              return `<span class="car-slide-thumb car-slide-vid" onclick="openGallery('${galKey}',${idx})" title="Video slide ${idx + 1}"><video muted playsinline preload="metadata"><source src="/api/media?path=${enc(path)}" type="video/mp4"></video><span class="car-slide-play">▶</span></span>`;
+              return `<span class="car-slide-thumb car-slide-vid" onclick="openGallery('${galKey}',${idx})" title="Video slide ${idx + 1}"><video muted playsinline preload="metadata"><source src="/api/media?path=${enc(path)}" type="video/mp4"></video><span class="car-slide-play">${ICON.play}</span></span>`;
             }
             return `<span class="car-slide-thumb" onclick="openGallery('${galKey}',${idx})"><img src="/api/media?path=${enc(path)}" alt="slide ${idx + 1}" loading="lazy"></span>`;
           };
@@ -1215,43 +1846,42 @@
           const pubSet = new Set(p.published_platforms || []);
           const doneMark = (k) =>
             pubSet.has(k)
-              ? ' <span class="pub-done" title="Already published">✅</span>'
+              ? ` <span class="pub-done" title="Already published">${ICON.check}</span>`
               : "";
           let carPubBtns = "";
           if (carEn.length >= 2) {
-            carPubBtns += `<button class="btn btn-ig${pubSet.has("instagram-carousel") ? " btn-published" : ""}" onclick="publishTo(${p.id},'instagram-carousel',this)">📸 Carousel EN${doneMark("instagram-carousel")}</button>`;
+            carPubBtns += `<button class="btn btn-ig${pubSet.has("instagram-carousel") ? " btn-published" : ""}" onclick="publishTo(${p.id},'instagram-carousel',this)">${ICON.camera} Carousel EN${doneMark("instagram-carousel")}</button>`;
           }
           if (carRu.length >= 2) {
-            carPubBtns += `<button class="btn btn-ig${pubSet.has("instagram-carousel-ru") ? " btn-published" : ""}" onclick="publishTo(${p.id},'instagram-carousel-ru',this)">📸 Carousel RU${doneMark("instagram-carousel-ru")}</button>`;
+            carPubBtns += `<button class="btn btn-ig${pubSet.has("instagram-carousel-ru") ? " btn-published" : ""}" onclick="publishTo(${p.id},'instagram-carousel-ru',this)">${ICON.camera} Carousel RU${doneMark("instagram-carousel-ru")}</button>`;
           }
           btnHtml += `<div class="btn-section">
-      <div class="btn-section-label">📸 Instagram Carousel</div>
+      <div class="btn-section-label">${ICON.camera} Instagram Carousel</div>
       ${carouselPreview}
       <div class="btn-group">
-        <button class="btn btn-primary" onclick="generateCarousel(${p.id},'both')">📸 EN+RU</button>
-        <button class="btn btn-outline" onclick="generateCarousel(${p.id},'en')">🇬🇧 EN only</button>
-        <button class="btn btn-outline" onclick="generateCarousel(${p.id},'ru')">🇷🇺 RU only</button>
+        <button class="btn btn-primary" onclick="generateCarousel(${p.id},'both')">${ICON.camera} EN+RU</button>
+        <button class="btn btn-tinted" onclick="generateCarousel(${p.id},'en')">🇬🇧 EN only</button>
+        <button class="btn btn-tinted" onclick="generateCarousel(${p.id},'ru')">🇷🇺 RU only</button>
       </div>
-      ${carPubBtns ? `<div class="btn-group" style="margin-top:8px;">${carPubBtns}</div>` : ""}
+      ${carPubBtns ? `<div class="btn-group" style="margin-top:4px;">${carPubBtns}</div>` : ""}
     </div>`;
         }
 
         return `<div class="card" id="card-${p.id}" data-pid="${p.id}">
     <div class="card-header">
+      <span class="status-dot ${esc(p.status)}"></span>
       <div class="card-info">
         <div class="card-title">${esc(p.article_title || "Untitled")}</div>
         <div class="card-meta">
           <span class="badge badge-${p.status}">${p.status}</span>
-          <span>${dt}</span>
-          ${p.article_url ? `<a href="${esc(p.article_url)}" target="_blank" rel="noopener">Source ↗</a>` : ""}
+          <span class="meta-chip">${ICON.clock} ${dt}</span>
+          ${p.article_url ? `<a href="${esc(p.article_url)}" target="_blank" rel="noopener">Source ${ICON.externalLink}</a>` : ""}
           <span class="card-id">#${p.id}</span>
         </div>
       </div>
     </div>
     ${imagesHtml}
-    <div class="card-content">
-      <div id="progressArea_${p.id}">${progressHtml}</div>
-    </div>
+    <div id="progressArea_${p.id}">${progressHtml}</div>
     ${langRowHtml}
     ${btnHtml ? `<div class="card-actions">${btnHtml}</div>` : ""}
   </div>`;
@@ -1265,7 +1895,7 @@
           const idx = posts.findIndex((p) => p.id === id);
           if (idx !== -1) posts[idx] = { ...posts[idx], ...detail };
           const p = idx !== -1 ? posts[idx] : detail;
-          delete _cardHashes[id]; // force re-render
+          delete _cardHashes[id];
           const cardEl = document.getElementById(`card-${id}`);
           if (cardEl) {
             _cardHashes[id] = _cardFingerprint(p);
@@ -1287,7 +1917,7 @@
           });
           const data = await res.json();
           if (data.error) throw new Error(data.error);
-          toast(`Post #${id} published to Telegram! ✅`, "success");
+          toast(`Post #${id} published to Telegram!`, "success");
           await loadPosts();
         } catch (e) {
           toast(`Approve failed: ${e.message}`, "error");
@@ -1312,18 +1942,582 @@
         }
       }
 
-      // ─── Progress helpers ─────────────────────────────────────────────────────
-      function _renderProgress(id) {
-        const entries = progressLogs[id];
-        if (!entries || !entries.length) return "";
-        const rows = entries
-          .map((e) => `<div class="${e.cls}">${esc(e.msg)}</div>`)
-          .join("");
-        return `<div class="progress-panel">
-    <div class="progress-label">⚙️ Video Generation Progress</div>
-    <div class="progress-log" id="plog_${id}">${rows}</div>
-  </div>`;
+      // ─── Progress engine ──────────────────────────────────────────────────────
+      // progressLogs[id] = { kind: 'video'|'carousel', events: [{type, message}] }
+      const _rawOpen = {}; // postId -> raw-log <details> open state
+
+      const VS_META = {
+        scripts:   { label: "Сценарии",      icon: ICON.film },
+        clips:     { label: "Подбор видео",  icon: ICON.youtube },
+        render_en: { label: "Рендер EN",     icon: ICON.globe },
+        render_ru: { label: "Рендер RU",     icon: ICON.globe },
+        finish:    { label: "Готово",        icon: ICON.check },
+      };
+      const VS_ENTRY = { scripts: 5, clips: 26, render_en: 55, render_ru: 78, finish: 100 };
+
+      function _stageFor(msg) {
+        const m = (msg || "").split("\n")[0];
+        if (/step\s*1\/4|writing scripts/i.test(m)) return "scripts";
+        if (/step\s*2\/4|synthesizing voices|step\s*3\/4|searching youtube|found\s+\d+\s+video clips/i.test(m)) return "clips";
+        if (/rendering[^\n]*\bEN\b[^\n]*video/i.test(m)) return "render_en";
+        if (/rendering[^\n]*\bRU\b[^\n]*video/i.test(m)) return "render_ru";
+        if (/step\s*4\/4|^done!?$|generation complete/i.test(m)) return "finish";
+        return null;
       }
+
+      const _SUB_RULES = [
+        [/translating title/i, ICON.globe, "Перевод заголовка…"],
+        [/\bEN title:\s*(.+)/i, ICON.globe, (x) => "EN: " + x[1].slice(0, 64)],
+        [/\bRU title:\s*(.+)/i, ICON.globe, (x) => "RU: " + x[1].slice(0, 64)],
+        [/generating script/i, ICON.film, "Генерация сценария…"],
+        [/script \((\d+) words\)/i, ICON.check, (x) => "Сценарий готов (" + x[1] + " слов)", "done"],
+        [/using article[^\n]*video as source/i, ICON.download, "Источник: видео из статьи"],
+        [/no article video — downloading|downloading\s+\d+\s+yt video|downloading full yt video/i, ICON.download, "Скачивание геймплея…"],
+        [/full yt video ready|yt video ready/i, ICON.check, "Геймплей скачан", "done"],
+        [/scene analysis/i, ICON.film, "Анализ сцен…"],
+        [/east text detector/i, ICON.monitor, "Загрузка детектора текста…"],
+        [/clip selection/i, ICON.film, "Выбор лучших моментов…"],
+        [/cut\s+(\d+)\s+[^\n]*clips|prepared\s+(\d+)\s+[^\n]*clips/i, ICON.check, (x) => "Подготовлено клипов: " + (x[1] || x[2]), "done"],
+        [/synthesizing voice with edge-tts/i, ICON.mic, "Синтез голоса (edge-tts)…"],
+        [/whisper device/i, ICON.mic, "Тайминг субтитров (Whisper)…"],
+        [/processing audio with duration/i, ICON.mic, "Распознавание аудио…"],
+        [/TTS:\s*(\d+) word cues[^\n]*?([\d.]+)\s*s/i, ICON.check, (x) => "Голос готов (" + x[1] + " слов, " + x[2] + " с)", "done"],
+        [/assembling video/i, ICON.film, "Сборка видео…"],
+        [/talking-head segments mode[^\n]*?(\d+)\/(\d+)/i, ICON.play, (x) => "Talking-head: " + x[1] + "/" + x[2] + " сегментов"],
+        [/background music added/i, ICON.check, "Фоновая музыка добавлена", "done"],
+        [/generating talking-head avatar/i, ICON.play, "Генерация аватара…"],
+        [/musetalk: starting worker/i, ICON.play, "MuseTalk: липсинк-рендер…"],
+        [/talking-head scene composed/i, ICON.check, "Talking-head собран", "done"],
+        [/burning\s+(\d+)\s+[^\n]*subtitle/i, ICON.film, "Прожиг субтитров…"],
+      ];
+
+      function _prettifySub(msg) {
+        const m = (msg || "").split("\n")[0].trim();
+        for (const r of _SUB_RULES) {
+          const mm = m.match(r[0]);
+          if (mm) {
+            const text = typeof r[2] === "function" ? r[2](mm) : r[2];
+            return { icon: r[1], text, kind: r[3] || "step" };
+          }
+        }
+        return null;
+      }
+
+      function _addSub(stage, sub) {
+        if (!stage || !sub) return;
+        const arr = stage.substeps;
+        const last = arr[arr.length - 1];
+        if (last && last.text === sub.text && last.kind === sub.kind) return;
+        arr.push(sub);
+      }
+
+      function _computeGenState(events) {
+        const hasEN = events.some((e) => /\bEN video\b/i.test(e.message || ""));
+        const hasRU = events.some((e) => /\bRU video\b/i.test(e.message || ""));
+        const order = ["scripts", "clips"];
+        if (hasEN) order.push("render_en");
+        if (hasRU) order.push("render_ru");
+        order.push("finish");
+        const next = {
+          scripts: 26, clips: 55,
+          render_en: hasRU ? 78 : 100, render_ru: 100, finish: 100,
+        };
+        const stages = {};
+        order.forEach((k) => (stages[k] = { status: "pending", substeps: [] }));
+
+        let cur = null, pct = 0, finished = false, overallErr = false;
+        const enter = (k) => {
+          const idx = order.indexOf(k);
+          for (let i = 0; i < idx; i++) {
+            if (stages[order[i]].status !== "error") stages[order[i]].status = "done";
+          }
+          if (stages[k].status !== "error") stages[k].status = "active";
+          cur = k;
+          pct = Math.max(pct, VS_ENTRY[k]);
+        };
+
+        for (const e of events) {
+          const type = e.type;
+          const msg = e.message || "";
+          const m0 = msg.split("\n")[0];
+          const st = _stageFor(msg);
+          if (st) {
+            enter(st);
+            if (st === "finish") {
+              order.forEach((k) => { if (stages[k].status !== "error") stages[k].status = "done"; });
+              pct = 100;
+              finished = true;
+            }
+            continue;
+          }
+          if (/✅ EN video:/i.test(m0)) {
+            if (stages.render_en) stages.render_en.status = "done";
+            _addSub(stages.render_en || stages[cur], { icon: ICON.check, text: "EN видео готово", kind: "done" });
+            continue;
+          }
+          if (/✅ RU video:/i.test(m0)) {
+            if (stages.render_ru) stages.render_ru.status = "done";
+            _addSub(stages.render_ru || stages[cur], { icon: ICON.check, text: "RU видео готово", kind: "done" });
+            continue;
+          }
+          if (/❌[^\n]*EN video generation failed/i.test(m0)) {
+            if (stages.render_en) stages.render_en.status = "error";
+            continue;
+          }
+          if (/❌[^\n]*RU video generation failed/i.test(m0)) {
+            if (stages.render_ru) stages.render_ru.status = "error";
+            continue;
+          }
+          if (type === "error") {
+            overallErr = true;
+            if (cur && stages[cur] && stages[cur].status === "active") stages[cur].status = "error";
+            _addSub(stages[cur] || stages.scripts, { icon: ICON.x, text: m0.replace(/^[❌⛔]\s*/, ""), kind: "error" });
+            continue;
+          }
+          if (type === "done" || type === "video_ready" || type === "closed") continue;
+          const pretty = _prettifySub(msg);
+          if (pretty && cur) {
+            _addSub(stages[cur], pretty);
+            if (pretty.kind !== "done") pct = Math.min(pct + 2, (next[cur] || 100) - 3);
+          }
+        }
+
+        order.forEach((k) => {
+          const s = stages[k];
+          const n = s.substeps.length;
+          s.substeps.forEach((ss, i) => {
+            ss._live = ss.kind === "step" && s.status === "active" && i === n - 1;
+          });
+        });
+
+        let current = { icon: ICON.gear, text: "Запуск…" };
+        if (finished) current = { icon: ICON.check, text: "Генерация завершена" };
+        else if (overallErr) current = { icon: ICON.x, text: "Ошибка генерации" };
+        else if (cur) {
+          const s = stages[cur];
+          const last = s.substeps[s.substeps.length - 1];
+          current = last ? { icon: last.icon, text: last.text } : { icon: VS_META[cur].icon, text: VS_META[cur].label };
+        }
+        return { order, stages, pct, done: finished, error: overallErr, current,
+                 meta: VS_META, title: "Генерация видео", icon: ICON.film, showCancel: true };
+      }
+
+      // ─── Publish progress engine ───────────────────────────────────────────────
+      const PUB_META = {
+        prep:   { label: "Подготовка",   icon: ICON.gear },
+        ig_en:  { label: "Instagram EN", icon: ICON.instagram },
+        yt_en:  { label: "YouTube EN",   icon: ICON.youtube },
+        ig_ru:  { label: "Instagram RU", icon: ICON.instagram },
+        yt_ru:  { label: "YouTube RU",   icon: ICON.youtube },
+        car_en: { label: "Карусель EN",  icon: ICON.camera },
+        car_ru: { label: "Карусель RU",  icon: ICON.camera },
+        finish: { label: "Готово",       icon: ICON.check },
+      };
+
+      function _detectPubPlatform(events) {
+        for (const e of events) {
+          const mm = (e.message || "").match(/publishing to ([a-z0-9-]+)/i);
+          if (mm) return mm[1].toLowerCase();
+        }
+        return "";
+      }
+
+      function _pubTargetsFor(platform) {
+        switch (platform) {
+          case "all-combined": return ["ig_en", "yt_en", "ig_ru", "yt_ru"];
+          case "all":          return ["ig_en", "yt_en"];
+          case "all-ru":       return ["ig_ru", "yt_ru"];
+          case "instagram":            return ["ig_en"];
+          case "instagram-ru":         return ["ig_ru"];
+          case "youtube":              return ["yt_en"];
+          case "youtube-ru":           return ["yt_ru"];
+          case "instagram-carousel":   return ["car_en"];
+          case "instagram-carousel-ru":return ["car_ru"];
+          default: return [];
+        }
+      }
+
+      const _PUB_NOW = [
+        [/translating[^\n]*title/i, ICON.globe, "Перевод заголовка…"],
+        [/generating[^\n]*thumbnail/i, ICON.image, "Генерация обложки…"],
+        [/thumbnail saved/i, ICON.check, "Обложка готова"],
+        [/uploading video to github/i, ICON.upload, "Загрузка видео на CDN…"],
+        [/uploaded\s+\S+\s*→/i, ICON.check, "Файл загружен на CDN"],
+        [/public (video|cover) url/i, ICON.check, "Публичная ссылка готова"],
+        [/creating instagram container/i, ICON.instagram, "Создание Instagram-контейнера…"],
+        [/container id:[^\n]*waiting/i, ICON.instagram, "Обработка медиа в Instagram…"],
+        [/publishing container/i, ICON.instagram, "Публикация Reels…"],
+        [/published instagram reel/i, ICON.check, "Instagram Reel опубликован"],
+        [/youtube token refreshed/i, ICON.youtube, "Обновление токена YouTube…"],
+        [/uploading to youtube/i, ICON.youtube, "Загрузка на YouTube…"],
+        [/youtube upload:\s*(\d+)%/i, ICON.youtube, (x) => "YouTube: загрузка " + x[1] + "%"],
+        [/youtube upload complete/i, ICON.check, "YouTube: видео загружено"],
+        [/starting instagram[^\n]*upload/i, ICON.instagram, "Старт загрузки в Instagram…"],
+        [/starting youtube[^\n]*upload/i, ICON.youtube, "Старт загрузки на YouTube…"],
+        [/uploading reel to instagram/i, ICON.instagram, "Загрузка Reels…"],
+        [/uploading short to youtube/i, ICON.youtube, "Загрузка Shorts…"],
+        [/uploading\s+\d+-slide carousel/i, ICON.camera, "Загрузка карусели…"],
+        [/building (en|ru) carousel/i, ICON.camera, "Сборка карусели…"],
+        [/slides ready/i, ICON.check, "Слайды готовы"],
+        [/publishing to /i, ICON.upload, "Подготовка публикации…"],
+      ];
+
+      // Maps a single publish message to the target it belongs to (en/ru, ig/yt/carousel).
+      function _pubMsgTarget(m) {
+        const s = (m || "").toLowerCase();
+        const mm = s.match(/starting (instagram|youtube)\s+(en|ru)?\s*upload/);
+        if (mm) {
+          const ru = mm[2] === "ru";
+          return mm[1] === "instagram" ? (ru ? "ig_ru" : "ig_en") : (ru ? "yt_ru" : "yt_en");
+        }
+        const ru = /\bru\b/.test(s);
+        if (/uploading\s+\d+-slide carousel to instagram/.test(s)) return ru ? "car_ru" : "car_en";
+        if (/uploading reel to instagram/.test(s)) return ru ? "ig_ru" : "ig_en";
+        if (/uploading short to youtube/.test(s)) return ru ? "yt_ru" : "yt_en";
+        return null;
+      }
+
+      function _pubNow(msg) {
+        const m = (msg || "").split("\n")[0].trim();
+        for (const r of _PUB_NOW) {
+          const mm = m.match(r[0]);
+          if (mm) return { icon: r[1], text: typeof r[2] === "function" ? r[2](mm) : r[2] };
+        }
+        return null;
+      }
+
+      // Which channel a detail/progress message belongs to: ig | yt | car
+      function _pubChannel(m) {
+        const s = (m || "").toLowerCase();
+        if (/carousel|slides ready|building (en|ru) carousel/.test(s)) return "car";
+        if (/youtube|short to youtube/.test(s)) return "yt";
+        if (/instagram|reel|container|github|cdn|public (video|cover) url|uploaded\s+\S+\s*→/.test(s)) return "ig";
+        return null;
+      }
+
+      function _parsePubResult(line) {
+        // "✅ Instagram EN: id | ❌ YouTube RU: reason | ..."
+        if (!line) return null;
+        const map = {
+          "Instagram EN": "ig_en", "YouTube EN": "yt_en",
+          "Instagram RU": "ig_ru", "YouTube RU": "yt_ru",
+          "IG Carousel EN": "car_en", "IG Carousel RU": "car_ru",
+        };
+        const out = {};
+        line.split(" | ").forEach((part) => {
+          const ok = part.trim().startsWith("✅");
+          for (const [label, key] of Object.entries(map)) {
+            const idx = part.indexOf(label + ":");
+            if (idx !== -1) {
+              out[key] = { ok, value: part.slice(idx + label.length + 1).trim() };
+              break;
+            }
+          }
+        });
+        return out;
+      }
+
+      function _computePubState(events, platform) {
+        platform = platform || _detectPubPlatform(events);
+        let targets = _pubTargetsFor(platform);
+        if (!targets.length) {
+          const seen = new Set();
+          events.forEach((e) => {
+            const m = e.message || "";
+            if (/instagram en upload|uploading reel to instagram(?! ru)|carousel to instagram en/i.test(m)) seen.add("ig_en");
+            if (/youtube en upload|uploading short to youtube(?! ru)/i.test(m)) seen.add("yt_en");
+            if (/instagram ru upload|to instagram ru|carousel to instagram ru/i.test(m)) seen.add("ig_ru");
+            if (/youtube ru upload|to youtube ru/i.test(m)) seen.add("yt_ru");
+          });
+          targets = ["ig_en", "yt_en", "ig_ru", "yt_ru"].filter((t) => seen.has(t));
+        }
+        const order = ["prep", ...targets, "finish"];
+        const stages = {};
+        order.forEach((k) => (stages[k] = { status: "pending", substeps: [] }));
+
+        // ordered groups for per-target completion tracking (uploads run concurrently)
+        const igOrder = targets.filter((t) => t === "ig_en" || t === "ig_ru");
+        const ytOrder = targets.filter((t) => t === "yt_en" || t === "yt_ru");
+        const carOrder = targets.filter((t) => t === "car_en" || t === "car_ru");
+
+        let finished = false, overallErr = false, uploadsStarted = false, started = false;
+        let latestYt = null, resultLine = null;
+        let igDone = 0, ytDone = 0, carDone = 0;
+        const startedSet = new Set();
+        // latest live activity text per channel (from detail logs)
+        const chanNow = { ig: null, yt: null, car: null };
+        let current = { icon: ICON.upload, text: "Запуск публикации…" };
+
+        for (const e of events) {
+          started = true;
+          const m = (e.message || "").split("\n")[0];
+          if (e.type === "done") { finished = true; resultLine = m.replace(/^[✅\s]*Done:\s*/i, ""); continue; }
+          if (e.type === "error") { overallErr = true; current = { icon: ICON.x, text: m.replace(/^[❌⛔]\s*/, "") }; continue; }
+          if (/starting (instagram|youtube)[^\n]*upload|uploading reel to instagram|uploading short to youtube|uploading\s+\d+-slide carousel/i.test(m)) uploadsStarted = true;
+          const tgt = _pubMsgTarget(m);
+          if (tgt && targets.includes(tgt)) startedSet.add(tgt);
+          if (/published instagram reel/i.test(m)) igDone++;
+          if (/youtube upload complete/i.test(m)) ytDone++;
+          if (/carousel published|published \d+-slide carousel|carousel media_id/i.test(m)) carDone++;
+          const ytp = m.match(/youtube upload:\s*(\d+)%/i);
+          if (ytp) latestYt = +ytp[1];
+          const pn = _pubNow(m);
+          if (pn) {
+            current = pn;
+            const ch = _pubChannel(m);
+            if (ch) chanNow[ch] = pn.text;
+          }
+        }
+
+        // per-target done flags from completion counts (in group order)
+        const tDone = {};
+        igOrder.forEach((t, i) => (tDone[t] = i < igDone));
+        ytOrder.forEach((t, i) => (tDone[t] = i < ytDone));
+        carOrder.forEach((t, i) => (tDone[t] = i < carDone));
+
+        const resMap = _parsePubResult(resultLine);
+        stages.prep.status = finished ? "done" : (uploadsStarted ? "done" : (overallErr && !uploadsStarted ? "error" : (started ? "active" : "pending")));
+
+        let firstLiveYt = false;
+        targets.forEach((t) => {
+          if (finished) {
+            stages[t].status = resMap && resMap[t] ? (resMap[t].ok ? "done" : "error") : "done";
+            const r = resMap && resMap[t];
+            if (r) {
+              const v = r.value || "";
+              const isUrl = /^https?:\/\//i.test(v);
+              stages[t].substeps.push({
+                icon: r.ok ? ICON.check : ICON.x,
+                text: r.ok ? (isUrl ? v.replace(/^https?:\/\//i, "") : "Опубликовано · " + v.slice(0, 40)) : (v || "Ошибка"),
+                kind: r.ok ? "done" : "error",
+              });
+            }
+          } else if (overallErr) {
+            stages[t].status = tDone[t] ? "done" : (startedSet.has(t) || uploadsStarted ? "error" : "pending");
+            if (tDone[t]) stages[t].substeps.push({ icon: ICON.check, text: "Готово", kind: "done" });
+          } else if (tDone[t]) {
+            stages[t].status = "done";
+            stages[t].substeps.push({ icon: ICON.check, text: "Готово", kind: "done" });
+          } else if (startedSet.has(t) || uploadsStarted) {
+            stages[t].status = "active";
+            const ch = t.startsWith("ig_") ? "ig" : t.startsWith("yt_") ? "yt" : "car";
+            let live = chanNow[ch] || "Загрузка…";
+            if ((t === "yt_en" || t === "yt_ru") && latestYt != null && !firstLiveYt) {
+              live = "Загрузка… " + latestYt + "%";
+              firstLiveYt = true;
+            }
+            stages[t].substeps.push({ icon: PUB_META[t].icon, text: live, kind: "step", _live: true });
+          }
+        });
+        if (finished) stages.finish.status = "done";
+
+        let pct;
+        if (finished) pct = 100;
+        else {
+          const total = Math.max(targets.length, 1);
+          const doneCount = targets.filter((t) => stages[t].status === "done").length;
+          let base = uploadsStarted ? 18 : (started ? 8 : 4);
+          base = Math.max(base, 18 + (74 * doneCount) / total);
+          if (latestYt != null && uploadsStarted && doneCount < total) {
+            base += (latestYt / 100) * (74 / total) * 0.5;
+          }
+          pct = Math.min(Math.round(base), 96);
+        }
+
+        if (finished) current = { icon: ICON.check, text: "Публикация завершена" };
+        else if (overallErr && current.icon !== ICON.x) current = { icon: ICON.x, text: "Ошибка публикации" };
+
+        return { order, stages, pct, done: finished, error: overallErr && !finished, current,
+                 meta: PUB_META, title: "Публикация", icon: ICON.upload, showCancel: false };
+      }
+
+
+      function _subHTML(ss) {
+        const cls = ss.kind === "done" ? "is-done" : ss.kind === "error" ? "is-error" : ss._live ? "is-live" : "";
+        const ic = ss._live ? '<span class="gen-spin gen-spin-sm"></span>' : ss.icon;
+        return `<li class="gen-sub ${cls}"><span class="gen-sub-ic">${ic}</span><span>${esc(ss.text)}</span></li>`;
+      }
+
+      function _stepIcon(key, status, meta) {
+        const M = meta || VS_META;
+        return status === "active" ? '<span class="gen-spin"></span>'
+          : status === "done" ? ICON.check
+          : status === "error" ? ICON.x
+          : M[key].icon;
+      }
+
+      function _rawLineHTML(e) {
+        const t = e.type, m = e.message || "";
+        const cls = t === "error" ? "rl-error"
+          : t === "done" || m.startsWith("✅") ? "rl-done"
+          : t === "detail" ? "rl-detail" : "rl-line";
+        return `<div class="${cls}">${esc(m)}</div>`;
+      }
+
+      function _genTop(id, s) {
+        const orbCls = s.done ? "is-done" : s.error ? "is-error" : "is-run";
+        const orbIc = s.done ? ICON.check : s.error ? ICON.x : "";
+        const cancel = (s.showCancel && !s.done && !s.error)
+          ? `<button class="btn btn-danger btn-sm gen-cancel" id="cancelVidBtn_${id}" onclick="cancelVideo(${id})">${ICON.ban} Cancel</button>`
+          : "";
+        return `<div class="gen-top">
+      <div class="gen-name">${s.icon}<span>${s.title}</span></div>
+      <div class="gen-meta"><span class="gen-pct" id="genPct_${id}">${s.pct}%</span>
+        <span class="gen-orb ${orbCls}" id="genOrb_${id}">${orbIc}</span></div>
+      ${cancel}
+    </div>`;
+      }
+
+      function _renderSimpleLog(id, st) {
+        const rows = st.events.map(_rawLineHTML).join("");
+        return `<div class="gen gen--simple">
+      <div class="gen-top"><div class="gen-name">${ICON.camera}<span>Карусель</span></div></div>
+      <div class="gen-raw gen-raw--tall" id="genRaw_${id}">${rows}</div>
+    </div>`;
+      }
+
+      function _computeState(st) {
+        return st.kind === "publish"
+          ? _computePubState(st.events, st.platform)
+          : _computeGenState(st.events);
+      }
+
+      function _renderProgress(id) {
+        const st = progressLogs[id];
+        if (!st || !st.events) return "";
+        if (st.kind === "carousel") return st.events.length ? _renderSimpleLog(id, st) : "";
+        const s = _computeState(st);
+        const steps = s.order.map((k) => {
+          const stage = s.stages[k];
+          const subs = stage.substeps.map(_subHTML).join("");
+          return `<li class="gen-step is-${stage.status}" data-key="${k}">
+        <span class="gen-step-ic">${_stepIcon(k, stage.status, s.meta)}</span>
+        <div class="gen-step-main"><div class="gen-step-label">${s.meta[k].label}</div>
+          <ul class="gen-substeps">${subs}</ul></div>
+      </li>`;
+        }).join("");
+        const raw = st.events.map(_rawLineHTML).join("");
+        return `<div class="gen" id="gen_${id}">
+      ${_genTop(id, s)}
+      <div class="gen-track"><div class="gen-fill${s.done || s.error ? " is-static" : ""}" id="genFill_${id}" style="width:${s.pct}%"></div></div>
+      <div class="gen-now" id="genNow_${id}"><span class="gen-now-ic">${s.current.icon}</span><span class="gen-now-tx">${esc(s.current.text)}</span></div>
+      <ol class="gen-steps" id="genSteps_${id}">${steps}</ol>
+      <details class="gen-rawwrap"${_rawOpen[id] ? " open" : ""} id="genRawWrap_${id}" ontoggle="_rawOpen[${id}]=this.open"><summary>${ICON.layers} Подробный лог</summary><div class="gen-raw" id="genRaw_${id}">${raw}</div></details>
+    </div>`;
+      }
+
+      // Incremental reconcile for smooth live animation (no full re-render flicker).
+      function _vpReconcile(id) {
+        const area = document.getElementById(`progressArea_${id}`);
+        if (!area) return;
+        const st = progressLogs[id];
+        if (!st) return;
+        let root = document.getElementById(`gen_${id}`);
+        // Fresh start (no events yet) — always (re)build from scratch so a new
+        // run clears any leftover panel from a previous one.
+        if (!root || !st.events.length) {
+          area.innerHTML = _renderProgress(id);
+          const r0 = document.getElementById(`genRaw_${id}`);
+          if (r0) r0.scrollTop = r0.scrollHeight;
+          return;
+        }
+        const s = _computeState(st);
+        const fill = document.getElementById(`genFill_${id}`);
+        if (fill) {
+          fill.style.width = s.pct + "%";
+          fill.classList.toggle("is-static", s.done || s.error);
+        }
+        const pctEl = document.getElementById(`genPct_${id}`);
+        if (pctEl) pctEl.textContent = s.pct + "%";
+        const orb = document.getElementById(`genOrb_${id}`);
+        if (orb) {
+          orb.className = "gen-orb " + (s.done ? "is-done" : s.error ? "is-error" : "is-run");
+          orb.innerHTML = s.done ? ICON.check : s.error ? ICON.x : "";
+        }
+        if (s.done || s.error) {
+          const cb = document.getElementById(`cancelVidBtn_${id}`);
+          if (cb) cb.remove();
+        }
+        const now = document.getElementById(`genNow_${id}`);
+        if (now) now.innerHTML = `<span class="gen-now-ic">${s.current.icon}</span><span class="gen-now-tx">${esc(s.current.text)}</span>`;
+
+        const stepsEl = document.getElementById(`genSteps_${id}`);
+        if (stepsEl) {
+          s.order.forEach((k, ki) => {
+            const stage = s.stages[k];
+            let li = stepsEl.querySelector(`li[data-key="${k}"]`);
+            if (!li) {
+              li = document.createElement("li");
+              li.dataset.key = k;
+              li.className = "gen-step gen-enter is-" + stage.status;
+              li.innerHTML = `<span class="gen-step-ic"></span><div class="gen-step-main"><div class="gen-step-label">${s.meta[k].label}</div><ul class="gen-substeps"></ul></div>`;
+              let ref = null;
+              for (let j = ki + 1; j < s.order.length; j++) {
+                const c = stepsEl.querySelector(`li[data-key="${s.order[j]}"]`);
+                if (c) { ref = c; break; }
+              }
+              stepsEl.insertBefore(li, ref);
+            } else {
+              li.className = "gen-step is-" + stage.status;
+            }
+            const icEl = li.querySelector(".gen-step-ic");
+            if (icEl) icEl.innerHTML = _stepIcon(k, stage.status, s.meta);
+            const ul = li.querySelector(".gen-substeps");
+            // Publish substeps are recomputed each tick (live %/result) — rebuild.
+            if (st.kind === "publish") {
+              const html = stage.substeps.map(_subHTML).join("");
+              if (ul.dataset.sig !== html) { ul.dataset.sig = html; ul.innerHTML = html; }
+            } else {
+              for (let i = ul.childElementCount; i < stage.substeps.length; i++) {
+                ul.insertAdjacentHTML("beforeend", _subHTML(stage.substeps[i]));
+              }
+              Array.from(ul.children).forEach((el, i) => {
+                const ss = stage.substeps[i];
+                if (!ss) return;
+                const cls = "gen-sub " + (ss.kind === "done" ? "is-done" : ss.kind === "error" ? "is-error" : ss._live ? "is-live" : "");
+                if (el.className !== cls) {
+                  el.className = cls;
+                  const sic = el.querySelector(".gen-sub-ic");
+                  if (sic) sic.innerHTML = ss._live ? '<span class="gen-spin gen-spin-sm"></span>' : ss.icon;
+                }
+              });
+            }
+          });
+        }
+
+        const rawEl = document.getElementById(`genRaw_${id}`);
+        if (rawEl) {
+          for (let i = rawEl.childElementCount; i < st.events.length; i++) {
+            rawEl.insertAdjacentHTML("beforeend", _rawLineHTML(st.events[i]));
+          }
+          rawEl.scrollTop = rawEl.scrollHeight;
+        }
+      }
+
+      // Push a streamed event and update the UI. kind defaults to 'video'.
+      function _streamPush(id, type, message) {
+        let st = progressLogs[id];
+        if (!st || !st.kind) st = progressLogs[id] = { kind: "video", events: [] };
+        st.events.push({ type, message: message || "" });
+        if (st.kind === "carousel") {
+          const area = document.getElementById(`progressArea_${id}`);
+          if (area) area.innerHTML = _renderProgress(id);
+          const r = document.getElementById(`genRaw_${id}`);
+          if (r) r.scrollTop = r.scrollHeight;
+        } else {
+          _vpReconcile(id);
+        }
+      }
+
+      function _detectKind(events) {
+        for (const e of events) {
+          const m = e.message || "";
+          if (/carousel|slides?\b/i.test(m)) return "carousel";
+          if (/step\s*\d\/4|rendering[^\n]*video|searching youtube|writing scripts/i.test(m)) return "video";
+        }
+        return "video";
+      }
+
 
       // ─── Talking-head / monitor-frame mutual exclusion ──────────────────────────
       function onMonFrameToggle(id) {
@@ -1351,24 +2545,8 @@
         const talkingHead = !!(talkHeadEl && talkHeadEl.checked);
         const ctaEl = document.getElementById(`cta_${id}`);
         const addCta = !!(ctaEl && ctaEl.checked);
-        progressLogs[id] = [];
-        area.innerHTML = `
-    <div class="progress-panel">
-      <div class="progress-label" style="display:flex;justify-content:space-between;align-items:center">
-        <span>⚙️ Video Generation Progress</span>
-        <button class="btn btn-danger btn-sm" id="cancelVidBtn_${id}" onclick="cancelVideo(${id})">⛔ Cancel</button>
-      </div>
-      <div class="progress-log" id="plog_${id}"></div>
-    </div>`;
-        const plog = document.getElementById(`plog_${id}`);
-        const addLog = (msg, cls = "log-progress") => {
-          progressLogs[id].push({ msg, cls });
-          const logEl = document.getElementById(`plog_${id}`);
-          if (logEl) {
-            logEl.innerHTML += `<div class="${cls}">${esc(msg)}</div>`;
-            logEl.scrollTop = logEl.scrollHeight;
-          }
-        };
+        progressLogs[id] = { kind: "video", events: [] };
+        _vpReconcile(id);
 
         if (activeSSE) {
           activeSSE.close();
@@ -1390,30 +2568,29 @@
           });
           const data = await res.json();
           if (data.error) {
-            addLog(`Error: ${data.error}`, "log-error");
-            // Stale task — offer reset button
+            _streamPush(id, "error", `Error: ${data.error}`);
             if (res.status === 409) {
-              const logEl = document.getElementById(`plog_${id}`);
-              if (logEl) {
+              const root = document.getElementById(`gen_${id}`);
+              if (root) {
                 const btn = document.createElement("button");
                 btn.className = "btn btn-danger btn-sm";
-                btn.style.marginTop = "8px";
-                btn.textContent = "🔄 Сбросить и повторить";
+                btn.style.marginTop = "10px";
+                btn.innerHTML = ICON.refresh + " Сбросить и повторить";
                 btn.onclick = async () => {
                   btn.disabled = true;
                   await fetch(`/api/posts/${id}/reset-task`, {
                     method: "POST",
                   });
-                  progressLogs[id] = [];
+                  progressLogs[id] = { kind: "video", events: [] };
                   generateVideo(id, lang);
                 };
-                logEl.appendChild(btn);
+                root.appendChild(btn);
               }
             }
             return;
           }
         } catch (e) {
-          addLog(`Failed to start: ${e.message}`, "log-error");
+          _streamPush(id, "error", `Failed to start: ${e.message}`);
           return;
         }
 
@@ -1428,8 +2605,7 @@
             activeSSE = null;
           }
           if (withRefresh) {
-            toast("Video generation complete! 🎬", "success");
-            // Single refresh after a short delay so DB write is committed
+            toast("Video generation complete!", "success");
             setTimeout(() => refreshCard(id), 800);
           }
         };
@@ -1445,15 +2621,9 @@
 
           if (event.type === "heartbeat") return;
 
-          const cls =
-            event.type === "error"
-              ? "log-error"
-              : event.type === "done"
-                ? "log-done"
-                : (event.message || "").startsWith("✅")
-                  ? "log-done"
-                  : "log-progress";
-          if (event.message) addLog(event.message, cls);
+          if (event.message && event.type !== "video_ready" && event.type !== "closed") {
+            _streamPush(id, event.type, event.message);
+          }
 
           if (event.type === "done" || event.type === "video_ready") {
             taskDone = true;
@@ -1469,12 +2639,10 @@
           }
         };
         activeSSE.onerror = () => {
-          // Browser fires onerror when server closes the SSE connection normally —
-          // check taskDone flag to distinguish completion from a real error.
           if (taskDone) {
             _finishSSE(true);
           } else {
-            addLog("Connection lost", "log-error");
+            _streamPush(id, "error", "Connection lost");
             _finishSSE(false);
           }
         };
@@ -1484,19 +2652,11 @@
       async function generateCarousel(id, lang) {
         const area = document.getElementById(`progressArea_${id}`);
         if (!area) return;
-        progressLogs[id] = [];
-        area.innerHTML = `
-    <div class="progress-panel">
-      <div class="progress-label">📸 Carousel Generation Progress</div>
-      <div class="progress-log" id="plog_${id}"></div>
-    </div>`;
+        progressLogs[id] = { kind: "carousel", events: [] };
+        _streamPush(id, "progress", "Запуск генерации карусели…");
         const addLog = (msg, cls = "log-progress") => {
-          progressLogs[id].push({ msg, cls });
-          const logEl = document.getElementById(`plog_${id}`);
-          if (logEl) {
-            logEl.innerHTML += `<div class="${cls}">${esc(msg)}</div>`;
-            logEl.scrollTop = logEl.scrollHeight;
-          }
+          const type = cls === "log-error" ? "error" : cls === "log-done" ? "done" : "progress";
+          _streamPush(id, type, msg);
         };
 
         if (activeSSE) {
@@ -1514,18 +2674,18 @@
           if (data.error) {
             addLog(`Error: ${data.error}`, "log-error");
             if (res.status === 409) {
-              const logEl = document.getElementById(`plog_${id}`);
+              const logEl = document.getElementById(`gen_${id}`);
               if (logEl) {
                 const btn = document.createElement("button");
                 btn.className = "btn btn-danger btn-sm";
                 btn.style.marginTop = "8px";
-                btn.textContent = "🔄 Reset & retry";
+                btn.innerHTML = ICON.refresh + " Reset & retry";
                 btn.onclick = async () => {
                   btn.disabled = true;
                   await fetch(`/api/posts/${id}/reset-task`, {
                     method: "POST",
                   });
-                  progressLogs[id] = [];
+                  progressLogs[id] = { kind: "carousel", events: [] };
                   generateCarousel(id, lang);
                 };
                 logEl.appendChild(btn);
@@ -1548,7 +2708,7 @@
             activeSSE = null;
           }
           if (withRefresh) {
-            toast("Carousel ready! 📸", "success");
+            toast("Carousel ready!", "success");
             setTimeout(() => refreshCard(id), 800);
           }
         };
@@ -1609,7 +2769,6 @@
       async function resetYtSkip(id) {
         try {
           await fetch(`/api/posts/${id}/reset-yt-skip`, { method: "POST" });
-          // Update badge without full reload
           const badge = document.querySelector(`#card-${id} .yt-skip-badge`);
           if (badge) badge.textContent = "skip: 0";
           toast("YT skip reset to 0", "info");
@@ -1617,28 +2776,17 @@
           toast(`Reset failed: ${e.message}`, "error");
         }
       }
+
       // ─── Publish to social ─────────────────────────────────────────────────────
       async function publishTo(id, platform, btn) {
         const orig = btn.innerHTML;
         btn.disabled = true;
         btn.innerHTML = '<span class="spin"></span>';
 
-        // Show progress panel in the card
-        const area = document.getElementById(`progressArea_${id}`);
-        if (area) {
-          area.innerHTML = `
-      <div class="progress-panel">
-        <div class="progress-label">📤 Publishing to ${platform}</div>
-        <div class="progress-log" id="publog_${id}"></div>
-      </div>`;
-        }
-        const addLog = (msg, cls = "log-progress") => {
-          const el = document.getElementById(`publog_${id}`);
-          if (el) {
-            el.innerHTML += `<div class="${cls}">${esc(msg)}</div>`;
-            el.scrollTop = el.scrollHeight;
-          }
-        };
+        progressLogs[id] = { kind: "publish", platform, events: [] };
+        _vpReconcile(id);
+
+        const restore = () => { btn.disabled = false; btn.innerHTML = orig; };
 
         try {
           const res = await fetch(`/api/posts/${id}/publish/${platform}`, {
@@ -1647,14 +2795,28 @@
           const data = await res.json();
           if (data.error) throw new Error(data.error);
         } catch (e) {
-          addLog(`Failed to start: ${e.message}`, "log-error");
-          btn.disabled = false;
-          btn.innerHTML = orig;
+          _streamPush(id, "error", `Failed to start: ${e.message}`);
+          restore();
           return;
         }
 
-        // Connect to SSE stream
+        _bindPubStream(id, restore);
+      }
+
+      // Open (or re-open) the publish SSE stream for a post and feed the engine.
+      function _bindPubStream(id, onEnd) {
         const sse = new EventSource(`/api/posts/${id}/publish-stream`);
+        let ended = false;
+        const finish = (ok) => {
+          if (ended) return;
+          ended = true;
+          sse.close();
+          if (onEnd) onEnd();
+          if (ok) {
+            toast("Published!", "success");
+            setTimeout(() => loadPosts(), 1500);
+          }
+        };
         sse.onmessage = (ev) => {
           let event;
           try {
@@ -1663,35 +2825,14 @@
             return;
           }
           if (event.type === "heartbeat") return;
-          const cls =
-            event.type === "error"
-              ? "log-error"
-              : event.type === "done"
-                ? "log-done"
-                : (event.message || "").startsWith("✅")
-                  ? "log-done"
-                  : "log-progress";
-          if (event.message) addLog(event.message, cls);
-          if (event.type === "done" || event.type === "closed") {
-            sse.close();
-            btn.disabled = false;
-            btn.innerHTML = orig;
-            if (event.type === "done") {
-              toast(`Published! ✅`, "success");
-              setTimeout(() => loadPosts(), 1500);
-            }
+          if (event.message && event.type !== "closed") {
+            _streamPush(id, event.type, event.message);
           }
-          if (event.type === "error") {
-            sse.close();
-            btn.disabled = false;
-            btn.innerHTML = orig;
-          }
+          if (event.type === "done") finish(true);
+          else if (event.type === "closed") finish(false);
         };
-        sse.onerror = () => {
-          sse.close();
-          btn.disabled = false;
-          btn.innerHTML = orig;
-        };
+        sse.onerror = () => finish(false);
+        return sse;
       }
 
       // ─── Toast ─────────────────────────────────────────────────────────────────
@@ -1699,9 +2840,16 @@
         const wrap = document.getElementById("toastWrap");
         const el = document.createElement("div");
         el.className = `toast toast-${type}`;
-        el.textContent = msg;
+        const span = document.createElement("span");
+        span.textContent = msg;
+        el.appendChild(span);
         wrap.appendChild(el);
-        setTimeout(() => el.remove(), duration);
+        setTimeout(() => {
+          el.style.transition = "opacity 0.3s, transform 0.3s";
+          el.style.opacity = "0";
+          el.style.transform = "translateX(20px)";
+          setTimeout(() => el.remove(), 300);
+        }, duration);
       }
 
       // ─── Utilities ─────────────────────────────────────────────────────────────
@@ -1724,13 +2872,17 @@
           });
           const data = await res.json();
           if (data.error) throw new Error(data.error);
-          document.getElementById(`card-${id}`)?.remove();
+          const card = document.getElementById(`card-${id}`);
+          if (card) {
+            card.style.transition = "opacity 0.3s, transform 0.3s";
+            card.style.opacity = "0";
+            card.style.transform = "scale(0.97)";
+            setTimeout(() => card.remove(), 300);
+          }
         } catch (e) {
           toast(`Error: ${e.message}`, "error");
           btn.disabled = false;
-          btn.style.color = "#e53935";
-          btn.style.borderColor = "#e53935";
-          btn.textContent = "✔ Done — remove from feed";
+          btn.innerHTML = ICON.check + " Done — remove";
         }
       }
 
@@ -1744,14 +2896,12 @@
           });
           const data = await res.json();
           if (data.error) throw new Error(data.error);
-          toast(`Post #${id} sent to @readitgames ✅`, "success");
-          btn.textContent = "✅ Sent to @readitgames";
+          toast(`Post #${id} sent to @readitgames`, "success");
+          btn.innerHTML = ICON.check + " Sent to @readitgames";
         } catch (e) {
           toast(`Error: ${e.message}`, "error");
           btn.disabled = false;
-          btn.style.color = "#e53935";
-          btn.style.borderColor = "#e53935";
-          btn.textContent = "🔁 Republish RU → @readitgames";
+          btn.innerHTML = ICON.repeat + " RU → @readitgames";
         }
       }
 
@@ -1765,14 +2915,12 @@
           });
           const data = await res.json();
           if (data.error) throw new Error(data.error);
-          toast(`Post #${id} sent to @playitgamesnews ✅`, "success");
-          btn.textContent = "✅ Sent to @playitgamesnews";
+          toast(`Post #${id} sent to @playitgamesnews`, "success");
+          btn.innerHTML = ICON.check + " Sent to @playitgamesnews";
         } catch (e) {
           toast(`Error: ${e.message}`, "error");
           btn.disabled = false;
-          btn.style.color = "#e53935";
-          btn.style.borderColor = "#e53935";
-          btn.textContent = "🔁 Republish EN → @playitgamesnews";
+          btn.innerHTML = ICON.repeat + " EN → @playitgamesnews";
         }
       }
 
@@ -1791,7 +2939,7 @@
           });
           const data = await res.json();
           if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
-          toast(`${label} removed from post #${postId} ✅`, "success");
+          toast(`${label} removed from post #${postId}`, "success");
           await loadPosts();
         } catch (e) {
           toast(`Error: ${e.message}`, "error");
@@ -1802,7 +2950,7 @@
 
       async function redownloadMedia(id, btn) {
         if (!confirm("Re-scrape the article and re-download all its images and videos?\nExisting cached files for this post will be deleted and the short video will be cleared so it gets rebuilt.")) return;
-        const original = btn.textContent;
+        const original = btn.innerHTML;
         btn.disabled = true;
         btn.textContent = "Downloading…";
         try {
@@ -1811,15 +2959,13 @@
           });
           const data = await res.json();
           if (data.error) throw new Error(data.error);
-          toast(`Post #${id}: ${data.images} image(s), ${data.videos} video(s) re-downloaded ✅`, "success");
-          btn.textContent = `✅ ${data.images} img / ${data.videos} vid`;
+          toast(`Post #${id}: ${data.images} image(s), ${data.videos} video(s) re-downloaded`, "success");
+          btn.innerHTML = ICON.check + ` ${data.images} img / ${data.videos} vid`;
           setTimeout(() => loadPosts(), 800);
         } catch (e) {
           toast(`Error: ${e.message}`, "error");
           btn.disabled = false;
-          btn.style.color = "#e53935";
-          btn.style.borderColor = "#e53935";
-          btn.textContent = original;
+          btn.innerHTML = original;
         }
       }
 
@@ -1889,19 +3035,9 @@
 
       /** Allow safe Telegram HTML tags; escape everything else. */
       const ALLOWED_TG = new Set([
-        "b",
-        "strong",
-        "i",
-        "em",
-        "u",
-        "s",
-        "strike",
-        "del",
-        "code",
-        "pre",
+        "b", "strong", "i", "em", "u", "s", "strike", "del", "code", "pre",
       ]);
       function sanitizeTg(html) {
-        // Replace allowed opening/closing tags with temporary placeholders
         const saved = [];
         let s = html;
         s = s.replace(
@@ -1912,14 +3048,12 @@
               saved.push(match);
               return `\x00${idx}\x00`;
             }
-            return ""; // strip unknown tags
+            return "";
           },
         );
-        // Escape remaining text (including bare < >)
         const d = document.createElement("div");
         d.textContent = s;
         s = d.innerHTML;
-        // Restore allowed tags
         s = s.replace(/\x00(\d+)\x00/g, (_, i) => saved[+i]);
         return s;
       }
@@ -1934,27 +3068,31 @@
           try {
             const res = await fetch(`/api/posts/${p.id}/task-status`);
             const data = await res.json();
-            if (!data.running && !data.logs.length) continue;
-            // Restore saved log entries
-            progressLogs[p.id] = data.logs.map((e) => ({
-              msg: e.message,
-              cls:
-                e.type === "error"
-                  ? "log-error"
-                  : e.type === "done"
-                    ? "log-done"
-                    : "log-progress",
-            }));
-            // Re-render the card to show the progress panel
-            delete _cardHashes[p.id];
-            const cardEl = document.getElementById(`card-${p.id}`);
-            if (cardEl) {
-              _cardHashes[p.id] = _cardFingerprint(p);
-              cardEl.outerHTML = renderCard(p);
+            if (data.running || data.logs.length) {
+              const events = data.logs.map((e) => ({ type: e.type, message: e.message }));
+              progressLogs[p.id] = { kind: _detectKind(events), events };
+              delete _cardHashes[p.id];
+              const cardEl = document.getElementById(`card-${p.id}`);
+              if (cardEl) {
+                _cardHashes[p.id] = _cardFingerprint(p);
+                cardEl.outerHTML = renderCard(p);
+              }
+              if (data.running) _reconnectSSE(p.id);
+              continue;
             }
-            // If still running, reconnect SSE
-            if (data.running) {
-              _reconnectSSE(p.id);
+            // No video/carousel task — check for an active publish task.
+            const pres = await fetch(`/api/posts/${p.id}/publish-status`);
+            const pdata = await pres.json();
+            if (pdata.running || pdata.logs.length) {
+              const events = pdata.logs.map((e) => ({ type: e.type, message: e.message }));
+              progressLogs[p.id] = { kind: "publish", platform: _detectPubPlatform(events), events };
+              delete _cardHashes[p.id];
+              const cardEl = document.getElementById(`card-${p.id}`);
+              if (cardEl) {
+                _cardHashes[p.id] = _cardFingerprint(p);
+                cardEl.outerHTML = renderCard(p);
+              }
+              if (pdata.running) _bindPubStream(p.id, null);
             }
           } catch (e) {
             /* ignore */
@@ -1968,15 +3106,6 @@
           activeSSE = null;
         }
         let taskDone = false;
-        const addLog = (msg, cls = "log-progress") => {
-          if (!progressLogs[id]) progressLogs[id] = [];
-          progressLogs[id].push({ msg, cls });
-          const logEl = document.getElementById(`plog_${id}`);
-          if (logEl) {
-            logEl.innerHTML += `<div class="${cls}">${esc(msg)}</div>`;
-            logEl.scrollTop = logEl.scrollHeight;
-          }
-        };
         activeSSE = new EventSource(`/api/posts/${id}/video-stream`);
         activeSSE.onmessage = (ev) => {
           let event;
@@ -1986,15 +3115,9 @@
             return;
           }
           if (event.type === "heartbeat") return;
-          const cls =
-            event.type === "error"
-              ? "log-error"
-              : event.type === "done"
-                ? "log-done"
-                : (event.message || "").startsWith("✅")
-                  ? "log-done"
-                  : "log-progress";
-          if (event.message) addLog(event.message, cls);
+          if (event.message && event.type !== "video_ready" && event.type !== "closed") {
+            _streamPush(id, event.type, event.message);
+          }
           if (event.type === "done" || event.type === "video_ready")
             taskDone = true;
           if (
@@ -2004,7 +3127,7 @@
           ) {
             activeSSE.close();
             activeSSE = null;
-            toast("Video generation complete! 🎬", "success");
+            toast("Video generation complete!", "success");
             const refresh = (n) => {
               refreshCard(id);
               if (n < 3) setTimeout(() => refresh(n + 1), 2000);
@@ -2016,14 +3139,14 @@
           if (taskDone) {
             activeSSE.close();
             activeSSE = null;
-            toast("Video generation complete! 🎬", "success");
+            toast("Video generation complete!", "success");
             const refresh = (n) => {
               refreshCard(id);
               if (n < 3) setTimeout(() => refresh(n + 1), 2000);
             };
             setTimeout(() => refresh(0), 800);
           } else {
-            addLog("Connection lost", "log-error");
+            _streamPush(id, "error", "Connection lost");
             activeSSE.close();
             activeSSE = null;
           }

@@ -277,6 +277,56 @@ def _push(post_id: int, message: str, type_: str = "progress") -> None:
         q.put(event)
 
 
+class _SSEDetailLogHandler(logging.Handler):
+    """Forward fine-grained log records from worker modules to the SSE stream.
+
+    A video-generation task runs in a thread named ``vidgen-<post_id>`` and a
+    social-publish task in ``publish-<post_id>``. While such a thread is active,
+    every INFO record emitted by the heavy worker modules (video assembly,
+    MuseTalk lip-sync, whisper timing, Instagram/YouTube/CDN upload) is mirrored
+    to the matching progress queue as a ``detail`` event so the dashboard can
+    show every sub-step in real time.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        tname = threading.current_thread().name
+        try:
+            message = record.getMessage()
+        except Exception:
+            return
+        if tname.startswith("vidgen-"):
+            try:
+                post_id = int(tname.split("-", 1)[1])
+            except (ValueError, IndexError):
+                return
+            with _tasks_lock:
+                if post_id not in _task_queues:
+                    return
+            _push(post_id, message, "detail")
+        elif tname.startswith("publish-"):
+            try:
+                post_id = int(tname.split("-", 1)[1])
+            except (ValueError, IndexError):
+                return
+            with _tasks_lock:
+                if post_id not in _pub_queues:
+                    return
+            _push_pub(post_id, message, "detail")
+
+
+# Attach the detail bridge to the worker module loggers (they still propagate to
+# the root handlers for stdout / file logging).
+_detail_handler = _SSEDetailLogHandler()
+_detail_handler.setLevel(logging.INFO)
+for _logger_name in (
+    "video_generator", "musetalk_avatar", "faster_whisper",
+    "instagram_publisher", "instagram_carousel_publisher",
+    "youtube_publisher", "github_uploader", "thumbnail_generator",
+    "carousel_builder",
+):
+    logging.getLogger(_logger_name).addHandler(_detail_handler)
+
+
 # ---------------------------------------------------------------------------
 # Routes: pages
 # ---------------------------------------------------------------------------
@@ -591,6 +641,17 @@ def _maybe_cleanup_post_files(post_id: int) -> None:
     if not _REQUIRED_VIDEO_PLATFORMS.issubset(_published_platforms(post)):
         return
 
+    _delete_post_files(post_id, post, reason="fully published")
+
+
+def _delete_post_files(post_id: int, post: dict, reason: str = "") -> None:
+    """Remove every working file tied to a post (images, videos, carousels).
+
+    Removes article images, downloaded/article videos, the generated videos
+    (plus their thumbnails) and the carousel slides. Idempotent — it skips
+    files that are already gone and only touches files inside the project
+    directory.
+    """
     base = os.path.abspath(os.path.dirname(__file__))
 
     def _safe_remove(path: str) -> None:
@@ -639,7 +700,7 @@ def _maybe_cleanup_post_files(post_id: int) -> None:
             _safe_remove(p)
     _safe_rmtree(os.path.join("images", "carousels", f"post_{post_id}"))
 
-    logger.info("Cleanup #%d: post fully published — working files removed", post_id)
+    logger.info("Cleanup #%d: %s — working files removed", post_id, reason or "files removed")
 
 
 
@@ -651,6 +712,7 @@ def api_cancel(post_id: int):
     if post["status"] not in ("pending", "approved"):
         return jsonify({"error": f"Cannot cancel post with status '{post['status']}'"}), 400
     db.update_post_status(post_id, "cancelled")
+    _delete_post_files(post_id, post, reason="cancelled")
     return jsonify({"success": True, "status": "cancelled"})
 
 
@@ -1344,6 +1406,19 @@ def api_publish_stream(post_id: int):
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.route("/api/posts/<int:post_id>/publish-status")
+def api_publish_status(post_id: int):
+    """Return saved publish-log entries and whether a publish task is running."""
+    with _tasks_lock:
+        running = post_id in _pub_queues
+        active_threads = {t.name for t in threading.enumerate()}
+        if running and f"publish-{post_id}" not in active_threads:
+            running = False
+            _pub_queues.pop(post_id, None)
+        logs = list(_pub_logs.get(post_id, []))
+    return jsonify({"running": running, "logs": logs})
 
 
 async def _do_publish_social(post_id: int, platform: str, post: dict, progress_cb=None) -> str:
