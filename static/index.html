@@ -655,6 +655,12 @@
       .btn-yt:hover:not(:disabled) {
         transform: translateY(-1px);
       }
+      .btn-vk {
+        background: linear-gradient(135deg, #4a76a8, #2a5885);
+      }
+      .btn-vk:hover:not(:disabled) {
+        transform: translateY(-1px);
+      }
       .btn-sm {
         padding: 7px 13px;
         font-size: 12px;
@@ -1489,6 +1495,8 @@
           '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="20" x="2" y="2" rx="5" ry="5"/><path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"/><line x1="17.5" x2="17.51" y1="6.5" y2="6.5"/></svg>',
         youtube:
           '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 17a24.12 24.12 0 0 1 0-10 2 2 0 0 1 1.4-1.4 49.56 49.56 0 0 1 16.2 0A2 2 0 0 1 21.5 7a24.12 24.12 0 0 1 0 10 2 2 0 0 1-1.4 1.4 49.55 49.55 0 0 1-16.2 0A2 2 0 0 1 2.5 17"/><path d="m10 15 5-3-5-3z"/></svg>',
+        vk:
+          '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12.79 16.5c-5.06 0-7.95-3.47-8.07-9.25h2.54c.08 4.24 1.95 6.04 3.43 6.41V7.25h2.39v3.66c1.46-.16 3-1.82 3.5-3.66h2.39a6.99 6.99 0 0 1-3.21 4.59c1.61.83 2.93 2.31 3.6 4.66h-2.63c-.52-1.63-1.93-2.89-3.65-3.08v3.08h-.69z"/></svg>',
         play:
           '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="6 3 20 12 6 21 6 3"/></svg>',
         globe:
@@ -1806,6 +1814,7 @@
             if (hasRuVid) {
               pubBtns += `<button class="btn btn-ig${pub.has("instagram-ru") ? " btn-published" : ""}" onclick="publishTo(${p.id},'instagram-ru',this)">${ICON.instagram} Instagram RU${done("instagram-ru")}</button>`;
               pubBtns += `<button class="btn btn-yt${pub.has("youtube-ru") ? " btn-published" : ""}" onclick="publishTo(${p.id},'youtube-ru',this)">${ICON.youtube} YouTube RU${done("youtube-ru")}</button>`;
+              pubBtns += `<button class="btn btn-vk${pub.has("vk") ? " btn-published" : ""}" onclick="publishTo(${p.id},'vk',this)">${ICON.vk} VK${done("vk")}</button>`;
             }
             if (hasEnVid && hasRuVid)
               pubBtns += `<button class="btn btn-tinted" onclick="publishTo(${p.id},'all-combined',this)">${ICON.globe} Publish All</button>`;
@@ -2109,6 +2118,7 @@
         yt_en:  { label: "YouTube EN",   icon: ICON.youtube },
         ig_ru:  { label: "Instagram RU", icon: ICON.instagram },
         yt_ru:  { label: "YouTube RU",   icon: ICON.youtube },
+        vk:     { label: "VK",           icon: ICON.vk },
         car_en: { label: "Карусель EN",  icon: ICON.camera },
         car_ru: { label: "Карусель RU",  icon: ICON.camera },
         finish: { label: "Готово",       icon: ICON.check },
@@ -2124,13 +2134,14 @@
 
       function _pubTargetsFor(platform) {
         switch (platform) {
-          case "all-combined": return ["ig_en", "yt_en", "ig_ru", "yt_ru"];
+          case "all-combined": return ["ig_en", "yt_en", "ig_ru", "yt_ru", "vk"];
           case "all":          return ["ig_en", "yt_en"];
-          case "all-ru":       return ["ig_ru", "yt_ru"];
+          case "all-ru":       return ["ig_ru", "yt_ru", "vk"];
           case "instagram":            return ["ig_en"];
           case "instagram-ru":         return ["ig_ru"];
           case "youtube":              return ["yt_en"];
           case "youtube-ru":           return ["yt_ru"];
+          case "vk":                   return ["vk"];
           case "instagram-carousel":   return ["car_en"];
           case "instagram-carousel-ru":return ["car_ru"];
           default: return [];
@@ -2156,6 +2167,11 @@
         [/starting youtube[^\n]*upload/i, ICON.youtube, "Старт загрузки на YouTube…"],
         [/uploading reel to instagram/i, ICON.instagram, "Загрузка Reels…"],
         [/uploading short to youtube/i, ICON.youtube, "Загрузка Shorts…"],
+        [/starting vk[^\n]*upload/i, ICON.vk, "Старт загрузки во ВК…"],
+        [/uploading video to vk/i, ICON.vk, "Загрузка видео во ВК…"],
+        [/vk video\.save/i, ICON.vk, "VK: запрос адреса загрузки…"],
+        [/vk:\s*загружаю видеофайл/i, ICON.vk, "VK: загрузка файла…"],
+        [/vk:\s*видео загружено/i, ICON.check, "VK: видео загружено"],
         [/uploading\s+\d+-slide carousel/i, ICON.camera, "Загрузка карусели…"],
         [/building (en|ru) carousel/i, ICON.camera, "Сборка карусели…"],
         [/slides ready/i, ICON.check, "Слайды готовы"],
@@ -2165,15 +2181,17 @@
       // Maps a single publish message to the target it belongs to (en/ru, ig/yt/carousel).
       function _pubMsgTarget(m) {
         const s = (m || "").toLowerCase();
-        const mm = s.match(/starting (instagram|youtube)\s+(en|ru)?\s*upload/);
+        const mm = s.match(/starting (instagram|youtube|vk)\s+(en|ru)?\s*upload/);
         if (mm) {
           const ru = mm[2] === "ru";
+          if (mm[1] === "vk") return "vk";
           return mm[1] === "instagram" ? (ru ? "ig_ru" : "ig_en") : (ru ? "yt_ru" : "yt_en");
         }
         const ru = /\bru\b/.test(s);
         if (/uploading\s+\d+-slide carousel to instagram/.test(s)) return ru ? "car_ru" : "car_en";
         if (/uploading reel to instagram/.test(s)) return ru ? "ig_ru" : "ig_en";
         if (/uploading short to youtube/.test(s)) return ru ? "yt_ru" : "yt_en";
+        if (/uploading video to vk/.test(s)) return "vk";
         return null;
       }
 
@@ -2191,6 +2209,7 @@
         const s = (m || "").toLowerCase();
         if (/carousel|slides ready|building (en|ru) carousel/.test(s)) return "car";
         if (/youtube|short to youtube/.test(s)) return "yt";
+        if (/\bvk\b|video to vk|vk video\.save/.test(s)) return "vk";
         if (/instagram|reel|container|github|cdn|public (video|cover) url|uploaded\s+\S+\s*→/.test(s)) return "ig";
         return null;
       }
@@ -2201,6 +2220,7 @@
         const map = {
           "Instagram EN": "ig_en", "YouTube EN": "yt_en",
           "Instagram RU": "ig_ru", "YouTube RU": "yt_ru",
+          "VK": "vk",
           "IG Carousel EN": "car_en", "IG Carousel RU": "car_ru",
         };
         const out = {};
@@ -2228,8 +2248,9 @@
             if (/youtube en upload|uploading short to youtube(?! ru)/i.test(m)) seen.add("yt_en");
             if (/instagram ru upload|to instagram ru|carousel to instagram ru/i.test(m)) seen.add("ig_ru");
             if (/youtube ru upload|to youtube ru/i.test(m)) seen.add("yt_ru");
+            if (/vk ru upload|video to vk|vk video\.save/i.test(m)) seen.add("vk");
           });
-          targets = ["ig_en", "yt_en", "ig_ru", "yt_ru"].filter((t) => seen.has(t));
+          targets = ["ig_en", "yt_en", "ig_ru", "yt_ru", "vk"].filter((t) => seen.has(t));
         }
         const order = ["prep", ...targets, "finish"];
         const stages = {};
@@ -2239,13 +2260,14 @@
         const igOrder = targets.filter((t) => t === "ig_en" || t === "ig_ru");
         const ytOrder = targets.filter((t) => t === "yt_en" || t === "yt_ru");
         const carOrder = targets.filter((t) => t === "car_en" || t === "car_ru");
+        const vkOrder = targets.filter((t) => t === "vk");
 
         let finished = false, overallErr = false, uploadsStarted = false, started = false;
         let latestYt = null, resultLine = null;
-        let igDone = 0, ytDone = 0, carDone = 0;
+        let igDone = 0, ytDone = 0, carDone = 0, vkDone = 0;
         const startedSet = new Set();
         // latest live activity text per channel (from detail logs)
-        const chanNow = { ig: null, yt: null, car: null };
+        const chanNow = { ig: null, yt: null, car: null, vk: null };
         let current = { icon: ICON.upload, text: "Запуск публикации…" };
 
         for (const e of events) {
@@ -2253,12 +2275,13 @@
           const m = (e.message || "").split("\n")[0];
           if (e.type === "done") { finished = true; resultLine = m.replace(/^[✅\s]*Done:\s*/i, ""); continue; }
           if (e.type === "error") { overallErr = true; current = { icon: ICON.x, text: m.replace(/^[❌⛔]\s*/, "") }; continue; }
-          if (/starting (instagram|youtube)[^\n]*upload|uploading reel to instagram|uploading short to youtube|uploading\s+\d+-slide carousel/i.test(m)) uploadsStarted = true;
+          if (/starting (instagram|youtube)[^\n]*upload|uploading reel to instagram|uploading short to youtube|uploading\s+\d+-slide carousel|starting vk[^\n]*upload|uploading video to vk/i.test(m)) uploadsStarted = true;
           const tgt = _pubMsgTarget(m);
           if (tgt && targets.includes(tgt)) startedSet.add(tgt);
           if (/published instagram reel/i.test(m)) igDone++;
           if (/youtube upload complete/i.test(m)) ytDone++;
           if (/carousel published|published \d+-slide carousel|carousel media_id/i.test(m)) carDone++;
+          if (/vk:\s*видео загружено/i.test(m)) vkDone++;
           const ytp = m.match(/youtube upload:\s*(\d+)%/i);
           if (ytp) latestYt = +ytp[1];
           const pn = _pubNow(m);
@@ -2274,6 +2297,7 @@
         igOrder.forEach((t, i) => (tDone[t] = i < igDone));
         ytOrder.forEach((t, i) => (tDone[t] = i < ytDone));
         carOrder.forEach((t, i) => (tDone[t] = i < carDone));
+        vkOrder.forEach((t, i) => (tDone[t] = i < vkDone));
 
         const resMap = _parsePubResult(resultLine);
         stages.prep.status = finished ? "done" : (uploadsStarted ? "done" : (overallErr && !uploadsStarted ? "error" : (started ? "active" : "pending")));
@@ -2300,7 +2324,7 @@
             stages[t].substeps.push({ icon: ICON.check, text: "Готово", kind: "done" });
           } else if (startedSet.has(t) || uploadsStarted) {
             stages[t].status = "active";
-            const ch = t.startsWith("ig_") ? "ig" : t.startsWith("yt_") ? "yt" : "car";
+            const ch = t.startsWith("ig_") ? "ig" : t.startsWith("yt_") ? "yt" : t.startsWith("vk_") ? "vk" : "car";
             let live = chanNow[ch] || "Загрузка…";
             if ((t === "yt_en" || t === "yt_ru") && latestYt != null && !firstLiveYt) {
               live = "Загрузка… " + latestYt + "%";

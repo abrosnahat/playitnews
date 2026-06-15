@@ -82,6 +82,16 @@ YOUTUBE_TOKEN_FILE_RU: str = os.getenv("YOUTUBE_TOKEN_FILE_RU", os.path.join(BAS
 # TikTok browser session (persistent Chromium profile, created by get_tiktok_session.py)
 TIKTOK_SESSION_DIR: str = os.getenv("TIKTOK_SESSION_DIR", os.path.join(BASE_DIR, "tiktok_session"))
 
+# VK API — загрузка коротких видео (VK Клипы)
+# Требуется access token со scope `video` (выдаётся по запросу в devsupport@corp.vk.com).
+# VK_GROUP_ID — числовой ID сообщества без минуса; если пусто, видео грузится в профиль владельца токена.
+VK_ACCESS_TOKEN: str = os.getenv("VK_ACCESS_TOKEN", "")
+VK_GROUP_ID: str = os.getenv("VK_GROUP_ID", "")
+# Версия VK API
+VK_API_VERSION: str = os.getenv("VK_API_VERSION", "5.199")
+# Публиковать ли запись с клипом на стене сообщества после загрузки (1 — да, 0 — нет).
+VK_WALLPOST: bool = os.getenv("VK_WALLPOST", "1") == "1"
+
 # Source
 NEWS_URL = "https://www.playground.ru/news"
 

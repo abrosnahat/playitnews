@@ -28,6 +28,7 @@ import instagram_publisher
 import instagram_carousel_publisher
 import carousel_builder
 import youtube_publisher
+import vk_publisher
 from config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHANNEL_ID,
@@ -322,10 +323,9 @@ for _logger_name in (
     "video_generator", "musetalk_avatar", "faster_whisper",
     "instagram_publisher", "instagram_carousel_publisher",
     "youtube_publisher", "github_uploader", "thumbnail_generator",
-    "carousel_builder",
+    "carousel_builder", "vk_publisher",
 ):
     logging.getLogger(_logger_name).addHandler(_detail_handler)
-
 
 # ---------------------------------------------------------------------------
 # Routes: pages
@@ -725,6 +725,7 @@ def api_mark_done(post_id: int):
     all_platforms = json.dumps([
         "instagram", "instagram-ru", "youtube", "youtube-ru",
         "instagram-carousel", "instagram-carousel-ru",
+        "vk",
     ])
     with db.get_conn() as conn:
         conn.execute(
@@ -1305,6 +1306,7 @@ def api_publish(post_id: int, platform: str):
     valid = {
         "instagram", "instagram-ru", "youtube", "youtube-ru",
         "instagram-carousel", "instagram-carousel-ru",
+        "vk",
         "all", "all-ru", "all-combined",
     }
     if platform not in valid:
@@ -1332,6 +1334,7 @@ def api_publish(post_id: int, platform: str):
                 "youtube": "youtube", "youtube-ru": "youtube-ru",
                 "instagram-carousel": "instagram-carousel",
                 "instagram-carousel-ru": "instagram-carousel-ru",
+                "vk": "vk",
             }
             if platform in _PLATFORM_KEYS:
                 succeeded = [platform]
@@ -1343,6 +1346,7 @@ def api_publish(post_id: int, platform: str):
                     "YouTube EN":   "youtube",   "YouTube RU":   "youtube-ru",
                     "IG Carousel EN": "instagram-carousel",
                     "IG Carousel RU": "instagram-carousel-ru",
+                    "VK": "vk",
                 }
                 for part in result.split(" | "):
                     if part.startswith("✅"):
@@ -1549,6 +1553,19 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         )
         return f"YouTube RU — https://youtu.be/{video_id}"
 
+    elif platform == "vk":
+        if not ru_path or not os.path.exists(ru_path):
+            raise ValueError("RU video not found — generate video first.")
+        vk_title = (post.get("article_title") or f"Gaming news #{post_id}")[:128]
+        progress("Uploading video to VK…")
+        vk_desc = _clean_text(
+            post.get("ru_post_text") or post.get("post_text", "")
+        ).rstrip() + "\n\nБольше новостей в telegram-канале, ссылка в био"
+        vk_url = await vk_publisher.upload_video(
+            video_path=ru_path, title=vk_title, description=vk_desc,
+        )
+        return f"VK — {vk_url}"
+
     elif platform in ("all", "all-ru", "all-combined"):
         tasks: dict[str, asyncio.Task] = {}
         results: list[str] = []
@@ -1597,6 +1614,13 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
                     youtube_publisher.upload_short_ru(
                         video_path=ru_path, title=ru_title,
                         description=_caption_ru(), tags=_tags("ru_post_text"),
+                    )
+                )
+            if vk_publisher.is_configured():
+                progress("Starting VK upload…")
+                tasks["VK"] = asyncio.create_task(
+                    vk_publisher.upload_video(
+                        video_path=ru_path, title=ru_title, description=_caption_ru(),
                     )
                 )
 
