@@ -20,9 +20,11 @@ audio (TTS + music) itself.
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
 import logging
 import os
+import random
 import subprocess
 import threading
 
@@ -32,13 +34,12 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 MUSETALK_REPO = os.environ.get("MUSETALK_REPO", os.path.join(_HERE, "musetalk_repo"))
 _VENV_PY = os.path.join(MUSETALK_REPO, ".venv-musetalk", "Scripts", "python.exe")
 
-# Source talking-person loop video the avatar is built from. Provide a real
-# face video via MUSETALK_AVATAR_VIDEO; otherwise fall back to the bundled
-# MuseTalk sample so the feature still works out of the box for testing.
-_DEFAULT_AVATAR = os.environ.get(
-    "MUSETALK_AVATAR_VIDEO",
-    os.path.join(_HERE, "assets", "avatar.mp4"),
-)
+# Source talking-person loop video the avatar is built from. Set
+# MUSETALK_AVATAR_VIDEO to force one specific file; otherwise a random
+# assets/avatar*.mp4 is picked per render so generations vary the presenter.
+# The bundled MuseTalk sample is the last-resort fallback.
+_FORCED_AVATAR = os.environ.get("MUSETALK_AVATAR_VIDEO", "").strip()
+_AVATAR_DIR = os.path.join(_HERE, "assets")
 _SAMPLE_AVATAR = os.path.join(MUSETALK_REPO, "data", "video", "yongen.mp4")
 
 MUSETALK_FPS = int(os.environ.get("MUSETALK_FPS", "25"))
@@ -53,21 +54,45 @@ MUSETALK_PARSING_MODE = os.environ.get("MUSETALK_PARSING_MODE", "jaw")
 MUSETALK_TIMEOUT = int(os.environ.get("MUSETALK_TIMEOUT", "1800"))
 
 
+def _list_avatar_videos() -> list[str]:
+    """All assets/avatar*.mp4 source videos, sorted for stable order."""
+    return sorted(glob.glob(os.path.join(_AVATAR_DIR, "avatar*.mp4")))
+
+
 def _resolve_avatar_video() -> str | None:
-    if os.path.isfile(_DEFAULT_AVATAR):
-        return _DEFAULT_AVATAR
+    # 1. Explicit override wins.
+    if _FORCED_AVATAR:
+        if os.path.isfile(_FORCED_AVATAR):
+            return _FORCED_AVATAR
+        logger.warning(
+            "MUSETALK_AVATAR_VIDEO set but not found (%s) — falling back",
+            _FORCED_AVATAR,
+        )
+    # 2. Random pick among assets/avatar*.mp4.
+    candidates = _list_avatar_videos()
+    if candidates:
+        chosen = random.choice(candidates)
+        logger.info(
+            "Avatar source: %s (random of %d)", os.path.basename(chosen), len(candidates)
+        )
+        return chosen
+    # 3. Bundled sample as last resort.
     if os.path.isfile(_SAMPLE_AVATAR):
         logger.warning(
-            "MUSETALK_AVATAR_VIDEO not found (%s) — using bundled sample avatar %s",
-            _DEFAULT_AVATAR, _SAMPLE_AVATAR,
+            "No assets/avatar*.mp4 found — using bundled sample avatar %s",
+            _SAMPLE_AVATAR,
         )
         return _SAMPLE_AVATAR
     return None
 
 
 def is_available() -> bool:
-    """True if the isolated env and an avatar source video are present."""
-    return os.path.isfile(_VENV_PY) and _resolve_avatar_video() is not None
+    """True if the isolated env and at least one avatar source video exist."""
+    if not os.path.isfile(_VENV_PY):
+        return False
+    if _FORCED_AVATAR and os.path.isfile(_FORCED_AVATAR):
+        return True
+    return bool(_list_avatar_videos()) or os.path.isfile(_SAMPLE_AVATAR)
 
 
 def _drain(stream, sink: list[str]) -> None:

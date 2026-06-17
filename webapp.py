@@ -1453,6 +1453,11 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
 
     async def _make_thumb(path: str, lang: str = "en", title: Optional[str] = None) -> Optional[str]:
         try:
+            base = os.path.splitext(path)[0]
+            out_path = f"{base}_thumb_{lang}.jpg"
+            # Переиспользуем уже сгенерированное превью (не гоняем ИИ/рендер повторно).
+            if title is None and os.path.exists(out_path):
+                return out_path
             image_paths: list[str] = [p for p in post.get("image_paths", []) if os.path.exists(p)]
             if not image_paths:
                 return None
@@ -1467,8 +1472,6 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
             if lang == "en" and (not hook or re.search(r'[а-яёА-ЯЁ]', hook)):
                 logger.warning("_make_thumb EN: hook is empty or contains Cyrillic ('%s') — skipping thumbnail", hook[:60])
                 return None
-            base = os.path.splitext(path)[0]
-            out_path = f"{base}_thumb_{lang}.jpg"
             ok = thumbnail_generator.generate_instagram_thumbnail(source, hook, out_path)
             return out_path if ok else None
         except Exception:
@@ -1533,10 +1536,13 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
             post.get("article_title", "") or f"Gaming news #{post_id}"
         )
         yt_title = (_raw_yt_title if _raw_yt_title and not re.search(r'[а-яёА-ЯЁ]', _raw_yt_title) else "Gaming News")[:100]
+        progress("Generating thumbnail…")
+        yt_thumb = await _make_thumb(en_path, lang="en", title=yt_title)
         progress("Uploading Short to YouTube…")
         desc = _clean_text(post.get("post_text", "")).rstrip() + "\n\nMore news in the telegram channel, link in the bio"
         video_id = await youtube_publisher.upload_short(
             video_path=en_path, title=yt_title, description=desc, tags=_tags(),
+            thumbnail_path=yt_thumb,
         )
         return f"YouTube EN — https://youtu.be/{video_id}"
 
@@ -1544,12 +1550,15 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         if not ru_path or not os.path.exists(ru_path):
             raise ValueError("RU video not found — generate video first.")
         yt_title = (post.get("article_title") or f"Gaming news #{post_id}")[:100]
+        progress("Generating thumbnail…")
+        yt_thumb = await _make_thumb(ru_path, lang="ru")
         progress("Uploading Short to YouTube RU…")
         desc = _clean_text(
             post.get("ru_post_text") or post.get("post_text", "")
         ).rstrip() + "\n\nБольше новостей в telegram-канале, ссылка в био"
         video_id = await youtube_publisher.upload_short_ru(
             video_path=ru_path, title=yt_title, description=desc, tags=_tags("ru_post_text"),
+            thumbnail_path=yt_thumb,
         )
         return f"YouTube RU — https://youtu.be/{video_id}"
 
@@ -1557,12 +1566,15 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         if not ru_path or not os.path.exists(ru_path):
             raise ValueError("RU video not found — generate video first.")
         vk_title = (post.get("article_title") or f"Gaming news #{post_id}")[:128]
+        progress("Generating thumbnail…")
+        vk_thumb = await _make_thumb(ru_path, lang="ru")
         progress("Uploading video to VK…")
         vk_desc = _clean_text(
             post.get("ru_post_text") or post.get("post_text", "")
         ).rstrip() + "\n\nБольше новостей в telegram-канале, ссылка в био"
         vk_url = await vk_publisher.upload_video(
             video_path=ru_path, title=vk_title, description=vk_desc,
+            cover_image_path=vk_thumb,
         )
         return f"VK — {vk_url}"
 
@@ -1592,6 +1604,7 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
                 tasks["YouTube EN"] = asyncio.create_task(
                     youtube_publisher.upload_short(
                         video_path=en_path, title=en_title, description=en_desc, tags=_tags(),
+                        thumbnail_path=en_thumb,
                     )
                 )
 
@@ -1614,6 +1627,7 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
                     youtube_publisher.upload_short_ru(
                         video_path=ru_path, title=ru_title,
                         description=_caption_ru(), tags=_tags("ru_post_text"),
+                        thumbnail_path=ru_thumb,
                     )
                 )
             if vk_publisher.is_configured():
@@ -1621,6 +1635,7 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
                 tasks["VK"] = asyncio.create_task(
                     vk_publisher.upload_video(
                         video_path=ru_path, title=ru_title, description=_caption_ru(),
+                        cover_image_path=ru_thumb,
                     )
                 )
 

@@ -101,11 +101,15 @@ async def upload_video(
     title: str,
     description: str = "",
     *,
+    cover_image_path: str | None = None,
     wallpost: bool | None = None,
 ) -> str:
     """
     Загрузить *video_path* в сообщество VK (если задан VK_GROUP_ID),
     иначе в профиль владельца токена.
+
+    *cover_image_path* — путь к картинке-обложке (превью); если задан —
+    устанавливается как обложка видео после загрузки.
 
     Если *wallpost* (или VK_WALLPOST по умолчанию) и задан VK_GROUP_ID — после
     загрузки публикует запись с клипом на стене сообщества.
@@ -170,7 +174,17 @@ async def upload_video(
         url = _build_video_url(int(final_owner), int(final_video))
         logger.info("VK: видео загружено и обрабатывается — %s", url)
 
-        # Шаг 3 (опц.): опубликовать запись с клипом на стене сообщества.
+        # Шаг 3 (опц.): установить обложку (превью) видео.
+        if cover_image_path and os.path.exists(cover_image_path):
+            await _upload_thumb(
+                session,
+                token=tok,
+                owner_id=int(final_owner),
+                video_id=int(final_video),
+                image_path=cover_image_path,
+            )
+
+        # Шаг 4 (опц.): опубликовать запись с клипом на стене сообщества.
         if do_wallpost and grp:
             await _post_to_wall(
                 session,
@@ -182,6 +196,74 @@ async def upload_video(
             )
 
         return url
+
+
+async def _upload_thumb(
+    session: aiohttp.ClientSession,
+    *,
+    token: str,
+    owner_id: int,
+    video_id: int,
+    image_path: str,
+) -> None:
+    """Загрузить и установить обложку (превью) видео.
+
+    Поток: video.getThumbUploadUrl → POST картинки → video.saveUploadedThumb.
+    Ошибки не рвут публикацию — видео уже загружено.
+    """
+    try:
+        # 1. Получить адрес для загрузки обложки.
+        thumb_srv = await _vk_call(
+            session, "video.getThumbUploadUrl", {"access_token": token, "owner_id": owner_id}
+        )
+        thumb_upload_url = thumb_srv.get("upload_url")
+        if not thumb_upload_url:
+            logger.warning("VK: getThumbUploadUrl не вернул upload_url: %s", thumb_srv)
+            return
+
+        # 2. Залить картинку на полученный адрес полем photo.
+        ext = os.path.splitext(image_path)[1].lower()
+        ctype = "image/png" if ext == ".png" else "image/jpeg"
+        with open(image_path, "rb") as fh:
+            form = aiohttp.FormData()
+            form.add_field("photo", fh, filename=os.path.basename(image_path), content_type=ctype)
+            timeout = aiohttp.ClientTimeout(total=120)
+            async with session.post(thumb_upload_url, data=form, timeout=timeout) as up:
+                up_text = await up.text()
+                if up.status != 200:
+                    logger.warning("VK thumb upload HTTP %s: %s", up.status, up_text[:300])
+                    return
+                try:
+                    up_data = await up.json(content_type=None)
+                except Exception:
+                    logger.warning("VK thumb upload: неверный JSON: %s", up_text[:300])
+                    return
+
+        logger.debug("VK thumb upload response: %s", up_text[:500])
+
+        # 3. Сохранить и установить обложку.
+        # VK ожидает ВЕСЬ JSON-ответ сервера загрузки строкой в параметре thumb_json.
+        save_params = {
+            "access_token": token,
+            "owner_id": owner_id,
+            "video_id": video_id,
+            "set_thumb": 1,
+            "thumb_json": up_text,
+        }
+        # thumb_size — отдельное поле из ответа (если сервер его вернул).
+        if "thumb_size" in up_data:
+            save_params["thumb_size"] = up_data["thumb_size"]
+        elif "size" in up_data:
+            save_params["thumb_size"] = up_data["size"]
+        # random_tag может прийти как tag / random_tag.
+        rnd = up_data.get("random_tag") or up_data.get("tag")
+        if rnd:
+            save_params["random_tag"] = rnd
+
+        await _vk_call(session, "video.saveUploadedThumb", save_params)
+        logger.info("VK: обложка видео установлена")
+    except Exception as exc:
+        logger.warning("VK: не удалось установить обложку: %s", exc)
 
 
 async def _post_to_wall(
