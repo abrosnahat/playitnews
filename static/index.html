@@ -271,6 +271,122 @@
         animation: spin 0.8s linear infinite;
       }
 
+      /* ── New-post button + modal ─────────────────────────────── */
+      .new-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 8px 14px;
+        border-radius: 11px;
+        background: var(--grad);
+        border: 1px solid transparent;
+        color: #fff;
+        font-size: 12.5px;
+        font-weight: 700;
+        cursor: pointer;
+        box-shadow: 0 8px 22px -12px rgba(124, 92, 255, 0.9);
+        transition: transform 0.16s, box-shadow 0.18s;
+      }
+      .new-btn:hover { transform: translateY(-1px); box-shadow: 0 12px 28px -12px rgba(124, 92, 255, 1); }
+      .new-btn svg { width: 16px; height: 16px; }
+
+      #manualModal {
+        position: fixed;
+        inset: 0;
+        z-index: 120;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(4, 4, 9, 0.72);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        padding: 18px;
+      }
+      #manualModal.open { display: flex; }
+      .modal-card {
+        width: 100%;
+        max-width: 560px;
+        max-height: 92vh;
+        overflow-y: auto;
+        background: var(--surface, #0e0e16);
+        border: 1px solid var(--border-strong);
+        border-radius: 18px;
+        padding: 22px;
+        box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.9);
+      }
+      .modal-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 18px;
+      }
+      .modal-head .mh-title { font-size: 16px; font-weight: 800; letter-spacing: 0.2px; }
+      .modal-head .mh-icon { width: 22px; height: 22px; color: var(--violet-2); }
+      .modal-head .icon-btn { margin-left: auto; }
+      .field { margin-bottom: 14px; }
+      .field > label {
+        display: block;
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.7px;
+        color: var(--text-dim);
+        margin-bottom: 6px;
+      }
+      .field input[type="text"],
+      .field input[type="url"],
+      .field textarea {
+        width: 100%;
+        box-sizing: border-box;
+        background: rgba(8, 8, 14, 0.6);
+        border: 1px solid var(--border);
+        border-radius: 11px;
+        padding: 11px 13px;
+        color: #fff;
+        font-size: 14px;
+        font-family: inherit;
+        transition: border-color 0.16s;
+      }
+      .field input:focus,
+      .field textarea:focus { outline: none; border-color: var(--violet-2); }
+      .field textarea { resize: vertical; min-height: 120px; line-height: 1.5; }
+      .field .hint { font-size: 11px; color: var(--text-dim); margin-top: 5px; }
+      .lang-seg { display: flex; gap: 8px; }
+      .lang-seg label {
+        flex: 1;
+        text-align: center;
+        padding: 9px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: rgba(8, 8, 14, 0.5);
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-dim);
+        cursor: pointer;
+        transition: all 0.16s;
+      }
+      .lang-seg input { display: none; }
+      .lang-seg input:checked + span { color: #fff; }
+      .lang-seg label:has(input:checked) {
+        border-color: var(--violet-2);
+        background: rgba(124, 92, 255, 0.16);
+        color: #fff;
+      }
+      .file-drop {
+        border: 1px dashed var(--border-strong);
+        border-radius: 11px;
+        padding: 14px;
+        text-align: center;
+        font-size: 12.5px;
+        color: var(--text-dim);
+        cursor: pointer;
+        transition: border-color 0.16s, background 0.16s;
+      }
+      .file-drop:hover { border-color: var(--violet-2); background: rgba(124, 92, 255, 0.06); }
+      .file-drop.has-file { color: var(--green); border-color: var(--green); }
+      .modal-actions { display: flex; gap: 10px; margin-top: 8px; }
+      .modal-actions .btn { flex: 1; }
+
       /* ── Feed ────────────────────────────────────────────────── */
       .feed {
         flex: 1;
@@ -1430,6 +1546,56 @@
       <div id="lb-counter"></div>
     </div>
 
+    <!-- Manual post modal -->
+    <div id="manualModal" onclick="manualBackdrop(event)">
+      <div class="modal-card" onclick="event.stopPropagation()">
+        <div class="modal-head">
+          <svg class="mh-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 5 4 4"/><path d="M13 7 8.7 2.7a2.41 2.41 0 0 0-3.4 0L2.7 5.3a2.41 2.41 0 0 0 0 3.4L7 13"/><path d="m8 6 2-2"/><path d="m18 16 2-2"/><path d="m17 11 4.3 4.3c.94.94.94 2.46 0 3.4l-2.6 2.6c-.94.94-2.46.94-3.4 0L11 17"/></svg>
+          <div class="mh-title">New video from text</div>
+          <button class="icon-btn" title="Close" onclick="closeManualModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+        </div>
+
+        <div class="field">
+          <label for="mfTitle">Title</label>
+          <input type="text" id="mfTitle" placeholder="e.g. New Witcher 4 trailer revealed" maxlength="300" />
+        </div>
+
+        <div class="field">
+          <label for="mfBody">Article text</label>
+          <textarea id="mfBody" placeholder="Paste the article text here. It will be turned into the video narration."></textarea>
+          <div class="hint">The pasted text is used directly to generate the spoken script — no Telegram post is created.</div>
+        </div>
+
+        <div class="field">
+          <label>Video languages</label>
+          <div class="lang-seg" id="mfLang">
+            <label><input type="radio" name="mflang" value="both" checked /><span>EN + RU</span></label>
+            <label><input type="radio" name="mflang" value="en" /><span>EN</span></label>
+            <label><input type="radio" name="mflang" value="ru" /><span>RU</span></label>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="mfYoutube">YouTube URL <span style="text-transform:none;font-weight:500">(optional)</span></label>
+          <input type="url" id="mfYoutube" placeholder="https://youtu.be/… — source clips for the video" />
+          <div class="hint">If left empty and no file is attached, clips are searched on YouTube automatically.</div>
+        </div>
+
+        <div class="field">
+          <label>Or upload a video <span style="text-transform:none;font-weight:500">(optional)</span></label>
+          <div class="file-drop" id="mfFileDrop" onclick="document.getElementById('mfFile').click()">
+            <span id="mfFileLabel">Click to choose a video file (mp4, mov, mkv, webm…)</span>
+          </div>
+          <input type="file" id="mfFile" accept="video/*" style="display:none" onchange="manualFilePicked()" />
+        </div>
+
+        <div class="modal-actions">
+          <button class="btn btn-danger" onclick="closeManualModal()">Cancel</button>
+          <button class="btn btn-primary" id="mfSubmit" onclick="submitManualPost()">Generate video</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Header -->
     <header class="header">
       <div class="brand">
@@ -1441,6 +1607,10 @@
       </div>
       <div class="header-right">
         <span class="count-badge" id="countBadge">0 posts</span>
+        <button class="new-btn" id="newPostBtn" title="Create a post from pasted text" onclick="openManualModal()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+          New
+        </button>
         <button class="icon-btn" id="refreshBtn" title="Refresh" onclick="loadPosts(true)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
         </button>
@@ -1680,6 +1850,7 @@
       function renderCard(p) {
         const isPending = p.status === "pending";
         const isActionable = p.status === "sent" || p.status === "approved";
+        const isManual = !p.article_url; // manual posts have no source article URL
         const hasEnVid = p.en_video_exists;
         const hasRuVid = p.ru_video_exists;
 
@@ -1748,7 +1919,7 @@
         }
 
         let btnHtml = "";
-        if (isPending) {
+        if (isPending && !isManual) {
           btnHtml = `<div class="btn-group">
       <button class="btn btn-success" style="flex:2" onclick="approvePost(${p.id}, this)">${ICON.check} Approve</button>
       <button class="btn btn-danger" onclick="cancelPost(${p.id})">${ICON.x} Cancel</button>
@@ -1757,9 +1928,13 @@
       <button class="btn btn-outline btn-sm" style="flex:1" onclick="redownloadMedia(${p.id}, this)" title="Re-scrape the article and re-download its images and videos">${ICON.download} Re-download images + videos</button>
     </div>`;
         }
-        if (isActionable) {
+        if (isActionable || isManual) {
           const ytSkip = p.yt_skip_count || 0;
-          btnHtml += `<div class="btn-row">
+          btnHtml += isManual
+            ? `<div class="btn-row">
+      <button class="btn btn-danger btn-sm" style="flex:1" onclick="cancelPost(${p.id})">${ICON.x} Remove</button>
+    </div>`
+            : `<div class="btn-row">
       <button class="btn btn-danger btn-sm" style="flex:1" onclick="markDone(${p.id}, this)">${ICON.check} Done — remove</button>
       <button class="btn btn-outline btn-sm" style="flex:1" onclick="republishEn(${p.id}, this)">${ICON.repeat} EN → @playitgamesnews</button>
       <button class="btn btn-outline btn-sm" style="flex:1" onclick="republishRu(${p.id}, this)">${ICON.repeat} RU → @readitgames</button>
@@ -3082,7 +3257,101 @@
         return s;
       }
 
+      // ─── Manual post modal ─────────────────────────────────────────────────────
+      function openManualModal() {
+        const m = document.getElementById("manualModal");
+        m.classList.add("open");
+        document.getElementById("mfTitle").focus();
+      }
+
+      function closeManualModal() {
+        document.getElementById("manualModal").classList.remove("open");
+      }
+
+      function manualBackdrop(ev) {
+        if (ev.target.id === "manualModal") closeManualModal();
+      }
+
+      function manualFilePicked() {
+        const input = document.getElementById("mfFile");
+        const drop = document.getElementById("mfFileDrop");
+        const label = document.getElementById("mfFileLabel");
+        const yt = document.getElementById("mfYoutube");
+        if (input.files && input.files.length) {
+          const f = input.files[0];
+          const mb = (f.size / (1024 * 1024)).toFixed(1);
+          label.textContent = `${f.name} · ${mb} MB`;
+          drop.classList.add("has-file");
+          // A file and a URL are mutually exclusive — file wins.
+          if (yt) yt.value = "";
+        } else {
+          label.textContent = "Click to choose a video file (mp4, mov, mkv, webm…)";
+          drop.classList.remove("has-file");
+        }
+      }
+
+      async function submitManualPost() {
+        const title = document.getElementById("mfTitle").value.trim();
+        const body = document.getElementById("mfBody").value.trim();
+        const youtube = document.getElementById("mfYoutube").value.trim();
+        const lang =
+          document.querySelector('#mfLang input[name="mflang"]:checked')?.value || "both";
+        const fileInput = document.getElementById("mfFile");
+        const file = fileInput.files && fileInput.files[0];
+
+        if (!title) {
+          toast("Please enter a title", "error");
+          return;
+        }
+        if (!body) {
+          toast("Please paste the article text", "error");
+          return;
+        }
+
+        const submitBtn = document.getElementById("mfSubmit");
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Creating…";
+
+        try {
+          const fd = new FormData();
+          fd.append("title", title);
+          fd.append("body", body);
+          fd.append("lang", lang);
+          if (youtube) fd.append("youtube_url", youtube);
+          if (file) fd.append("video", file);
+
+          const res = await fetch("/api/posts/manual", { method: "POST", body: fd });
+          const data = await res.json();
+          if (!res.ok || data.error) {
+            toast(data.error || `HTTP ${res.status}`, "error");
+            return;
+          }
+          toast("Post created — generating video…", "success");
+          closeManualModal();
+          // Reset the form for next time.
+          document.getElementById("mfTitle").value = "";
+          document.getElementById("mfBody").value = "";
+          document.getElementById("mfYoutube").value = "";
+          fileInput.value = "";
+          manualFilePicked();
+          // Jump to the active feed and let the card pick up the running task.
+          currentPage = 1;
+          await loadPosts(true);
+          _reconnectActiveTasks();
+        } catch (e) {
+          toast(`Failed: ${e.message}`, "error");
+        } finally {
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Generate video";
+        }
+      }
+
       // ─── Init ──────────────────────────────────────────────────────────────────
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && document.getElementById("manualModal").classList.contains("open")) {
+          closeManualModal();
+        }
+      });
       loadPosts().then(() => _reconnectActiveTasks());
       setInterval(loadPosts, 60_000);
 

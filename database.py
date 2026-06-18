@@ -248,6 +248,27 @@ def increment_yt_skip(post_id: int, added: int) -> int:
     return row[0] if row else added
 
 
+def add_video_path(post_id: int, path: str) -> None:
+    """Append a local video file path to the post's video_paths list (deduped)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT video_paths FROM scheduled_posts WHERE id = ?", (post_id,)
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            paths = json.loads(row[0] or "[]")
+        except Exception:
+            paths = []
+        if path not in paths:
+            paths.append(path)
+        conn.execute(
+            "UPDATE scheduled_posts SET video_paths = ? WHERE id = ?",
+            (json.dumps(paths), post_id),
+        )
+
+
+
 def set_notification_message_id(post_id: int, message_id: int) -> None:
     with get_conn() as conn:
         conn.execute(

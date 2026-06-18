@@ -11,7 +11,9 @@ import os
 import queue
 import re
 import shutil
+import tempfile
 import threading
+from datetime import datetime
 from typing import Optional
 
 from flask import Flask, Response, abort, jsonify, request, send_file
@@ -61,6 +63,32 @@ try:
         _conn.execute("ALTER TABLE scheduled_posts ADD COLUMN published_platforms TEXT DEFAULT '[]'")
 except Exception:
     pass  # column already exists
+
+# One-time migration: posts that were already fully published before VK became
+# a required platform (>= 4 platforms) get 'vk' backfilled so the old backlog
+# doesn't flood the active feed now that VK is required for completion.
+try:
+    with db.get_conn() as _conn:
+        _conn.execute("CREATE TABLE IF NOT EXISTS app_migrations (name TEXT PRIMARY KEY)")
+        _done = _conn.execute(
+            "SELECT 1 FROM app_migrations WHERE name = 'vk_backfill_v1'"
+        ).fetchone()
+        if not _done:
+            _rows = _conn.execute(
+                """SELECT id, published_platforms FROM scheduled_posts
+                   WHERE json_array_length(COALESCE(published_platforms, '[]')) >= 4"""
+            ).fetchall()
+            for _r in _rows:
+                _plats = json.loads(_r[1] or "[]")
+                if "vk" not in _plats:
+                    _plats.append("vk")
+                    _conn.execute(
+                        "UPDATE scheduled_posts SET published_platforms = ? WHERE id = ?",
+                        (json.dumps(_plats), _r[0]),
+                    )
+            _conn.execute("INSERT INTO app_migrations (name) VALUES ('vk_backfill_v1')")
+except Exception:
+    logging.getLogger(__name__).exception("VK backfill migration failed")
 
 @app.after_request
 def _ngrok_headers(response):
@@ -355,18 +383,18 @@ def api_posts():
                 (per_page, offset),
             ).fetchall()
         elif status == "active":
-            # pending always shown; sent only if published to fewer than 4 platforms
+            # pending always shown; sent only if published to fewer than 5 platforms
             total = conn.execute(
                 """SELECT COUNT(*) FROM scheduled_posts
                    WHERE status = 'pending'
                       OR (status = 'sent'
-                          AND json_array_length(COALESCE(published_platforms, '[]')) < 4)"""
+                          AND json_array_length(COALESCE(published_platforms, '[]')) < 5)"""
             ).fetchone()[0]
             rows  = conn.execute(
                 """SELECT * FROM scheduled_posts
                    WHERE status = 'pending'
                       OR (status = 'sent'
-                          AND json_array_length(COALESCE(published_platforms, '[]')) < 4)
+                          AND json_array_length(COALESCE(published_platforms, '[]')) < 5)
                    ORDER BY id ASC LIMIT ? OFFSET ?""",
                 (per_page, offset),
             ).fetchall()
@@ -609,7 +637,7 @@ async def _do_publish_telegram(post_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 # Video platforms that (together with Telegram) mean a post is fully published.
-_REQUIRED_VIDEO_PLATFORMS = {"instagram", "instagram-ru", "youtube", "youtube-ru"}
+_REQUIRED_VIDEO_PLATFORMS = {"instagram", "instagram-ru", "youtube", "youtube-ru", "vk"}
 
 
 def _published_platforms(post: dict) -> set:
@@ -914,6 +942,146 @@ def api_media():
 # ---------------------------------------------------------------------------
 # Routes: video generation (background thread + SSE progress)
 # ---------------------------------------------------------------------------
+
+# Manual post: allowed uploaded video extensions
+_ALLOWED_VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
+
+
+def _is_probable_youtube_url(url: str) -> bool:
+    return bool(re.match(r"^https?://(www\.)?(youtube\.com|youtu\.be)/", url.strip(), re.I))
+
+
+async def _fetch_manual_youtube_video(post_id: int, youtube_url: str) -> str | None:
+    """Download a YouTube video for a manual post into VIDEOS_DIR.
+
+    Returns the saved local path, or None on failure.
+    """
+    workdir = tempfile.mkdtemp(dir=VIDEOS_DIR, prefix=f"manual_{post_id}_")
+    try:
+        src = await video_generator._download_full_yt_video(
+            youtube_url, workdir, is_url=True
+        )
+        if not src or not os.path.exists(src):
+            return None
+        ext = os.path.splitext(src)[1] or ".mp4"
+        dest = os.path.join(VIDEOS_DIR, f"manual_{post_id}{ext}")
+        shutil.move(src, dest)
+        return dest
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+@app.route("/api/posts/manual", methods=["POST"])
+def api_create_manual_post():
+    """Create a post from pasted article text + optional video, then generate a Short.
+
+    Accepts multipart/form-data:
+      - title    (str, required)
+      - body     (str, required) — article text; used directly as the video script source
+      - lang     ('en' | 'ru' | 'both', default 'both')
+      - youtube_url (str, optional) — a YouTube link to use as the clip source
+      - video    (file, optional) — an uploaded video file to use as the clip source
+
+    If neither youtube_url nor an uploaded file is provided, the generator falls
+    back to searching YouTube based on the article title/text.
+    """
+    title = (request.form.get("title") or "").strip()
+    body = (request.form.get("body") or "").strip()
+    lang = request.form.get("lang", "both")
+    youtube_url = (request.form.get("youtube_url") or "").strip()
+
+    if not title:
+        return jsonify({"error": "Title is required"}), 400
+    if not body:
+        return jsonify({"error": "Article text is required"}), 400
+    if lang not in ("en", "ru", "both"):
+        return jsonify({"error": "lang must be 'en', 'ru', or 'both'"}), 400
+    if youtube_url and not _is_probable_youtube_url(youtube_url):
+        return jsonify({"error": "youtube_url must be a youtube.com or youtu.be link"}), 400
+
+    os.makedirs(VIDEOS_DIR, exist_ok=True)
+
+    # Save an uploaded video file (if any) before creating the post so we know its path.
+    uploaded_path: str | None = None
+    file = request.files.get("video")
+    if file and file.filename:
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in _ALLOWED_VIDEO_EXT:
+            return jsonify({
+                "error": f"Unsupported video type '{ext}'. Allowed: {', '.join(sorted(_ALLOWED_VIDEO_EXT))}"
+            }), 400
+        # Temp name first; renamed to include the post id once we have it.
+        tmp_name = f"manual_upload_{int(datetime.now().timestamp())}{ext}"
+        uploaded_path = os.path.join(VIDEOS_DIR, tmp_name)
+        try:
+            file.save(uploaded_path)
+        except Exception as exc:
+            logger.exception("Manual post: failed to save uploaded video")
+            return jsonify({"error": f"Failed to save video: {exc}"}), 500
+
+    # Create the post. The pasted body is stored as post_text (and ru_post_text)
+    # so the existing script generator turns it into the narration directly —
+    # no Telegram-formatted post is produced for manual entries.
+    try:
+        post_id = db.create_scheduled_post(
+            article_url="",
+            article_title=title[:300],
+            post_text=body,
+            image_paths=[],
+            scheduled_at=datetime.now(),
+            video_paths=[uploaded_path] if uploaded_path else [],
+            ru_post_text=body,
+        )
+    except Exception as exc:
+        logger.exception("Manual post: DB insert failed")
+        if uploaded_path and os.path.exists(uploaded_path):
+            try:
+                os.remove(uploaded_path)
+            except OSError:
+                pass
+        return jsonify({"error": f"Failed to create post: {exc}"}), 500
+
+    # Rename the uploaded file to include the post id (clean, predictable name).
+    if uploaded_path and os.path.exists(uploaded_path):
+        ext = os.path.splitext(uploaded_path)[1].lower()
+        final_path = os.path.join(VIDEOS_DIR, f"manual_{post_id}{ext}")
+        try:
+            shutil.move(uploaded_path, final_path)
+            db.remove_media_path(post_id, "video", uploaded_path)
+            db.add_video_path(post_id, final_path)
+        except OSError:
+            final_path = uploaded_path  # keep temp name on failure
+
+    include_images = bool(request.form.get("include_images"))
+
+    def _run():
+        try:
+            # If no uploaded file but a YouTube URL was given, download it first
+            # so fetch_gameplay_clips uses it as the source instead of searching.
+            if not uploaded_path and youtube_url:
+                _push(post_id, f"Downloading source video from YouTube…", "progress")
+                dest = _run_async(_fetch_manual_youtube_video(post_id, youtube_url))
+                if dest:
+                    db.add_video_path(post_id, dest)
+                    _push(post_id, "Source video downloaded.", "progress")
+                else:
+                    _push(post_id, "Could not download YouTube video — falling back to search.", "progress")
+            _run_async(_generate_video(post_id, lang, include_images=include_images))
+        except Exception as exc:
+            _push(post_id, f"Fatal error: {exc}", "error")
+        finally:
+            with _tasks_lock:
+                q_ref = _task_queues.get(post_id)
+            if q_ref is not None:
+                q_ref.put(None)
+
+    with _tasks_lock:
+        _task_queues[post_id] = queue.Queue()
+        _task_logs[post_id] = []
+
+    threading.Thread(target=_run, daemon=True, name=f"vidgen-{post_id}").start()
+    return jsonify({"success": True, "post_id": post_id, "message": "Manual post created — generating video"})
+
 
 @app.route("/api/posts/<int:post_id>/generate-video", methods=["POST"])
 def api_generate_video(post_id: int):
