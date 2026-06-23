@@ -2935,47 +2935,62 @@ async def fetch_gameplay_clips(
     workdir = tempfile.mkdtemp(dir=VIDEOS_DIR, prefix="clips_")
     N_CLIPS_ARTICLE = 8    # ~7 × 3–4 s ≈ 24–32 s — fits the target short duration
 
-    source_video: str | None = None
+    source_videos: list[str] = []
 
     # ── 1. Article video already on disk — skip if user provided a custom query ──
     if not user_query:
         article_hls = [p for p in post.get("video_paths", []) if os.path.exists(p)]
         if article_hls:
-            source_video = article_hls[0]
-            logger.info("Using article Playground video as source: %s", source_video)
+            source_videos = article_hls
+            logger.info("Found %d article video(s) on disk", len(source_videos))
 
     # ── 2. Re-fetch article embeds if nothing on disk ─────────────────────
-    if not user_query and not source_video and post.get("article_url"):
+    if not user_query and not source_videos and post.get("article_url"):
         try:
             async with aiohttp.ClientSession() as _sess:
                 article = await _scraper.scrape_article(_sess, post["article_url"])
                 if article and article.pg_embeds:
-                    # Try Playground HLS download first
+                    # Try Playground HLS download first — collect ALL HLS videos
                     _, hls_paths = await _scraper.download_videos(_sess, article.pg_embeds)
                     if hls_paths:
-                        source_video = hls_paths[0]
-                        logger.info("Downloaded article Playground video: %s", source_video)
+                        source_videos = hls_paths
+                        logger.info("Downloaded %d article Playground video(s)", len(source_videos))
                     else:
                         # Fall back to first YouTube embed in the article
                         yt_embeds = [e for e in article.pg_embeds if e["type"] == "youtube"]
                         if yt_embeds:
                             yt_url = f"https://www.youtube.com/watch?v={yt_embeds[0]['id']}"
                             logger.info("Downloading article YouTube embed: %s", yt_url)
-                            source_video = await _download_full_yt_video(
+                            src = await _download_full_yt_video(
                                 yt_url, workdir, is_url=True
                             )
+                            if src:
+                                source_videos = [src]
         except Exception as exc:
             logger.warning("Could not fetch article embeds: %s", exc)
 
-    if source_video:
-        # ── Article video found: cut N_CLIPS_ARTICLE random 3–4 s clips ──
-        clips = await asyncio.to_thread(
-            _cut_clips_from_video,
-            source_video, N_CLIPS_ARTICLE, workdir, float(YT_CLIP_SKIP),
-        )
+    if source_videos:
+        # ── Article video(s) found: cut N_CLIPS_ARTICLE random 3–4 s clips from ALL videos ──
+        all_clips: list[str] = []
+        for vi, src_vid in enumerate(source_videos):
+            logger.info(
+                "Cutting clips from article video %d/%d: %s",
+                vi + 1, len(source_videos), src_vid,
+            )
+            prefix = f"vid{vi}_clip" if len(source_videos) > 1 else "clip"
+            vid_clips = await asyncio.to_thread(
+                _cut_clips_from_video,
+                src_vid, N_CLIPS_ARTICLE, workdir, float(YT_CLIP_SKIP), prefix,
+            )
+            all_clips.extend(vid_clips)
+            logger.info(
+                "Prepared %d clips from article video %d for '%s'",
+                len(vid_clips), vi + 1, search_query,
+            )
+        clips = all_clips
         logger.info(
-            "Prepared %d random clips from article video for '%s'",
-            len(clips), search_query,
+            "Total: prepared %d clips from %d article video(s) for '%s'",
+            len(clips), len(source_videos), search_query,
         )
     else:
         # ── No article video: download ONE YT video and cut clips from it ──

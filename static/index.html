@@ -1589,6 +1589,13 @@
           <input type="file" id="mfFile" accept="video/*" style="display:none" onchange="manualFilePicked()" />
         </div>
 
+        <div class="field">
+          <label class="row" style="display:flex;align-items:center;gap:8px;cursor:pointer;text-transform:none">
+            <input id="mfTalkHead" type="checkbox" checked />
+            <span>🗣️ Talking-head avatar (bottom half, lip-synced)</span>
+          </label>
+        </div>
+
         <div class="modal-actions">
           <button class="btn btn-danger" onclick="closeManualModal()">Cancel</button>
           <button class="btn btn-primary" id="mfSubmit" onclick="submitManualPost()">Generate video</button>
@@ -3317,6 +3324,7 @@
           fd.append("title", title);
           fd.append("body", body);
           fd.append("lang", lang);
+          fd.append("talking_head", document.getElementById("mfTalkHead")?.checked ? "1" : "0");
           if (youtube) fd.append("youtube_url", youtube);
           if (file) fd.append("video", file);
 

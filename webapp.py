@@ -1053,6 +1053,11 @@ def api_create_manual_post():
             final_path = uploaded_path  # keep temp name on failure
 
     include_images = bool(request.form.get("include_images"))
+    # Manual "New video from text" defaults to the talking-head avatar unless the
+    # client explicitly opts out (talking_head="0"/"false"/"no").
+    use_talking_head = (request.form.get("talking_head", "1") or "1").strip().lower() not in ("0", "false", "no", "")
+    # Talking-head and monitor frame are mutually exclusive — head wins.
+    use_monitor_frame = not use_talking_head
 
     def _run():
         try:
@@ -1066,7 +1071,7 @@ def api_create_manual_post():
                     _push(post_id, "Source video downloaded.", "progress")
                 else:
                     _push(post_id, "Could not download YouTube video — falling back to search.", "progress")
-            _run_async(_generate_video(post_id, lang, include_images=include_images))
+            _run_async(_generate_video(post_id, lang, include_images=include_images, use_monitor_frame=use_monitor_frame, use_talking_head=use_talking_head))
         except Exception as exc:
             _push(post_id, f"Fatal error: {exc}", "error")
         finally:
