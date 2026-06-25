@@ -241,6 +241,53 @@ TTS_RATE_RU  = "+15%"   # RU: Dmitry reads slower & inserts longer inter-sentenc
                         # bump rate so audio length (and per-frame seg_dur) matches EN.
 TTS_PITCH    = "-3Hz"   # Slightly lower pitch → warmer tone
 
+# ---------------------------------------------------------------------------
+# Gemini TTS backend (optional replacement for edge-tts).
+#
+# Set TTS_BACKEND=gemini in .env to route TTS through Gemini TTS models. The
+# free tier at aistudio.google.com is sufficient for this pipeline (≤10 shorts
+# / day, ~25 s each — well under 50 RPD and 10 RPM limits).
+#
+# Recommended model: gemini-2.5-flash-preview-tts (more stable). 3.1 Flash TTS
+# is preview-quality with better prosody but ~3-5% "text-token-returned" 500
+# errors — retry is built in.
+#
+# All 30 voices are language-agnostic; `languageCode` in the prompt steers
+# pronunciation. Recommended picks for gaming-news shorts:
+#   EN — Schedar (even/dj), Kore (firm), Puck (upbeat)
+#   RU — Kore (neutral), Schedar (even), Sulafat (warm)
+# ---------------------------------------------------------------------------
+try:
+    from google import genai as _genai
+    from google.genai import types as _gtypes
+    _GENAI_OK = True
+except Exception:                                          # noqa: BLE001
+    _GENAI_OK = False
+
+# Active backend selector. "edge" = original edge-tts (default),
+# "gemini" = route through Gemini TTS.
+TTS_BACKEND = os.getenv("TTS_BACKEND", "edge").strip().lower()
+GEMINI_TTS_MODEL     = os.getenv(
+    "GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts",
+)
+# 3.1 Flash TTS is also valid: "gemini-3.1-flash-tts-preview"
+GEMINI_TTS_VOICE_EN  = os.getenv("GEMINI_TTS_VOICE_EN",  "Schedar")
+GEMINI_TTS_VOICE_RU  = os.getenv("GEMINI_TTS_VOICE_RU",  "Kore")
+# Director's-note prelude — Gemini TTS is LLM-based; the prompt structure
+# (instructions → transcript) materially changes prosody. Prepending this
+# preamble gives reliable "gaming-news anchor" delivery and avoids the model
+# reading its own style notes aloud (a known safety-classifier false positive).
+_GEMINI_DIR_EN = (
+    "Read aloud as a confident gaming-news anchor for a 20-second vertical short. "
+    "Vocal smile, clear articulation, mid energy, conversational pace. "
+    "Speak ONLY the transcript below:\n\n"
+)
+_GEMINI_DIR_RU = (
+    "Прочитай вслух как уверенный ведущий игровых новостей для 20-секундного "
+    "вертикального шортса. Живая подача, чёткая дикция, средний темп. "
+    "Произнеси ТОЛЬКО текст ниже:\n\n"
+)
+
 # Optional call-to-action appended to the narration (opt-in via UI checkbox).
 # Drives viewers from Shorts/Reels to the Telegram channels. The hook is the
 # "full game trailer" — something the short clip doesn't fully show.
@@ -1317,6 +1364,186 @@ def _transliterate_for_ru_tts(text: str) -> str:
     return _RU_BRAND_RE.sub(_replace, text)
 
 
+async def _synthesize_voice_gemini(
+    text: str,
+    workdir: str,
+    voice: str | None = None,
+    max_retries: int = 3,
+) -> tuple[str, list[tuple[float, float, str]]]:
+    """
+    Synthesize narration via Gemini TTS and recover word-level timing via the
+    existing Whisper pipeline (`_run_whisper_sync`).
+
+    The Gemini API returns inline audio (WAV L16 24 kHz mono) but no
+    word-level timestamps, so we feed the WAV through faster-whisper — already
+    a dependency — the same way the edge-tts path does. Output files:
+      voice.wav  — PCM audio, 24 kHz mono, 16-bit
+      subs.vtt   — single cue [0..audio_dur] used as a Whisper anchor
+
+    Returns (audio_path, [(start_sec, end_sec, word), ...]).
+    Raises RuntimeError on API key missing, sdk missing, or all retries failing.
+    """
+    if not _GENAI_OK:
+        raise RuntimeError(
+            "google-genai SDK not installed. Run: pip install google-genai"
+        )
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY (or GOOGLE_API_KEY) not set in .env — "
+            "get one at https://aistudio.google.com/apikey"
+        )
+
+    # Determine language from the voice name passed by the caller (edge-tts
+    # uses locale-prefixed names like "ru-RU-DmitryNeural"). For Gemini TTS
+    # callers can pass either a plain voice name ("Kore") or a locale-prefixed
+    # hint ("ru-RU") — we extract the language either way.
+    whisper_lang = "en"
+    if voice:
+        v_lower = voice.lower()
+        if v_lower.startswith("ru") or "-ru-" in v_lower or v_lower == "ru-ru":
+            whisper_lang = "ru"
+
+    chosen_voice = voice or (
+        GEMINI_TTS_VOICE_RU if whisper_lang == "ru" else GEMINI_TTS_VOICE_EN
+    )
+    # Voice name from edge-tts style is unusable for Gemini (no locale strip);
+    # fall back to the configured RU/EN pick if a non-Gemini voice leaks in.
+    if "-" in chosen_voice and not _is_gemini_voice_name(chosen_voice):
+        chosen_voice = (
+            GEMINI_TTS_VOICE_RU if whisper_lang == "ru" else GEMINI_TTS_VOICE_EN
+        )
+
+    director = _GEMINI_DIR_RU if whisper_lang == "ru" else _GEMINI_DIR_EN
+    prompt = f"{director}{text.strip()}\n"
+
+    client = _genai.Client(api_key=api_key)
+    speech_cfg = _gtypes.SpeechConfig(
+        voice_config=_gtypes.VoiceConfig(
+            prebuilt_voice_config=_gtypes.PrebuiltVoiceConfig(
+                voice_name=chosen_voice,
+            )
+        ),
+        language_code="ru-RU" if whisper_lang == "ru" else "en-US",
+    )
+
+    # Preview models occasionally return text tokens instead of audio → 500.
+    # Exponential backoff retry per Google's own TTS docs.
+    last_err: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_TTS_MODEL,
+                contents=prompt,
+                config=_gtypes.GenerateContentConfig(
+                    response_modalities=["AUDIO"],
+                    speech_config=speech_cfg,
+                ),
+            )
+            break
+        except Exception as exc:                          # noqa: BLE001
+            last_err = exc
+            logger.warning(
+                "Gemini TTS attempt %d/%d failed: %s",
+                attempt, max_retries, exc.__class__.__name__,
+            )
+            if attempt < max_retries:
+                await asyncio.sleep(2 ** attempt)
+    else:                                                # all attempts failed
+        raise RuntimeError(
+            f"Gemini TTS failed after {max_retries} retries: {last_err}"
+        )
+
+    # ---- Decode inline audio (WAV L16 24 kHz mono per Google docs) ----
+    try:
+        part = response.candidates[0].content.parts[0]
+        pcm_bytes = part.inline_data.data
+    except (AttributeError, IndexError) as exc:
+        raise RuntimeError(f"Gemini TTS returned no audio: {exc}") from exc
+
+    audio_path = os.path.join(workdir, "voice.wav")
+    # Gemini returns raw PCM (L16, 24 kHz, mono, little-endian). Wrap in a
+    # real WAV container so downstream ffmpeg and Whisper read it cleanly.
+    import base64 as _b64
+    import wave as _wave
+    try:
+        pcm = _b64.b64decode(pcm_bytes) if isinstance(pcm_bytes, str) else pcm_bytes
+    except Exception as exc:
+        raise RuntimeError(f"Gemini TTS audio decode failed: {exc}") from exc
+    with _wave.open(audio_path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)         # 16-bit
+        wf.setframerate(24_000)
+        wf.writeframes(pcm)
+
+    # ---- Log token/audio usage from response.usage_metadata ----
+    # Tracks daily Gemini TTS quota in the bot's own logs alongside the
+    # dashboard at https://aistudio.google.com/usage.
+    try:
+        um = getattr(response, "usage_metadata", None)
+        if um:
+            prompt_tok     = int(getattr(um, "prompt_token_count",     0) or 0)
+            audio_tok      = int(getattr(um, "candidates_token_count", 0) or 0)  # audio
+            thoughts_tok   = int(getattr(um, "thoughts_token_count",   0) or 0)
+            audio_seconds  = audio_tok / 25.0        # 25 tokens / sec per docs
+            logger.info(
+                "Gemini TTS usage: model=%s prompt=%d tok, audio=%d tok (%.1f s), "
+                "thoughts=%d tok, voice=%s",
+                GEMINI_TTS_MODEL, prompt_tok, audio_tok, audio_seconds,
+                thoughts_tok, chosen_voice,
+            )
+    except Exception as exc:                                # noqa: BLE001
+        logger.debug("Gemini usage_metadata read failed: %s", exc)
+
+    # ---- Recover word timing via existing Whisper pipeline ----
+    audio_dur = _get_audio_duration(audio_path)
+
+    # Synthesise a single-cue VTT covering [0, audio_dur] — same trick the
+    # docs recommend so _run_whisper_sync has a sentence anchor to bind to.
+    vtt_path = os.path.join(workdir, "subs.vtt")
+    h, rem = divmod(audio_dur, 3600)
+    m, s   = divmod(rem, 60)
+    end_ts = f"{int(h):02d}:{int(m):02d}:{s:06.3f}"
+    with open(vtt_path, "w", encoding="utf-8") as fh:
+        fh.write(f"WEBVTT\n\n00:00:00.000 --> {end_ts}\n{text.strip()}\n")
+
+    sentence_cues = _parse_vtt_cues(vtt_path)
+    word_cues = await asyncio.to_thread(
+        _run_whisper_sync, audio_path, sentence_cues, whisper_lang,
+    )
+    if not word_cues:                                     # Whisper missing/failed
+        word_cues = await asyncio.to_thread(
+            _detect_word_boundaries_from_audio, audio_path, sentence_cues,
+        )
+        logger.info(
+            "TTS (gemini): %d word cues (silencedetect fallback), audio %.1f s",
+            len(word_cues), audio_dur,
+        )
+    else:
+        logger.info(
+            "TTS (gemini): %d word cues (whisper), audio %.1f s, voice=%s",
+            len(word_cues), audio_dur, chosen_voice,
+        )
+    return audio_path, word_cues
+
+
+_GEMINI_VOICE_NAMES = {
+    # 30 voices from the Gemini TTS docs (June 2026).
+    "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede",
+    "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba",
+    "Despina", "Erinome", "Algenib", "Rasalgethi", "Laomedeia", "Achernar",
+    "Alnilam", "Schedar", "Gacrux", "Pulcherrima", "Achird", "Zubenelgenubi",
+    "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
+}
+
+
+def _is_gemini_voice_name(name: str) -> bool:
+    """True if `name` looks like a Gemini prebuilt voice (e.g. 'Kore'),
+    False if it's an edge-tts style locale+name (e.g. 'ru-RU-DmitryNeural').
+    """
+    return name in _GEMINI_VOICE_NAMES
+
+
 async def _synthesize_voice(
     text: str, workdir: str, voice: str | None = None
 ) -> tuple[str, list[tuple[float, float, str]]]:
@@ -1326,6 +1553,11 @@ async def _synthesize_voice(
     Falls back to ffmpeg silencedetect if Whisper is unavailable.
     Returns (audio_path, [(start_sec, end_sec, word), ...]).
     """
+    # Backend selector. "edge" = original edge-tts; "gemini" = route through
+    # Gemini TTS (Flash TTS Preview models). Switch is .env-controlled.
+    if TTS_BACKEND == "gemini":
+        return await _synthesize_voice_gemini(text, workdir, voice=voice)
+
     chosen_voice = voice or TTS_VOICE
 
     audio_path = os.path.join(workdir, "voice.mp3")
@@ -3048,6 +3280,10 @@ async def create_short_video(
     logger.info("Video workdir: %s", workdir)
 
     tts_voice = TTS_VOICE_RU if lang == "ru" else TTS_VOICE
+    if TTS_BACKEND == "gemini":
+        # Translate edge-tts style "ru-RU"/"en-US" hint for the Gemini backend
+        # so _synthesize_voice_gemini picks the right voice config.
+        tts_voice = "ru-RU" if lang == "ru" else "en-US"
 
     # Optionally append a Telegram call-to-action to the end of the narration.
     if add_cta:
