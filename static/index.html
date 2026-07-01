@@ -387,6 +387,34 @@
       .modal-actions { display: flex; gap: 10px; margin-top: 8px; }
       .modal-actions .btn { flex: 1; }
 
+      /* ── Project tabs ──────────────────────────────────────── */
+      .project-tabs {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        min-width: 0;
+      }
+      .proj-tab {
+        appearance: none;
+        border: 1px solid var(--border-strong);
+        background: var(--surface, #1b1b22);
+        color: var(--text-dim, #9aa0aa);
+        font: inherit;
+        font-weight: 600;
+        font-size: 13px;
+        padding: 7px 16px;
+        border-radius: 999px;
+        cursor: pointer;
+        transition: background .15s, color .15s, border-color .15s;
+      }
+      .proj-tab:hover { color: var(--text, #eaeaf0); border-color: var(--accent, #6c8cff); }
+      .proj-tab.active {
+        background: var(--accent, #6c8cff);
+        border-color: var(--accent, #6c8cff);
+        color: #fff;
+      }
+
       /* ── Feed ────────────────────────────────────────────────── */
       .feed {
         flex: 1;
@@ -995,6 +1023,43 @@
         display: flex;
         flex-direction: column;
         gap: 10px;
+      }
+      /* ── Carousel generation spoiler ─────────────────────────── */
+      .car-gen {
+        margin-top: 2px;
+      }
+      .car-gen > summary {
+        list-style: none;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 10.5px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        color: var(--text-dim);
+        user-select: none;
+      }
+      .car-gen > summary > svg {
+        width: 18px;
+        height: 18px;
+        flex-shrink: 0;
+      }
+      .car-gen > summary::-webkit-details-marker {
+        display: none;
+      }
+      .car-gen > summary:hover {
+        color: var(--text);
+      }
+      .car-gen > summary .car-gen-arrow {
+        margin-left: auto;
+        font-size: 10px;
+        opacity: 0.6;
+        transition: transform 0.15s;
+      }
+      .car-gen[open] > summary .car-gen-arrow {
+        transform: rotate(180deg);
       }
       .car-row {
         display: flex;
@@ -1605,13 +1670,7 @@
 
     <!-- Header -->
     <header class="header">
-      <div class="brand">
-        <div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" x2="10" y1="11" y2="11"/><line x1="8" x2="8" y1="9" y2="13"/><line x1="15" x2="15.01" y1="12" y2="12"/><line x1="18" x2="18.01" y1="10" y2="10"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/></svg></div>
-        <div>
-          <div class="brand-name">PlayItNews</div>
-          <div class="brand-sub">Content Studio</div>
-        </div>
-      </div>
+      <nav class="project-tabs" id="projectTabs" style="display:none"></nav>
       <div class="header-right">
         <span class="count-badge" id="countBadge">0 posts</span>
         <button class="new-btn" id="newPostBtn" title="Create a post from pasted text" onclick="openManualModal()">
@@ -1708,6 +1767,9 @@
 
       // ─── State ────────────────────────────────────────────────────────────────
       const currentFilter = "active";
+      let currentProject = "all";
+      let PROJECTS = [];            // [{name,title,platforms:{key:{label}}, ...}]
+      const PROJECT_MAP = {};      // name -> project object
       let currentPage = 1;
       const PER_PAGE = 20;
       let totalPages = 1;
@@ -1723,7 +1785,7 @@
         if (spin && rBtn) rBtn.classList.add("spinning");
         try {
           const res = await fetch(
-            `/api/posts?status=${currentFilter}&page=${currentPage}&per_page=${PER_PAGE}`,
+            `/api/posts?status=${currentFilter}&project=${encodeURIComponent(currentProject)}&page=${currentPage}&per_page=${PER_PAGE}`,
           );
           if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
           const text = await res.text();
@@ -1793,6 +1855,47 @@
         currentPage = n;
         document.getElementById("feed").scrollTop = 0;
         loadPosts();
+      }
+
+      // ─── Project tabs ──────────────────────────────────────────────────────────
+      async function loadProjects() {
+        try {
+          const res = await fetch("/api/projects");
+          if (!res.ok) return;
+          const data = await res.json();
+          PROJECTS = data.projects || [];
+          for (const p of PROJECTS) PROJECT_MAP[p.name] = p;
+          renderProjectTabs();
+        } catch (e) {
+          console.error("loadProjects error:", e);
+        }
+      }
+
+      function renderProjectTabs() {
+        const nav = document.getElementById("projectTabs");
+        if (!nav) return;
+        // Only show tabs when more than one project is configured.
+        if (PROJECTS.length < 2) {
+          nav.style.display = "none";
+          return;
+        }
+        nav.style.display = "flex";
+        const tabs = [{ name: "all", title: "All" }, ...PROJECTS];
+        nav.innerHTML = tabs
+          .map(
+            (t) =>
+              `<button class="proj-tab${t.name === currentProject ? " active" : ""}" onclick="switchProject('${t.name}')">${esc(t.title || t.name)}</button>`,
+          )
+          .join("");
+      }
+
+      function switchProject(name) {
+        if (name === currentProject) return;
+        currentProject = name;
+        currentPage = 1;
+        renderProjectTabs();
+        document.getElementById("feed").scrollTop = 0;
+        loadPosts(true);
       }
 
       function _cardFingerprint(p) {
@@ -1988,19 +2091,28 @@
               pub.has(k)
                 ? ` <span class="pub-done" title="Already published">${ICON.check}</span>`
                 : "";
+            // Only show publish buttons for platforms this post's project has.
+            const _projPlat = (PROJECT_MAP[p.project] || {}).platforms || null;
+            const hasPlat = (k) => !_projPlat || (k in _projPlat);
             let pubBtns = "";
             if (hasEnVid) {
-              pubBtns += `<button class="btn btn-ig${pub.has("instagram") ? " btn-published" : ""}" onclick="publishTo(${p.id},'instagram',this)">${ICON.instagram} Instagram EN${done("instagram")}</button>`;
-              pubBtns += `<button class="btn btn-yt${pub.has("youtube") ? " btn-published" : ""}" onclick="publishTo(${p.id},'youtube',this)">${ICON.youtube} YouTube EN${done("youtube")}</button>`;
+              if (hasPlat("instagram"))
+                pubBtns += `<button class="btn btn-ig${pub.has("instagram") ? " btn-published" : ""}" onclick="publishTo(${p.id},'instagram',this)">${ICON.instagram} Instagram EN${done("instagram")}</button>`;
+              if (hasPlat("youtube"))
+                pubBtns += `<button class="btn btn-yt${pub.has("youtube") ? " btn-published" : ""}" onclick="publishTo(${p.id},'youtube',this)">${ICON.youtube} YouTube EN${done("youtube")}</button>`;
             }
             if (hasRuVid) {
-              pubBtns += `<button class="btn btn-ig${pub.has("instagram-ru") ? " btn-published" : ""}" onclick="publishTo(${p.id},'instagram-ru',this)">${ICON.instagram} Instagram RU${done("instagram-ru")}</button>`;
-              pubBtns += `<button class="btn btn-yt${pub.has("youtube-ru") ? " btn-published" : ""}" onclick="publishTo(${p.id},'youtube-ru',this)">${ICON.youtube} YouTube RU${done("youtube-ru")}</button>`;
-              pubBtns += `<button class="btn btn-vk${pub.has("vk") ? " btn-published" : ""}" onclick="publishTo(${p.id},'vk',this)">${ICON.vk} VK${done("vk")}</button>`;
+              if (hasPlat("instagram-ru"))
+                pubBtns += `<button class="btn btn-ig${pub.has("instagram-ru") ? " btn-published" : ""}" onclick="publishTo(${p.id},'instagram-ru',this)">${ICON.instagram} Instagram RU${done("instagram-ru")}</button>`;
+              if (hasPlat("youtube-ru"))
+                pubBtns += `<button class="btn btn-yt${pub.has("youtube-ru") ? " btn-published" : ""}" onclick="publishTo(${p.id},'youtube-ru',this)">${ICON.youtube} YouTube RU${done("youtube-ru")}</button>`;
+              if (hasPlat("vk"))
+                pubBtns += `<button class="btn btn-vk${pub.has("vk") ? " btn-published" : ""}" onclick="publishTo(${p.id},'vk',this)">${ICON.vk} VK${done("vk")}</button>`;
             }
-            if (hasEnVid && hasRuVid)
+            if (hasEnVid && hasRuVid && pubBtns)
               pubBtns += `<button class="btn btn-tinted" onclick="publishTo(${p.id},'all-combined',this)">${ICON.globe} Publish All</button>`;
-            btnHtml += `<div class="btn-section">
+            if (pubBtns)
+              btnHtml += `<div class="btn-section">
         <div class="btn-section-label">${ICON.upload} Publish</div>
         <div class="btn-group">${pubBtns}</div>
       </div>`;
@@ -2047,13 +2159,15 @@
             carPubBtns += `<button class="btn btn-ig${pubSet.has("instagram-carousel-ru") ? " btn-published" : ""}" onclick="publishTo(${p.id},'instagram-carousel-ru',this)">${ICON.camera} Carousel RU${doneMark("instagram-carousel-ru")}</button>`;
           }
           btnHtml += `<div class="btn-section">
-      <div class="btn-section-label">${ICON.camera} Instagram Carousel</div>
-      ${carouselPreview}
-      <div class="btn-group">
-        <button class="btn btn-primary" onclick="generateCarousel(${p.id},'both')">${ICON.camera} EN+RU</button>
-        <button class="btn btn-tinted" onclick="generateCarousel(${p.id},'en')">🇬🇧 EN only</button>
-        <button class="btn btn-tinted" onclick="generateCarousel(${p.id},'ru')">🇷🇺 RU only</button>
-      </div>
+      <details class="car-gen">
+        <summary>${ICON.camera} Instagram Carousel<span class="car-gen-arrow">▼</span></summary>
+        ${carouselPreview}
+        <div class="btn-group" style="margin-top:6px;">
+          <button class="btn btn-primary" onclick="generateCarousel(${p.id},'both')">${ICON.camera} EN+RU</button>
+          <button class="btn btn-tinted" onclick="generateCarousel(${p.id},'en')">🇬🇧 EN only</button>
+          <button class="btn btn-tinted" onclick="generateCarousel(${p.id},'ru')">🇷🇺 RU only</button>
+        </div>
+      </details>
       ${carPubBtns ? `<div class="btn-group" style="margin-top:4px;">${carPubBtns}</div>` : ""}
     </div>`;
         }
@@ -3360,6 +3474,7 @@
           closeManualModal();
         }
       });
+      loadProjects();
       loadPosts().then(() => _reconnectActiveTasks());
       setInterval(loadPosts, 60_000);
 

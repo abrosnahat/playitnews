@@ -31,6 +31,7 @@ import instagram_carousel_publisher
 import carousel_builder
 import youtube_publisher
 import vk_publisher
+import config
 from config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHANNEL_ID,
@@ -42,6 +43,8 @@ from config import (
     INSTAGRAM_USER_ID_RU,
     INSTAGRAM_ACCESS_TOKEN_RU,
     VIDEOS_DIR,
+    required_platforms as project_required_platforms,
+    platform_credentials,
 )
 
 app = Flask(__name__, static_folder="static", static_url_path="")
@@ -371,40 +374,60 @@ def index():
 @app.route("/api/posts")
 def api_posts():
     status   = request.args.get("status", "active")
+    project  = request.args.get("project", "all")
     page     = max(1, int(request.args.get("page", 1)))
     per_page = min(100, max(1, int(request.args.get("per_page", 20))))
     offset   = (page - 1) * per_page
 
+    # Project scoping: when a specific project is requested, filter by it and
+    # use that project's required-platform count as the "fully published"
+    # threshold for the active feed (gaming = 5, ufc = 3, …).
+    proj_clause = ""
+    proj_params: list = []
+    threshold = 5
+    if project and project != "all":
+        proj_clause = " AND project = ?"
+        proj_params = [project]
+        threshold = len(project_required_platforms(project)) or 5
+
     with db.get_conn() as conn:
         if status == "all":
-            total = conn.execute("SELECT COUNT(*) FROM scheduled_posts").fetchone()[0]
-            rows  = conn.execute(
-                "SELECT * FROM scheduled_posts ORDER BY id ASC LIMIT ? OFFSET ?",
-                (per_page, offset),
-            ).fetchall()
-        elif status == "active":
-            # pending always shown; sent only if published to fewer than 5 platforms
             total = conn.execute(
-                """SELECT COUNT(*) FROM scheduled_posts
-                   WHERE status = 'pending'
-                      OR (status = 'sent'
-                          AND json_array_length(COALESCE(published_platforms, '[]')) < 5)"""
+                f"SELECT COUNT(*) FROM scheduled_posts WHERE 1=1{proj_clause}",
+                tuple(proj_params),
             ).fetchone()[0]
             rows  = conn.execute(
-                """SELECT * FROM scheduled_posts
-                   WHERE status = 'pending'
-                      OR (status = 'sent'
-                          AND json_array_length(COALESCE(published_platforms, '[]')) < 5)
-                   ORDER BY id ASC LIMIT ? OFFSET ?""",
-                (per_page, offset),
+                f"SELECT * FROM scheduled_posts WHERE 1=1{proj_clause} "
+                "ORDER BY id ASC LIMIT ? OFFSET ?",
+                (*proj_params, per_page, offset),
+            ).fetchall()
+        elif status == "active":
+            # pending always shown; sent only if published to fewer than
+            # `threshold` platforms
+            active_where = (
+                f"""(status = 'pending'
+                     OR (status = 'sent'
+                         AND json_array_length(COALESCE(published_platforms, '[]')) < ?))"""
+                f"{proj_clause}"
+            )
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM scheduled_posts WHERE {active_where}",
+                (threshold, *proj_params),
+            ).fetchone()[0]
+            rows  = conn.execute(
+                f"SELECT * FROM scheduled_posts WHERE {active_where} "
+                "ORDER BY id ASC LIMIT ? OFFSET ?",
+                (threshold, *proj_params, per_page, offset),
             ).fetchall()
         else:
             total = conn.execute(
-                "SELECT COUNT(*) FROM scheduled_posts WHERE status = ?", (status,)
+                f"SELECT COUNT(*) FROM scheduled_posts WHERE status = ?{proj_clause}",
+                (status, *proj_params),
             ).fetchone()[0]
             rows  = conn.execute(
-                "SELECT * FROM scheduled_posts WHERE status = ? ORDER BY id ASC LIMIT ? OFFSET ?",
-                (status, per_page, offset),
+                f"SELECT * FROM scheduled_posts WHERE status = ?{proj_clause} "
+                "ORDER BY id ASC LIMIT ? OFFSET ?",
+                (status, *proj_params, per_page, offset),
             ).fetchall()
 
     result = []
@@ -433,6 +456,30 @@ def api_posts():
         "per_page": per_page,
         "pages":    max(1, -(-total // per_page)),  # ceil division
     })
+
+
+@app.route("/api/projects")
+def api_projects():
+    """List configured projects (from projects.json) for the dashboard tabs.
+
+    Each project reports its platform keys + labels so the frontend can render
+    per-project tabs and only show the publish buttons that apply.
+    """
+    out = []
+    for name in config.project_names():
+        proj = config.get_project(name)
+        platforms = proj.get("platforms") or {}
+        out.append({
+            "name":     name,
+            "title":    proj.get("title", name),
+            "source":   proj.get("source"),
+            "platforms": {
+                key: {"label": (cfg or {}).get("label", key)}
+                for key, cfg in platforms.items()
+            },
+            "required_platforms": sorted(config.required_platforms(name)),
+        })
+    return jsonify({"projects": out, "default": config.DEFAULT_PROJECT})
 
 
 @app.route("/api/posts/<int:post_id>")
@@ -607,27 +654,54 @@ async def _do_publish_telegram(post_id: int) -> None:
     if not post:
         raise ValueError(f"Post #{post_id} not found")
 
+    project    = post.get("project") or "gaming"
     text       = post["post_text"]
     ru_text    = post.get("ru_post_text")
     images     = [p for p in post.get("image_paths", [])  if os.path.exists(p)]
     raw_videos = [p for p in post.get("video_paths", []) if os.path.exists(p)]
     videos     = _prepare_videos_for_tg(raw_videos, post_id=post_id)
 
+    # Resolve Telegram channels from the project config. The default gaming
+    # project keeps using the proven global env channels; other projects
+    # publish strictly to their own configured channels (and skip the step
+    # entirely when no channel is configured).
+    en_cr = platform_credentials(project, "telegram-en")
+    ru_cr = platform_credentials(project, "telegram-ru")
+    if project == "gaming":
+        en_channel = TELEGRAM_CHANNEL_ID
+        ru_channel = TELEGRAM_SECOND_CHANNEL_ID
+    else:
+        en_channel = en_cr.get("channel") or ""
+        ru_channel = ru_cr.get("channel") or ""
+    en_footer = en_cr.get("footer") or "@playitgamesnews"
+    ru_footer = ru_cr.get("footer") or "@readitgames"
+
     async with _make_bot() as bot:
-        # Main EN channel
-        await _send_post_to_channel(
-            bot, TELEGRAM_CHANNEL_ID, text, "@playitgamesnews",
-            images, videos, post_id=post_id,
-        )
+        # Main EN channel — skip if this project has no EN channel configured
+        if en_channel and text:
+            await _send_post_to_channel(
+                bot, en_channel, text, en_footer,
+                images, videos, post_id=post_id,
+            )
+        else:
+            logger.info(
+                "Post #%d: пропуск публикации в Telegram EN (канал не настроен для проекта '%s')",
+                post_id, project,
+            )
         # Second RU channel — failure here must not poison status of the first one
-        if TELEGRAM_SECOND_CHANNEL_ID and ru_text:
+        if ru_channel and ru_text:
             try:
                 await _send_post_to_channel(
-                    bot, TELEGRAM_SECOND_CHANNEL_ID, ru_text, "@readitgames",
+                    bot, ru_channel, ru_text, ru_footer,
                     images, videos, post_id=post_id,
                 )
             except TelegramError as e:
                 logger.error("Second channel publish failed for #%d: %s", post_id, e)
+        elif not ru_channel:
+            logger.info(
+                "Post #%d: пропуск публикации в Telegram RU (канал не настроен для проекта '%s')",
+                post_id, project,
+            )
         db.update_post_status(post_id, "sent")
 
 
@@ -637,6 +711,8 @@ async def _do_publish_telegram(post_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 # Video platforms that (together with Telegram) mean a post is fully published.
+# The concrete set is per-project (see projects.json); this constant is only a
+# fallback for the default gaming project when a post has no project set.
 _REQUIRED_VIDEO_PLATFORMS = {"instagram", "instagram-ru", "youtube", "youtube-ru", "vk"}
 
 
@@ -666,7 +742,8 @@ def _maybe_cleanup_post_files(post_id: int) -> None:
         return
     if post.get("status") != "sent":
         return
-    if not _REQUIRED_VIDEO_PLATFORMS.issubset(_published_platforms(post)):
+    required = project_required_platforms(post.get("project")) or _REQUIRED_VIDEO_PLATFORMS
+    if not required.issubset(_published_platforms(post)):
         return
 
     _delete_post_files(post_id, post, reason="fully published")
@@ -1344,7 +1421,8 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
             progress(f"🇬🇧 EN title: {en_title}")
             progress("🇬🇧 EN: generating script…")
             en_script = await ai_adapter.generate_video_script(
-                post_text=post["post_text"], article_title=en_title, lang="en"
+                post_text=post["post_text"], article_title=en_title, lang="en",
+                prompt=config.project_ai(post.get("project") or "gaming", "video_script"),
             )
             en_script = re.sub(r'<[^>]+>', '', en_script or '').strip()
             reason = _script_invalid(en_script)
@@ -1367,6 +1445,7 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
                 post_text=post.get("ru_post_text") or post["post_text"],
                 article_title=post["article_title"],
                 lang="ru",
+                prompt=config.project_ai(post.get("project") or "gaming", "video_script"),
             )
             ru_script = re.sub(r'<[^>]+>', '', ru_script or '').strip()
             reason = _script_invalid(ru_script)
@@ -1387,11 +1466,17 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
         progress("Step 2/4: Synthesizing voices…")
         if check_cancel(): raise InterruptedError("Cancelled")
         title = post.get("article_title", "")
+        project = post.get("project") or "gaming"
         with _tasks_lock:
             search_query = _yt_queries.pop(post_id, None)
         user_query = bool(search_query)
         if not search_query:
-            search_query = await ai_adapter.extract_game_name(title)
+            # Build the YouTube search query using this project's prompt
+            # (projects.json → ai.search_query); falls back to game-title
+            # extraction when the project has no override.
+            search_query = await ai_adapter.extract_search_query(
+                title, config.project_ai(project, "search_query")
+            )
         if not search_query:
             first_chunk = re.split(r"[:–—|]", title)[0].strip()
             latin_tokens = [t for t in first_chunk.split() if re.match(r"^[A-Za-z0-9'&.]+$", t)]
@@ -1604,6 +1689,11 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
             progress_cb(msg, type_)
     en_path = db.get_generated_video_path(post_id)
     ru_path = db.get_generated_video_path_ru(post_id)
+    project = post.get("project") or "gaming"
+
+    def _creds(key: str) -> dict:
+        """Resolve this project's credentials for a platform key."""
+        return platform_credentials(project, key)
 
     def _caption_en() -> str:
         raw = _clean_text(post.get("post_text", ""))
@@ -1640,7 +1730,9 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
                 translated = await ai_adapter.translate_title_to_english(raw_title)
                 if translated and not re.search(r'[а-яёА-ЯЁ]', translated):
                     raw_title = translated
-            hook = await ai_adapter.generate_thumbnail_hook(raw_title, lang=lang)
+            hook = await ai_adapter.generate_thumbnail_hook(
+                raw_title, lang=lang, prompt=config.project_ai(project, "thumbnail_hook")
+            )
             # Final safety net: never burn Cyrillic text onto an EN thumbnail.
             if lang == "en" and (not hook or re.search(r'[а-яёА-ЯЁ]', hook)):
                 logger.warning("_make_thumb EN: hook is empty or contains Cyrillic ('%s') — skipping thumbnail", hook[:60])
@@ -1660,8 +1752,11 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         progress("Generating thumbnail…")
         thumb = await _make_thumb(en_path, lang="en", title=_en_title_clean)
         progress("Uploading reel to Instagram…")
+        _cr = _creds("instagram")
         media_id = await instagram_publisher.publish_reel(
-            video_path=en_path, caption=_caption_en(), cover_image_path=thumb,
+            video_path=en_path, caption=_caption_en(),
+            user_id=_cr.get("user_id") or None, access_token=_cr.get("token") or None,
+            cover_image_path=thumb,
         )
         return f"Instagram EN — Media ID: {media_id}"
 
@@ -1671,9 +1766,11 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         progress("Generating thumbnail…")
         thumb = await _make_thumb(ru_path, lang="ru")
         progress("Uploading reel to Instagram RU…")
+        _cr = _creds("instagram-ru")
         media_id = await instagram_publisher.publish_reel(
             video_path=ru_path, caption=_caption_ru(),
-            user_id=INSTAGRAM_USER_ID_RU, access_token=INSTAGRAM_ACCESS_TOKEN_RU,
+            user_id=(_cr.get("user_id") or INSTAGRAM_USER_ID_RU),
+            access_token=(_cr.get("token") or INSTAGRAM_ACCESS_TOKEN_RU),
             cover_image_path=thumb,
         )
         return f"Instagram RU — Media ID: {media_id}"
@@ -1684,8 +1781,10 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         if len(slides) < 2:
             raise ValueError("EN carousel not ready — generate carousel first (need ≥2 slides).")
         progress(f"Uploading {len(slides)}-slide carousel to Instagram EN…")
+        _cr = _creds("instagram")
         media_id = await instagram_carousel_publisher.publish_carousel(
             image_paths=slides, caption=_caption_en(),
+            user_id=_cr.get("user_id") or None, access_token=_cr.get("token") or None,
         )
         return f"IG Carousel EN — Media ID: {media_id}"
 
@@ -1695,9 +1794,11 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         if len(slides) < 2:
             raise ValueError("RU carousel not ready — generate carousel first (need ≥2 slides).")
         progress(f"Uploading {len(slides)}-slide carousel to Instagram RU…")
+        _cr = _creds("instagram-ru")
         media_id = await instagram_carousel_publisher.publish_carousel(
             image_paths=slides, caption=_caption_ru(),
-            user_id=INSTAGRAM_USER_ID_RU, access_token=INSTAGRAM_ACCESS_TOKEN_RU,
+            user_id=(_cr.get("user_id") or INSTAGRAM_USER_ID_RU),
+            access_token=(_cr.get("token") or INSTAGRAM_ACCESS_TOKEN_RU),
         )
         return f"IG Carousel RU — Media ID: {media_id}"
 
@@ -1713,8 +1814,10 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         yt_thumb = await _make_thumb(en_path, lang="en", title=yt_title)
         progress("Uploading Short to YouTube…")
         desc = _clean_text(post.get("post_text", "")).rstrip() + "\n\nMore news in the telegram channel, link in the bio"
+        _cr = _creds("youtube")
         video_id = await youtube_publisher.upload_short(
             video_path=en_path, title=yt_title, description=desc, tags=_tags(),
+            token_file=(_cr.get("token_file") or config.YOUTUBE_TOKEN_FILE),
             thumbnail_path=yt_thumb,
         )
         return f"YouTube EN — https://youtu.be/{video_id}"
@@ -1729,8 +1832,10 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         desc = _clean_text(
             post.get("ru_post_text") or post.get("post_text", "")
         ).rstrip() + "\n\nБольше новостей в telegram-канале, ссылка в био"
-        video_id = await youtube_publisher.upload_short_ru(
+        _cr = _creds("youtube-ru")
+        video_id = await youtube_publisher.upload_short(
             video_path=ru_path, title=yt_title, description=desc, tags=_tags("ru_post_text"),
+            token_file=(_cr.get("token_file") or config.YOUTUBE_TOKEN_FILE_RU),
             thumbnail_path=yt_thumb,
         )
         return f"YouTube RU — https://youtu.be/{video_id}"
@@ -1745,9 +1850,11 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         vk_desc = _clean_text(
             post.get("ru_post_text") or post.get("post_text", "")
         ).rstrip() + "\n\nБольше новостей в telegram-канале, ссылка в био"
+        _cr = _creds("vk")
         vk_url = await vk_publisher.upload_video(
             video_path=ru_path, title=vk_title, description=vk_desc,
             cover_image_path=vk_thumb,
+            access_token=(_cr.get("token") or None), group_id=(_cr.get("group") or None),
         )
         return f"VK — {vk_url}"
 
@@ -1765,18 +1872,23 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
             progress("Generating EN thumbnail…")
             en_thumb = await _make_thumb(en_path, lang="en", title=en_title)
             en_desc = _clean_text(post.get("post_text", "")).rstrip() + "\n\nMore news in the telegram channel, link in the bio"
-            if instagram_publisher.is_configured():
+            _cr_ig = _creds("instagram")
+            if _cr_ig.get("user_id") and _cr_ig.get("token"):
                 progress("Starting Instagram EN upload…")
                 tasks["Instagram EN"] = asyncio.create_task(
                     instagram_publisher.publish_reel(
-                        video_path=en_path, caption=_caption_en(), cover_image_path=en_thumb,
+                        video_path=en_path, caption=_caption_en(),
+                        user_id=_cr_ig.get("user_id"), access_token=_cr_ig.get("token"),
+                        cover_image_path=en_thumb,
                     )
                 )
-            if youtube_publisher.is_configured():
+            _cr_yt = _creds("youtube")
+            if _cr_yt.get("token_file"):
                 progress("Starting YouTube EN upload…")
                 tasks["YouTube EN"] = asyncio.create_task(
                     youtube_publisher.upload_short(
                         video_path=en_path, title=en_title, description=en_desc, tags=_tags(),
+                        token_file=_cr_yt.get("token_file"),
                         thumbnail_path=en_thumb,
                     )
                 )
@@ -1785,30 +1897,35 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
             ru_title = (post.get("article_title") or f"Gaming news #{post_id}")[:100]
             progress("Generating RU thumbnail…")
             ru_thumb = await _make_thumb(ru_path, lang="ru")
-            if instagram_publisher.is_configured_ru():
+            _cr_ig_ru = _creds("instagram-ru")
+            if _cr_ig_ru.get("user_id") and _cr_ig_ru.get("token"):
                 progress("Starting Instagram RU upload…")
                 tasks["Instagram RU"] = asyncio.create_task(
                     instagram_publisher.publish_reel(
                         video_path=ru_path, caption=_caption_ru(),
-                        user_id=INSTAGRAM_USER_ID_RU, access_token=INSTAGRAM_ACCESS_TOKEN_RU,
+                        user_id=_cr_ig_ru.get("user_id"), access_token=_cr_ig_ru.get("token"),
                         cover_image_path=ru_thumb,
                     )
                 )
-            if youtube_publisher.is_configured_ru():
+            _cr_yt_ru = _creds("youtube-ru")
+            if _cr_yt_ru.get("token_file"):
                 progress("Starting YouTube RU upload…")
                 tasks["YouTube RU"] = asyncio.create_task(
-                    youtube_publisher.upload_short_ru(
+                    youtube_publisher.upload_short(
                         video_path=ru_path, title=ru_title,
                         description=_caption_ru(), tags=_tags("ru_post_text"),
+                        token_file=_cr_yt_ru.get("token_file"),
                         thumbnail_path=ru_thumb,
                     )
                 )
-            if vk_publisher.is_configured():
+            _cr_vk = _creds("vk")
+            if _cr_vk.get("token"):
                 progress("Starting VK upload…")
                 tasks["VK"] = asyncio.create_task(
                     vk_publisher.upload_video(
                         video_path=ru_path, title=ru_title, description=_caption_ru(),
                         cover_image_path=ru_thumb,
+                        access_token=_cr_vk.get("token"), group_id=(_cr_vk.get("group") or None),
                     )
                 )
 

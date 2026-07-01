@@ -11,6 +11,8 @@ client_secrets.json
 client_secret_*.json
 youtube_token.json
 youtube_token_ru.json
+ufc_youtube_token.json
+projects.json
 tiktok_session/
 
 # MuseTalk talking-head (isolated env, large model weights, render caches)

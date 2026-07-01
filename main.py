@@ -32,9 +32,13 @@ from config import (
     TELEGRAM_LOCAL_API_URL,
     TELEGRAM_LOCAL_API_FILE_URL,
     TELEGRAM_LOCAL_MODE,
+    get_project,
+    project_ai,
+    project_names,
     setup_dirs,
 )
-from scraper import download_images, download_videos, get_latest_article_links, scrape_article
+from scraper import download_images, download_videos
+from sources import get_source
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,12 +62,14 @@ logger = logging.getLogger(__name__)
 # Core pipeline: check news → scrape → adapt → schedule
 # ---------------------------------------------------------------------------
 
-async def process_article(app: Application, article_url: str, article_title: str) -> None:
+async def process_article(app: Application, article_url: str, article_title: str,
+                          project_name: str = "gaming") -> None:
     """Full pipeline for a single new article."""
-    logger.info("Обрабатываем статью: %s", article_url)
+    logger.info("Обрабатываем статью [%s]: %s", project_name, article_url)
 
+    source = get_source(get_project(project_name).get("source"))
     async with aiohttp.ClientSession() as session:
-        article = await scrape_article(session, article_url)
+        article = await source.scrape_article(session, article_url)
         if not article:
             logger.warning("Не удалось спарсить статью: %s", article_url)
             return
@@ -81,8 +87,8 @@ async def process_article(app: Application, article_url: str, article_title: str
 
     # Adapt via AI (English for main channel, Russian for second channel)
     post_text, ru_post_text = await asyncio.gather(
-        adapt_article(article.title, article.text),
-        adapt_article_ru(article.title, article.text),
+        adapt_article(article.title, article.text, prompt=project_ai(project_name, "post_text_en")),
+        adapt_article_ru(article.title, article.text, prompt=project_ai(project_name, "post_text_ru")),
     )
 
     # Schedule the post (no delay — admin approves to publish immediately)
@@ -95,8 +101,9 @@ async def process_article(app: Application, article_url: str, article_title: str
         scheduled_at=scheduled_at,
         video_paths=video_paths,
         ru_post_text=ru_post_text,
+        project=project_name,
     )
-    db.mark_article_seen(article_url, article.title)
+    db.mark_article_seen(article_url, article.title, project_name)
 
     logger.info("Пост #%d создан, ожидает проверки", post_id)
 
@@ -113,29 +120,42 @@ async def process_article(app: Application, article_url: str, article_title: str
     )
 
 
-async def check_news(app: Application) -> None:
-    """Check playground.ru/news for new articles."""
-    logger.info("Проверка новых статей на playground.ru...")
+async def check_news(app: Application, project_name: str = "gaming") -> None:
+    """Check a single project's news source for new articles."""
+    proj = get_project(project_name)
+    source = get_source(proj.get("source"))
+    logger.info("Проверка новых статей проекта '%s'...", project_name)
     try:
         async with aiohttp.ClientSession() as session:
-            articles = await get_latest_article_links(session)
+            articles = await source.get_latest_links(session)
 
         new_count = 0
+        # Relevance filter is driven by projects.json → ai.relevance. When no
+        # config is present, only the default gaming project filters (legacy
+        # behaviour); other topic-specific sources are already on-topic.
+        relevance = project_ai(project_name, "relevance")
+        if relevance is None:
+            do_relevance = (project_name == "gaming")
+        elif isinstance(relevance, dict):
+            do_relevance = bool(relevance.get("enabled", True))
+        else:
+            do_relevance = bool(relevance)
         for art in articles:
-            if not db.is_article_seen(art["url"]):
-                # AI relevance check — skip non-gaming articles
-                if not await is_gaming_related(art["title"]):
-                    logger.info("AI: не игровая тематика, пропускаем: %s", art["title"])
-                    db.mark_article_seen(art["url"], art["title"])
-                    continue
-                new_count += 1
-                await process_article(app, art["url"], art["title"])
-                # Small delay between articles to avoid hammering the site or Claude
-                await asyncio.sleep(3)
+            if db.is_article_seen(art["url"]):
+                continue
+            # AI relevance check (if enabled for this project).
+            if do_relevance and not await is_gaming_related(art["title"], prompt=relevance):
+                logger.info("AI: не по теме проекта, пропускаем: %s", art["title"])
+                db.mark_article_seen(art["url"], art["title"], project_name)
+                continue
+            new_count += 1
+            await process_article(app, art["url"], art["title"], project_name)
+            # Small delay between articles to avoid hammering the site or Claude
+            await asyncio.sleep(3)
 
-        logger.info("Проверка завершена. Новых статей: %d", new_count)
+        logger.info("Проверка '%s' завершена. Новых статей: %d", project_name, new_count)
     except Exception as exc:
-        logger.exception("Ошибка при проверке новостей: %s", exc)
+        logger.exception("Ошибка при проверке новостей проекта '%s': %s", project_name, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +163,8 @@ async def check_news(app: Application) -> None:
 # ---------------------------------------------------------------------------
 
 async def job_check_news(context) -> None:
-    await check_news(context.application)
+    project_name = context.job.data if context.job and context.job.data else "gaming"
+    await check_news(context.application, project_name)
 
 
 # ---------------------------------------------------------------------------
@@ -197,16 +218,27 @@ def main() -> None:
 
     job_queue = app.job_queue
 
-    # On startup: light check after 15 seconds
-    job_queue.run_repeating(
-        job_check_news,
-        interval=CHECK_INTERVAL_MINUTES * 60,
-        first=15,
-    )
+    # On startup: schedule one repeating news-check per project, each with its
+    # own interval (falls back to the global CHECK_INTERVAL_MINUTES).
+    names = project_names() or ["gaming"]
+    for offset, name in enumerate(names):
+        proj = get_project(name)
+        try:
+            interval_min = int(proj.get("check_interval_minutes", CHECK_INTERVAL_MINUTES))
+        except (TypeError, ValueError):
+            interval_min = CHECK_INTERVAL_MINUTES
+        job_queue.run_repeating(
+            job_check_news,
+            interval=interval_min * 60,
+            first=15 + offset * 5,  # stagger project checks a few seconds apart
+            name=f"check-{name}",
+            data=name,
+        )
+        logger.info("Проект '%s': проверка каждые %d мин", name, interval_min)
 
     logger.info(
-        "Бот запущен. Проверка каждые %d мин. Публикация по Approve.",
-        CHECK_INTERVAL_MINUTES,
+        "Бот запущен. Проектов: %d. Публикация по Approve.",
+        len(names),
     )
 
     app.run_polling(drop_pending_updates=True)

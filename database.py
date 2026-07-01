@@ -58,6 +58,8 @@ def init_db() -> None:
             "ALTER TABLE scheduled_posts ADD COLUMN generated_video_path_ru TEXT DEFAULT NULL",
             "ALTER TABLE scheduled_posts ADD COLUMN carousel_paths_en TEXT DEFAULT '[]'",
             "ALTER TABLE scheduled_posts ADD COLUMN carousel_paths_ru TEXT DEFAULT '[]'",
+            "ALTER TABLE scheduled_posts ADD COLUMN project TEXT DEFAULT 'gaming'",
+            "ALTER TABLE seen_articles ADD COLUMN project TEXT DEFAULT 'gaming'",
         ]
         for _sql in _migrations:
             try:
@@ -74,11 +76,11 @@ def is_article_seen(url: str) -> bool:
         return row is not None
 
 
-def mark_article_seen(url: str, title: str) -> None:
+def mark_article_seen(url: str, title: str, project: str = "gaming") -> None:
     with get_conn() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO seen_articles (url, title) VALUES (?, ?)",
-            (url, title),
+            "INSERT OR IGNORE INTO seen_articles (url, title, project) VALUES (?, ?, ?)",
+            (url, title, project),
         )
 
 
@@ -92,14 +94,15 @@ def create_scheduled_post(
     scheduled_at: datetime,
     video_paths: list[str] | None = None,
     ru_post_text: str | None = None,
+    project: str = "gaming",
 ) -> int:
     post_text = _normalize_tg_html(post_text) or ""
     ru_post_text = _normalize_tg_html(ru_post_text)
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO scheduled_posts
-               (article_url, article_title, post_text, ru_post_text, image_paths, video_paths, scheduled_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (article_url, article_title, post_text, ru_post_text, image_paths, video_paths, scheduled_at, project)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 article_url,
                 article_title,
@@ -108,6 +111,7 @@ def create_scheduled_post(
                 json.dumps(image_paths),
                 json.dumps(video_paths or []),
                 scheduled_at.isoformat(),
+                project,
             ),
         )
         return cur.lastrowid

@@ -103,6 +103,8 @@ async def upload_video(
     *,
     cover_image_path: str | None = None,
     wallpost: bool | None = None,
+    access_token: str | None = None,
+    group_id: str | None = None,
 ) -> str:
     """
     Загрузить *video_path* в сообщество VK (если задан VK_GROUP_ID),
@@ -111,14 +113,17 @@ async def upload_video(
     *cover_image_path* — путь к картинке-обложке (превью); если задан —
     устанавливается как обложка видео после загрузки.
 
+    *access_token* / *group_id* — переопределение кредов для конкретного
+    проекта (если не заданы — берутся глобальные VK_ACCESS_TOKEN / VK_GROUP_ID).
+
     Если *wallpost* (или VK_WALLPOST по умолчанию) и задан VK_GROUP_ID — после
     загрузки публикует запись с клипом на стене сообщества.
 
     Возвращает публичную ссылку на видео (https://vk.com/video{owner}_{id}).
     Бросает RuntimeError при ошибке.
     """
-    tok = VK_ACCESS_TOKEN
-    grp = VK_GROUP_ID
+    tok = access_token or VK_ACCESS_TOKEN
+    grp = group_id if group_id is not None else VK_GROUP_ID
     do_wallpost = VK_WALLPOST if wallpost is None else wallpost
     if not tok:
         raise RuntimeError(

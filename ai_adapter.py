@@ -1,9 +1,130 @@
 import re
 import logging
 import aiohttp
-from config import OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_VIDEO_MODEL
+from config import (
+    OLLAMA_BASE_URL,
+    OLLAMA_MODEL,
+    OLLAMA_VIDEO_MODEL,
+    LLM_BACKEND,
+    GEMINI_API_KEY,
+    GEMINI_TEXT_MODEL,
+    GEMINI_VIDEO_MODEL,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# Map local Ollama model names to their cloud (Gemini API) equivalents so the
+# same call sites work regardless of backend.
+def _gemini_model_for(ollama_model: str | None) -> str:
+    if ollama_model and ollama_model == OLLAMA_VIDEO_MODEL:
+        return GEMINI_VIDEO_MODEL
+    return GEMINI_TEXT_MODEL
+
+
+async def _gemini_chat(payload: dict, timeout: int) -> dict:
+    """Call Google's Generative Language API with an Ollama-shaped ``payload``.
+
+    Returns an Ollama-shaped dict ``{"message": {"content": str}}`` so callers
+    don't need to know which backend produced the text.
+    """
+    messages = payload.get("messages", [])
+    system_parts = [m["content"] for m in messages if m.get("role") == "system" and m.get("content")]
+    contents = []
+    for m in messages:
+        role = m.get("role")
+        if role == "system":
+            continue
+        g_role = "model" if role == "assistant" else "user"
+        contents.append({"role": g_role, "parts": [{"text": m.get("content", "")}]})
+
+    model = _gemini_model_for(payload.get("model"))
+    body: dict = {"contents": contents}
+    if system_parts:
+        system_text = "\n\n".join(system_parts)
+        # Gemma models (served via the same API) don't support systemInstruction —
+        # fold the system prompt into the first user turn instead.
+        if model.lower().startswith("gemma"):
+            if contents and contents[0].get("parts"):
+                first = contents[0]["parts"][0]
+                first["text"] = f"{system_text}\n\n{first.get('text', '')}"
+            else:
+                contents.insert(0, {"role": "user", "parts": [{"text": system_text}]})
+        else:
+            body["systemInstruction"] = {"parts": [{"text": system_text}]}
+    opts = payload.get("options") or {}
+    num_predict = opts.get("num_predict")
+    if isinstance(num_predict, int) and num_predict > 0:
+        body["generationConfig"] = {"maxOutputTokens": num_predict}
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            url,
+            json=body,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=timeout),
+        ) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+        # Gemma/Gemini "thinking" models return reasoning parts flagged
+        # ``"thought": true`` alongside the final answer — keep only the answer.
+        text = "".join(
+            p.get("text", "") for p in parts if not p.get("thought")
+        )
+    except (KeyError, IndexError):
+        text = ""
+    return {"message": {"content": text}}
+
+
+async def _chat_raw(payload: dict, timeout: int) -> dict:
+    """Send a chat-completion request to the configured LLM backend.
+
+    Routes to Google Gemini when ``LLM_BACKEND == 'gemini'``, otherwise to the
+    local Ollama server. Always returns an Ollama-shaped dict
+    ``{"message": {"content": str}}``.
+    """
+    if LLM_BACKEND == "gemini":
+        return await _gemini_chat(payload, timeout=timeout)
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{OLLAMA_BASE_URL}/api/chat",
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=timeout),
+        ) as resp:
+            resp.raise_for_status()
+            return await resp.json()
+
+
+def _render_prompt(template: str, **tokens) -> str:
+    """Substitute {token} placeholders in a project-supplied prompt template."""
+    out = template
+    for k, v in tokens.items():
+        out = out.replace("{" + k + "}", str(v))
+    return out
+
+
+def _prompt_parts(cfg, lang: str | None = None):
+    """Normalize an AI-prompt override into ``(system, user)`` strings.
+
+    Accepts a bare string (→ user), a ``{"system", "user"}`` dict, or a
+    per-language ``{"en": {...}, "ru": {...}}`` mapping. Returns
+    ``(None, None)`` when nothing usable is supplied so callers fall back to
+    their built-in default prompts.
+    """
+    if cfg is None:
+        return None, None
+    if isinstance(cfg, str):
+        return None, cfg
+    if isinstance(cfg, dict):
+        if lang and isinstance(cfg.get(lang), (str, dict)):
+            return _prompt_parts(cfg[lang])
+        return cfg.get("system"), cfg.get("user")
+    return None, None
+
 
 
 def _md_to_html(text: str) -> str:
@@ -62,59 +183,54 @@ SYSTEM_PROMPT = (
 )
 
 
-async def adapt_article_ru(title: str, body: str) -> str:
+async def adapt_article_ru(title: str, body: str, prompt=None) -> str:
     """
     Создаёт русскоязычный Telegram-пост из русской статьи.
-    """
-    user_message = (
-        "Перепиши следующую игровую новость как пост для русскоязычного Telegram-канала.\n"
-        "ВАЖНО: Весь ответ должен быть исключительно на русском языке.\n\n"
-        "Структура поста (строго в таком порядке):\n"
-        "1. <b>Заголовок</b> — цепляющий, с сутью новости. Можно добавить 1 эмодзи в конец заголовка.\n"
-        "2. Лид — 1–2 строки: что произошло и почему важно.\n"
-        "3. Детали списком через тире (—): что добавили/показали, дата, механики, платформы — только то что есть в статье.\n"
-        "4. Реакции/факты (если есть): что заметили игроки, реакция комьюнити, утечки.\n"
-        "5. Итог — 1 строка с ожиданиями или выводом.\n"
-        "6. Пустая строка, затем 5–8 хэштегов через пробел.\n\n"
-        "Правила:\n"
-        "- Telegram HTML: <b>жирный</b> только для заголовка, <i>курсив</i> для одной ключевой детали\n"
-        "- Максимум 750 символов включая теги (будет добавлен футер, итого не более 900)\n"
-        "- Без упоминания источника\n\n"
-        f"Заголовок: {title}\n\nТекст:\n{body[:4000]}\n\n"
-        "Напиши Telegram-пост на русском:"
-    )
 
-    payload = {
-        "model": OLLAMA_MODEL,
-        "messages": [
-            {"role": "system", "content": (
-                "Ты опытный редактор игровых новостей. Пишешь живые, увлекательные посты "
-                "для русскоязычной аудитории. Только русский язык в ответе."
-            )},
-            {"role": "user", "content": user_message},
-        ],
-        "stream": False,
-        "options": {"num_predict": 8000, "num_ctx": 4096},
-    }
+    ``prompt`` — необязательный переопределяющий промпт проекта (из projects.json).
+    """
+    _sys, _user = _prompt_parts(prompt)
+    default_system = (
+        "Ты опытный редактор игровых новостей. Пишешь живые, увлекательные посты "
+        "для русскоязычной аудитории. Только русский язык в ответе."
+    )
+    if _user:
+        user_message = _render_prompt(_user, title=title, body=body[:4000])
+    else:
+        user_message = (
+            "Перепиши следующую игровую новость как пост для русскоязычного Telegram-канала.\n"
+            "ВАЖНО: Весь ответ должен быть исключительно на русском языке.\n\n"
+            "Структура поста (строго в таком порядке):\n"
+            "1. <b>Заголовок</b> — цепляющий, с сутью новости. Можно добавить 1 эмодзи в конец заголовка.\n"
+            "2. Лид — 1–2 строки: что произошло и почему важно.\n"
+            "3. Детали списком через тире (—): что добавили/показали, дата, механики, платформы — только то что есть в статье.\n"
+            "4. Реакции/факты (если есть): что заметили игроки, реакция комьюнити, утечки.\n"
+            "5. Итог — 1 строка с ожиданиями или выводом.\n"
+            "6. Пустая строка, затем 5–8 хэштегов через пробел.\n\n"
+            "Правила:\n"
+            "- Telegram HTML: <b>жирный</b> только для заголовка, <i>курсив</i> для одной ключевой детали\n"
+            "- Максимум 750 символов включая теги (будет добавлен футер, итого не более 900)\n"
+            "- Без упоминания источника\n\n"
+            f"Заголовок: {title}\n\nТекст:\n{body[:4000]}\n\n"
+            "Напиши Telegram-пост на русском:"
+        )
+
+    messages = [
+        {"role": "system", "content": (_sys or default_system)},
+        {"role": "user", "content": user_message},
+    ]
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{OLLAMA_BASE_URL}/api/chat",
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=300),
-            ) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-                post_text = _trim_post_text(_sanitize_telegram_html(_md_to_html(data["message"]["content"].strip())))
-                # Validate: must have more than just a headline + hashtags (>150 chars body)
-                body_only = re.sub(r'<[^>]+>', '', post_text).strip()
-                body_only = re.sub(r'#\S+', '', body_only).strip()
-                if not post_text or len(body_only) < 100:
-                    logger.warning("Gemma (RU) вернул только заголовок (%d симв.), повтор с упрощённым промптом", len(post_text))
-                    raise ValueError("too short")
-                logger.info("Gemma (RU) адаптировал статью: '%s' (%d симв.)", title[:60], len(post_text))
-                return post_text
+        content = await _call_ollama_chat(messages, num_predict=8000, num_ctx=4096, timeout=300)
+        post_text = _trim_post_text(_sanitize_telegram_html(_md_to_html(content)))
+        # Validate: must have more than just a headline + hashtags (>150 chars body)
+        body_only = re.sub(r'<[^>]+>', '', post_text).strip()
+        body_only = re.sub(r'#\S+', '', body_only).strip()
+        if not post_text or len(body_only) < 100:
+            logger.warning("Gemma (RU) вернул только заголовок (%d симв.), повтор с упрощённым промптом", len(post_text))
+            raise ValueError("too short")
+        logger.info("Gemma (RU) адаптировал статью: '%s' (%d симв.)", title[:60], len(post_text))
+        return post_text
     except ValueError:
         # Retry with a simpler prompt that the model can't misinterpret
         simple_prompt = (
@@ -123,76 +239,64 @@ async def adapt_article_ru(title: str, body: str) -> str:
             f"Заголовок: {title}\n\nТекст: {body[:2000]}\n\nПост:"
         )
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{OLLAMA_BASE_URL}/api/chat",
-                    json={"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": simple_prompt}],
-                          "stream": False,
-                          "options": {"num_predict": 6000, "num_ctx": 4096}},
-                    timeout=aiohttp.ClientTimeout(total=300),
-                ) as resp:
-                    resp.raise_for_status()
-                    data = await resp.json()
-                    post_text = _trim_post_text(_sanitize_telegram_html(_md_to_html(data["message"]["content"].strip())))
-                    if post_text:
-                        logger.info("Gemma (RU) retry OK: '%s' (%d симв.)", title[:60], len(post_text))
-                        return post_text
+            content = await _call_ollama_chat(
+                [{"role": "user", "content": simple_prompt}],
+                num_predict=6000, num_ctx=4096, timeout=300,
+            )
+            post_text = _trim_post_text(_sanitize_telegram_html(_md_to_html(content)))
+            if post_text:
+                logger.info("Gemma (RU) retry OK: '%s' (%d симв.)", title[:60], len(post_text))
+                return post_text
         except Exception as exc2:
             logger.error("Gemma (RU) retry failed: %s", exc2)
         return f"<b>{title}</b>\n\n#игры #новости #gaming"
 
 
-async def adapt_article(title: str, body: str) -> str:
+async def adapt_article(title: str, body: str, prompt=None) -> str:
     """
     Translate, rephrase, and adapt the Russian article into an English Telegram post.
     Uses local Ollama — no API key required.
-    """
-    user_message = (
-        "Transform the following Russian gaming news into an English Telegram post.\n"
-        "IMPORTANT: Your entire response must be in English only.\n\n"
-        "Post structure (follow this order):\n"
-        "1. <b>Headline</b> — punchy, captures the news. You may add 1 emoji at the end of the headline.\n"
-        "2. Lead — 1–2 lines: what happened and why it matters.\n"
-        "3. Details as a bullet list with em-dashes (—): what was shown/added, release date, mechanics, platforms — only facts from the article.\n"
-        "4. Reactions/facts (if available): what fans noticed, community reaction, leaks.\n"
-        "5. Conclusion — 1 line with takeaway or expectations.\n"
-        "6. Blank line, then 5–8 hashtags separated by spaces.\n\n"
-        "Rules:\n"
-        "- Telegram HTML: <b>bold</b> for headline only, <i>italic</i> for one key detail\n"
-        "- Maximum 750 characters total including tags (a footer will be appended, total must stay under 900)\n"
-        "- No emojis except in the headline. Do not mention the source website.\n\n"
-        f"Title: {title}\n\nBody:\n{body[:4000]}\n\n"
-        "Write the Telegram post now:"
-    )
 
-    payload = {
-        "model": OLLAMA_MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        "stream": False,
-        "options": {"num_predict": 8000, "num_ctx": 4096},
-    }
+    ``prompt`` — optional per-project prompt override (from projects.json).
+    """
+    _sys, _user = _prompt_parts(prompt)
+    if _user:
+        user_message = _render_prompt(_user, title=title, body=body[:4000])
+    else:
+        user_message = (
+            "Transform the following Russian gaming news into an English Telegram post.\n"
+            "IMPORTANT: Your entire response must be in English only.\n\n"
+            "Post structure (follow this order):\n"
+            "1. <b>Headline</b> — punchy, captures the news. You may add 1 emoji at the end of the headline.\n"
+            "2. Lead — 1–2 lines: what happened and why it matters.\n"
+            "3. Details as a bullet list with em-dashes (—): what was shown/added, release date, mechanics, platforms — only facts from the article.\n"
+            "4. Reactions/facts (if available): what fans noticed, community reaction, leaks.\n"
+            "5. Conclusion — 1 line with takeaway or expectations.\n"
+            "6. Blank line, then 5–8 hashtags separated by spaces.\n\n"
+            "Rules:\n"
+            "- Telegram HTML: <b>bold</b> for headline only, <i>italic</i> for one key detail\n"
+            "- Maximum 750 characters total including tags (a footer will be appended, total must stay under 900)\n"
+            "- No emojis except in the headline. Do not mention the source website.\n\n"
+            f"Title: {title}\n\nBody:\n{body[:4000]}\n\n"
+            "Write the Telegram post now:"
+        )
+
+    messages = [
+        {"role": "system", "content": (_sys or SYSTEM_PROMPT)},
+        {"role": "user", "content": user_message},
+    ]
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{OLLAMA_BASE_URL}/api/chat",
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=300),
-            ) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-                post_text = _trim_post_text(_sanitize_telegram_html(_md_to_html(data["message"]["content"].strip())))
-                # Validate: must have more than just a headline + hashtags (>150 chars body)
-                body_only = re.sub(r'<[^>]+>', '', post_text).strip()
-                body_only = re.sub(r'#\S+', '', body_only).strip()
-                if not post_text or len(body_only) < 100:
-                    logger.warning("Gemma (EN) вернул только заголовок (%d симв.), повтор с упрощённым промптом", len(post_text))
-                    raise ValueError("too short")
-                logger.info("Gemma адаптировал статью: '%s'  (%d симв.)", title[:60], len(post_text))
-                return post_text
+        content = await _call_ollama_chat(messages, num_predict=8000, num_ctx=4096, timeout=300)
+        post_text = _trim_post_text(_sanitize_telegram_html(_md_to_html(content)))
+        # Validate: must have more than just a headline + hashtags (>150 chars body)
+        body_only = re.sub(r'<[^>]+>', '', post_text).strip()
+        body_only = re.sub(r'#\S+', '', body_only).strip()
+        if not post_text or len(body_only) < 100:
+            logger.warning("Gemma (EN) вернул только заголовок (%d симв.), повтор с упрощённым промптом", len(post_text))
+            raise ValueError("too short")
+        logger.info("Gemma адаптировал статью: '%s'  (%d симв.)", title[:60], len(post_text))
+        return post_text
     except ValueError:
         simple_prompt = (
             f"Write a Telegram post in English about this gaming news.\n"
@@ -200,20 +304,14 @@ async def adapt_article(title: str, body: str) -> str:
             f"Title: {title}\n\nBody: {body[:2000]}\n\nPost:"
         )
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{OLLAMA_BASE_URL}/api/chat",
-                    json={"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": simple_prompt}],
-                          "stream": False,
-                          "options": {"num_predict": 8000, "num_ctx": 4096}},
-                    timeout=aiohttp.ClientTimeout(total=300),
-                ) as resp:
-                    resp.raise_for_status()
-                    data = await resp.json()
-                    post_text = _trim_post_text(_sanitize_telegram_html(_md_to_html(data["message"]["content"].strip())))
-                    if post_text:
-                        logger.info("Gemma (EN) retry OK: '%s' (%d симв.)", title[:60], len(post_text))
-                        return post_text
+            content = await _call_ollama_chat(
+                [{"role": "user", "content": simple_prompt}],
+                num_predict=8000, num_ctx=4096, timeout=300,
+            )
+            post_text = _trim_post_text(_sanitize_telegram_html(_md_to_html(content)))
+            if post_text:
+                logger.info("Gemma (EN) retry OK: '%s' (%d симв.)", title[:60], len(post_text))
+                return post_text
         except Exception as exc2:
             logger.error("Gemma (EN) retry failed: %s", exc2)
         return f"{title}\n\n[AI processing failed. Please edit before publishing.]\n\n#gaming #news"
@@ -245,12 +343,14 @@ _GAMING_KEYWORDS = [
 ]
 
 
-async def is_gaming_related(title: str) -> bool:
+async def is_gaming_related(title: str, prompt=None) -> bool:
     """
     Ask Ollama whether a news article title is about video games.
     Returns True  → process the article.
     Returns False → skip it.
     Falls back to True (fail-open) if Ollama is unavailable.
+
+    ``prompt`` — optional per-project prompt override (from projects.json).
     """
     title_lower = title.lower()
     for kw in _GAMING_KEYWORDS:
@@ -258,39 +358,34 @@ async def is_gaming_related(title: str) -> bool:
             logger.info("AI фильтр [+] (keyword '%s'): '%s'", kw.strip(), title[:70])
             return True
 
-    user_message = (
-        "You are a gaming news filter for a Russian gaming news site. Answer with YES or NO only.\n\n"
-        "Answer YES if the title is about:\n"
-        "- Any video game (known or unknown), game update, patch, DLC, expansion\n"
-        "- Game development news, game engines, studios, publishers\n"
-        "- Game consoles, gaming hardware, peripherals\n"
-        "- Esports, streamers, game mods\n"
-        "- ANY title that could plausibly be a video game name\n\n"
-        "When in doubt — answer YES. Only answer NO if the title is clearly and obviously "
-        "about something unrelated to gaming: a non-gaming movie, TV series, smartphone, "
-        "tablet, or non-gaming consumer product.\n\n"
-        f"Title: {title}\n\n"
-        "Answer (YES or NO):"
-    )
-    payload = {
-        "model": OLLAMA_MODEL,
-        "messages": [{"role": "user", "content": user_message}],
-        "stream": False,
-        "options": {"num_predict": 2000, "num_ctx": 2048},
-    }
+    _sys, _user = _prompt_parts(prompt)
+    if _user:
+        user_message = _render_prompt(_user, title=title)
+    else:
+        user_message = (
+            "You are a gaming news filter for a Russian gaming news site. Answer with YES or NO only.\n\n"
+            "Answer YES if the title is about:\n"
+            "- Any video game (known or unknown), game update, patch, DLC, expansion\n"
+            "- Game development news, game engines, studios, publishers\n"
+            "- Game consoles, gaming hardware, peripherals\n"
+            "- Esports, streamers, game mods\n"
+            "- ANY title that could plausibly be a video game name\n\n"
+            "When in doubt — answer YES. Only answer NO if the title is clearly and obviously "
+            "about something unrelated to gaming: a non-gaming movie, TV series, smartphone, "
+            "tablet, or non-gaming consumer product.\n\n"
+            f"Title: {title}\n\n"
+            "Answer (YES or NO):"
+        )
+    _messages = [{"role": "user", "content": user_message}]
+    if _sys:
+        _messages.insert(0, {"role": "system", "content": _sys})
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{OLLAMA_BASE_URL}/api/chat",
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=120),
-            ) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-                answer = data["message"]["content"].strip().upper()
-                result = "YES" in answer
-                logger.info("AI фильтр [%s]: '%s'", "+" if result else "-", title[:70])
-                return result
+        answer = (await _call_ollama_chat(
+            _messages, num_predict=2000, num_ctx=2048, timeout=120
+        )).upper()
+        result = "YES" in answer
+        logger.info("AI фильтр [%s]: '%s'", "+" if result else "-", title[:70])
+        return result
     except Exception as exc:
         logger.warning("AI фильтр недоступен (%s), разрешаем статью: %s", exc, title[:70])
         return True  # fail-open: не блокируем если Ollama лежит
@@ -360,15 +455,8 @@ async def _call_ollama_chat(
     }
     if think is not None:
         payload["think"] = think
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            f"{OLLAMA_BASE_URL}/api/chat",
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=timeout),
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            return data["message"]["content"].strip()
+    data = await _chat_raw(payload, timeout=timeout)
+    return data["message"]["content"].strip()
 
 
 async def extract_game_name(article_title: str) -> str:
@@ -400,6 +488,68 @@ async def extract_game_name(article_title: str) -> str:
     except Exception as exc:
         logger.warning("extract_game_name failed: %s", exc)
     return ""
+
+
+async def extract_fighter_query(article_title: str) -> str:
+    """
+    Ask Ollama to extract the MMA/UFC fighter name(s) from a Russian headline
+    and build a Russian-language YouTube search query for their fight footage.
+
+    Returns a Russian query such as "Махачев против Гарри бой" or
+    "Волков лучшие моменты", or an empty string on failure.
+    """
+    user_message = (
+        "Дан заголовок новости о UFC/MMA на русском языке. Определи имя (или имена) "
+        "бойцов, о которых идёт речь, и составь короткий поисковый запрос для YouTube "
+        "на русском языке, чтобы найти видео их боёв.\n\n"
+        "ПРАВИЛА (по порядку):\n"
+        "1. Оставляй имена бойцов на русском языке — НЕ переводи и НЕ транслитерируй.\n"
+        "2. Если в заголовке двое бойцов-соперников, верни '<Боец A> против <Боец B> бой'.\n"
+        "3. Если упомянут только один боец, верни '<Боец> лучшие моменты'.\n"
+        "4. Используй фамилию бойца (или полное имя, если оно известно).\n"
+        "5. Верни ТОЛЬКО поисковый запрос на русском — без пояснений и лишних знаков.\n\n"
+        f"Заголовок: {article_title}\n\n"
+        "Поисковый запрос:"
+    )
+    try:
+        query = (await _call_ollama_chat(
+            [{"role": "user", "content": user_message}], num_predict=2000, timeout=120
+        )).strip('"\'')
+        if query and len(query) <= 80:
+            logger.info("AI fighter query: '%s' ← '%s'", query, article_title[:60])
+            return query
+    except Exception as exc:
+        logger.warning("extract_fighter_query failed: %s", exc)
+    return ""
+
+
+async def extract_search_query(article_title: str, prompt=None) -> str:
+    """
+    Build a YouTube search query from a headline using a per-project prompt.
+
+    ``prompt`` — optional prompt override (from projects.json). When absent,
+    falls back to the default game-title extraction (gaming project behaviour).
+    Returns the query string, or an empty string on failure.
+    """
+    _sys, _user = _prompt_parts(prompt)
+    if not _user:
+        # No project override → default gaming behaviour.
+        return await extract_game_name(article_title)
+    user_message = _render_prompt(_user, title=article_title)
+    _messages = [{"role": "user", "content": user_message}]
+    if _sys:
+        _messages.insert(0, {"role": "system", "content": _sys})
+    try:
+        query = (await _call_ollama_chat(
+            _messages, num_predict=2000, timeout=120
+        )).strip('"\'')
+        if query and len(query) <= 80:
+            logger.info("AI search query: '%s' ← '%s'", query, article_title[:60])
+            return query
+    except Exception as exc:
+        logger.warning("extract_search_query failed: %s", exc)
+    return ""
+
 
 
 async def translate_title_to_english(article_title: str) -> str:
@@ -434,12 +584,16 @@ async def translate_title_to_english(article_title: str) -> str:
     return ""
 
 
-async def generate_thumbnail_hook(article_title: str, lang: str = "ru") -> str:
+async def generate_thumbnail_hook(article_title: str, lang: str = "ru", prompt=None) -> str:
     """
     Generate a short, punchy, clickable thumbnail caption (2–3 words, ALL CAPS).
     lang: "ru" → Russian output, "en" → English output.
     Falls back to the original title on failure.
+
+    ``prompt`` — optional per-project prompt override (from projects.json),
+    may be per-language (``{"en": {...}, "ru": {...}}``).
     """
+    _sys, _user = _prompt_parts(prompt, lang=lang)
     if lang == "en":
         system_content = "You are a thumbnail copywriter. You ONLY write in ENGLISH. Never use Cyrillic."
         lang_instruction = "Write in ENGLISH only. Use Latin letters only. Never use Cyrillic or Russian."
@@ -447,19 +601,23 @@ async def generate_thumbnail_hook(article_title: str, lang: str = "ru") -> str:
         system_content = "Ты копирайтер для thumbnail. Пишешь ТОЛЬКО на русском языке кириллицей."
         lang_instruction = "Пиши ТОЛЬКО на русском. Используй только кириллицу."
 
-    user_message = (
-        "You are writing text for a gaming news video thumbnail.\n"
-        "Create a SHORT, PUNCHY caption (2–3 words) that creates curiosity or urgency "
-        "and fits the topic of the news headline below.\n"
-        "Rules:\n"
-        "- Maximum 3 words\n"
-        f"- {lang_instruction}\n"
-        "- No punctuation except ! or ?\n"
-        "- Write in normal case (the system will uppercase it automatically)\n"
-        "- Return ONLY the caption text, nothing else\n\n"
-        f"Headline: {article_title}\n\n"
-        "Caption:"
-    )
+    if _user:
+        system_content = _sys or system_content
+        user_message = _render_prompt(_user, title=article_title)
+    else:
+        user_message = (
+            "You are writing text for a gaming news video thumbnail.\n"
+            "Create a SHORT, PUNCHY caption (2–3 words) that creates curiosity or urgency "
+            "and fits the topic of the news headline below.\n"
+            "Rules:\n"
+            "- Maximum 3 words\n"
+            f"- {lang_instruction}\n"
+            "- No punctuation except ! or ?\n"
+            "- Write in normal case (the system will uppercase it automatically)\n"
+            "- Return ONLY the caption text, nothing else\n\n"
+            f"Headline: {article_title}\n\n"
+            "Caption:"
+        )
     try:
         hook = (await _call_ollama_chat(
             [{"role": "system", "content": system_content},
@@ -599,12 +757,15 @@ def _strip_cliche_opener(script: str) -> str:
     return script
 
 
-async def generate_video_script(post_text: str, article_title: str, lang: str = "en") -> str:
+async def generate_video_script(post_text: str, article_title: str, lang: str = "en", prompt=None) -> str:
     """
     Generate a spoken narration script for TikTok/Reels/Shorts.
     lang='en' → English script; lang='ru' → Russian script.
     Target: 45–60 words (~18–25 seconds spoken at natural pace).
     Analytics show videos ≤22s average 84.8% retention vs 56.9% for ≥29s.
+
+    ``prompt`` — optional per-project prompt override (from projects.json),
+    may be per-language (``{"en": {...}, "ru": {...}}``).
     """
     # Strip HTML, URLs, markdown and emoji from input text
     clean_text = re.sub(r"<[^>]+>", "", post_text)
@@ -612,6 +773,8 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
     clean_text = re.sub(r"[*_`#]", "", clean_text)
     clean_text = re.sub(r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0000FE00-\U0000FEFF]", "", clean_text)
     clean_text = re.sub(r"\s{2,}", " ", clean_text).strip()
+
+    _sys_ovr, _user_ovr = _prompt_parts(prompt, lang=lang)
 
     if lang == "ru":
         system_content = (
@@ -669,6 +832,12 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
             f"Post content:\n{clean_text[:1800]}\n\n"
             "Write the script (STRICTLY 45–60 words):"
         )
+
+    # Per-project override (projects.json) takes precedence over the defaults.
+    if _user_ovr:
+        user_message = _render_prompt(_user_ovr, title=article_title, post_text=clean_text[:1800])
+    if _sys_ovr:
+        system_content = _sys_ovr
 
     messages = [
         {"role": "system", "content": system_content},
