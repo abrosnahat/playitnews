@@ -49,8 +49,9 @@ OLLAMA_VIDEO_MODEL: str = os.getenv("OLLAMA_VIDEO_MODEL", "gemma4:31b")
 LLM_BACKEND: str = os.getenv("LLM_BACKEND", "ollama").strip().lower()
 # Google Gemini API (https://aistudio.google.com/apikey)
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-# Cloud model for text generation. Google's API serves Gemma open models
-# (e.g. "gemma-4-31b-it") as well as "gemini-*" models.
+# Cloud model for text generation.
+# Gemma 4 models (served via Gemini API): gemma-4-31b-it, gemma-4-27b-it, gemma-4-9b-it
+# Gemini models: gemini-2.5-flash (stable), gemini-2.5-pro (best quality)
 GEMINI_TEXT_MODEL: str = os.getenv("GEMINI_TEXT_MODEL", "gemma-4-31b-it")
 # Optional separate model for video-script generation (defaults to the text model).
 GEMINI_VIDEO_MODEL: str = os.getenv("GEMINI_VIDEO_MODEL", GEMINI_TEXT_MODEL)

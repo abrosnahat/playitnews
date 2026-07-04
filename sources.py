@@ -50,31 +50,44 @@ class ChampionatSource:
             return []
         soup = BeautifulSoup(html, "html.parser")
 
-        # The "Обсуждаемые" (discussed) tab content of the top-news widget.
-        tab = (
+        def _links_from_tab(tab) -> list[dict]:
+            result: list[dict] = []
+            if tab is None:
+                return result
+            for a in tab.select("a.news-item__title[href]"):
+                href = a.get("href", "").strip()
+                if not href or "#comments" in href:
+                    continue
+                full = urljoin(self.BASE, href)
+                title = a.get_text(strip=True)
+                if title:
+                    result.append({"url": full, "title": title})
+            return result
+
+        # «Обсуждаемые» tab (5 articles)
+        discussed = (
             soup.select_one("div.tabs-content._discussed[data-type='discussed']")
             or soup.select_one("[data-type='discussed']")
         )
-        if tab is None:
-            logger.warning("championat: вкладка 'Обсуждаемые' не найдена")
-            return []
+        # «Главные новости» tab (5 articles)
+        main = (
+            soup.select_one("div.tabs-content._main[data-type='main']")
+            or soup.select_one("[data-type='main']")
+        )
 
         articles: list[dict] = []
         seen: set[str] = set()
-        for a in tab.select("a.news-item__title[href]"):
-            href = a.get("href", "").strip()
-            if not href or "#comments" in href:
-                continue
-            full = urljoin(self.BASE, href)
-            if full in seen:
-                continue
-            title = a.get_text(strip=True)
-            if not title:
-                continue
-            seen.add(full)
-            articles.append({"url": full, "title": title})
+        for item in _links_from_tab(discussed)[:5] + _links_from_tab(main)[:5]:
+            if item["url"] not in seen:
+                seen.add(item["url"])
+                articles.append(item)
 
-        logger.info("championat: найдено обсуждаемых новостей: %d", len(articles))
+        logger.info(
+            "championat: discussed=%d main=%d unique=%d",
+            len(_links_from_tab(discussed)),
+            len(_links_from_tab(main)),
+            len(articles),
+        )
         return articles
 
     async def scrape_article(self, session: aiohttp.ClientSession, url: str) -> Optional[Article]:

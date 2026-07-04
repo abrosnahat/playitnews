@@ -1,4 +1,5 @@
 import re
+import asyncio
 import logging
 import aiohttp
 from config import (
@@ -27,6 +28,7 @@ async def _gemini_chat(payload: dict, timeout: int) -> dict:
 
     Returns an Ollama-shaped dict ``{"message": {"content": str}}`` so callers
     don't need to know which backend produced the text.
+    Retries up to 3 times on 5xx errors (gemma-4 preview is occasionally flaky).
     """
     messages = payload.get("messages", [])
     system_parts = [m["content"] for m in messages if m.get("role") == "system" and m.get("content")]
@@ -59,15 +61,35 @@ async def _gemini_chat(payload: dict, timeout: int) -> dict:
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            url,
-            json=body,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=timeout),
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+
+    last_exc: Exception | None = None
+    for attempt in range(1, 4):   # up to 3 attempts
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    json=body,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                ) as resp:
+                    if resp.status >= 500 and attempt < 3:
+                        last_exc = Exception(f"HTTP {resp.status}")
+                        logger.warning("Gemini API %s (attempt %d/3), retrying…", resp.status, attempt)
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    resp.raise_for_status()
+                    data = await resp.json()
+            break
+        except aiohttp.ClientResponseError as exc:
+            if exc.status >= 500 and attempt < 3:
+                last_exc = exc
+                logger.warning("Gemini API %s (attempt %d/3), retrying…", exc.status, attempt)
+                await asyncio.sleep(2 ** attempt)
+                continue
+            raise
+    else:
+        raise last_exc  # type: ignore[misc]
+
     try:
         parts = data["candidates"][0]["content"]["parts"]
         # Gemma/Gemini "thinking" models return reasoning parts flagged
@@ -795,7 +817,8 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
             "- стиль эмоциональный, как у топовых gaming Shorts каналов\n"
             "- использовать curiosity gap\n"
             "- добавлять ощущение срочности и хайпа\n"
-            "- обязательно: HOOK → CONTEXT → ESCALATION → PAYOFF → LOOP END\n"  
+            "- обязательно: HOOK → CONTEXT → ESCALATION → PAYOFF → LOOP END\n"
+            "- LOOP END должен быть завершённым предложением — НЕ обрывать на предлоге или союзе\n"  
             "- ЗАПРЕЩЕНО: мат, сленг, грубые выражения, фамильярное обращение\n"
             "- ЗАПРЕЩЕНО начинать с избитых клише, особенно "
             "«Забудьте всё, что вы знали…», «Забудьте о…», «Представьте…». "
@@ -824,6 +847,9 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
             "- Use curiosity gap\n"
             "- Add a sense of urgency and hype\n"
             "- Mandatory structure: HOOK → CONTEXT → ESCALATION → PAYOFF → LOOP END\n"
+            "- LOOP END must be a COMPLETE sentence with a real payoff — NEVER cut off "
+            "on a preposition, conjunction, or trailing ellipsis (e.g. never end with "
+            "'This is why...' or 'Because...' with nothing after it)\n"
             "- FORBIDDEN: profanity, slang, rude expressions, familiar tone\n"
             "- FORBIDDEN to open with tired clichés, especially "
             "'Forget everything you knew...', 'Forget about...', 'Imagine...'. "
@@ -852,13 +878,35 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
             model=OLLAMA_VIDEO_MODEL,
             think=False,
         )
-        # Reasoning models (qwen3, deepseek-r1, etc.) wrap chain-of-thought in <think>…</think>.
-        # Remove those blocks entirely (tag + content) before further cleanup.
-        script = re.sub(r"<think>.*?</think>", "", script, flags=re.DOTALL | re.IGNORECASE)
-        # Also handle cases where the closing tag is missing — drop everything up to last </think>
-        if "</think>" in script.lower():
-            script = re.split(r"</think>", script, maxsplit=1, flags=re.IGNORECASE)[-1]
-        script = re.sub(r"<[^>]+>", "", script)
+        # --- Extract answer from thinking / reasoning blocks ---
+        # Strategy: prefer content AFTER the closing thinking tag; fall back to
+        # content INSIDE the block (gemma4 sometimes puts the answer there when
+        # thinking suppression is incomplete).
+
+        # Gemma 4 native format: <|channel>thought\n[reasoning]<channel|>[answer]
+        _g4 = re.search(r"<\|channel>thought\n(.*?)<channel\|>(.*)", script, flags=re.DOTALL)
+        if _g4:
+            after = _g4.group(2).strip()
+            inside = _g4.group(1).strip()
+            script = after if len(after.split()) >= 5 else inside
+            logger.debug("Gemma4 channel block: after=%d words, inside=%d words → used %s",
+                         len(after.split()), len(inside.split()), "after" if after else "inside")
+
+        # Standard <think>…</think> (qwen3, deepseek-r1, gemma4 via Ollama wrapper)
+        _th = re.search(r"<think>(.*?)</think>(.*)", script, flags=re.DOTALL | re.IGNORECASE)
+        if _th:
+            after = _th.group(2).strip()
+            inside = _th.group(1).strip()
+            script = after if len(after.split()) >= 5 else inside
+            logger.debug("think block: after=%d words, inside=%d words → used %s",
+                         len(after.split()), len(inside.split()), "after" if after else "inside")
+        elif "</think>" in script.lower():
+            # Closing tag without opening — drop prefix up to last </think>
+            script = re.split(r"</think>", script, maxsplit=1, flags=re.IGNORECASE)[-1].strip()
+
+        # Remove only known safe HTML tags; avoid stripping partial words that
+        # happen to contain angle brackets (e.g. "mechan<ics>" → "mechan").
+        script = re.sub(r"<(?:br|p|div|span|b|i|em|strong|ul|li|ol|h[1-6])[^>]*/?>", "", script, flags=re.IGNORECASE)
         script = re.sub(r"[*_`#]", "", script)
         script = script.strip()
         # Strip the overused "Forget everything you knew…" clichéd opener if the
@@ -880,10 +928,31 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
             if last_idx > 0:
                 trimmed = script[: last_idx + 1].rstrip()
                 trimmed_words = len(trimmed.split())
-                if trimmed_words >= 20:
+                logger.info(
+                    "%s script: dropped incomplete trailing sentence (%d → %d words)",
+                    lang.upper(), word_count, trimmed_words,
+                )
+                script = trimmed
+
+        # Also catch "complete-looking" but unfinished cliffhangers — the model
+        # sometimes ends on a short trailing clause like "This is why..." or
+        # "Because..." whose LAST char *is* a period/ellipsis (so the check
+        # above doesn't fire) but which never delivers the payoff it promises.
+        # Heuristic: strip the trailing ellipsis itself, then look at the
+        # sentence before it — if what remains after that sentence is short
+        # (≤8 words), it's a dangling cliffhanger — drop it and fall back to
+        # the previous (already complete) sentence.
+        if re.search(r"\.{2,}\s*$", script):
+            core = re.sub(r"\.{2,}\s*$", "", script).rstrip()
+            prior_ends = [core.rfind(c) for c in ".!?"]
+            prior_end = max((i for i in prior_ends if i >= 0), default=-1)
+            tail = core[prior_end + 1:].strip() if prior_end >= 0 else core
+            if prior_end >= 0 and len(tail.split()) <= 8:
+                trimmed = core[: prior_end + 1].rstrip()
+                if len(trimmed.split()) >= 5:
                     logger.info(
-                        "%s script: dropped incomplete trailing sentence (%d → %d words)",
-                        lang.upper(), word_count, trimmed_words,
+                        "%s script: dropped dangling ellipsis cliffhanger ('%s') — %d → %d words",
+                        lang.upper(), tail[:40], word_count, len(trimmed.split()),
                     )
                     script = trimmed
         return script
