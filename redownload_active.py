@@ -30,8 +30,9 @@ from typing import Any
 import aiohttp
 
 import database as db
-from config import setup_dirs
-from scraper import download_images, download_videos, scrape_article
+import sources
+from config import get_project, setup_dirs
+from scraper import download_images, download_videos
 
 logging.basicConfig(
     level=logging.INFO,
@@ -119,8 +120,11 @@ async def _redownload_one(
     if deleted_imgs or deleted_vids:
         logger.info("  cleaned: %d image(s), %d video(s)", deleted_imgs, deleted_vids)
 
-    # 2) re-scrape article
-    article = await scrape_article(session, url)
+    # 2) re-scrape article (project-aware — championat/ufc posts need the
+    # championat source, not the playground.ru default, to pick up video embeds)
+    project_name = post.get("project") or "gaming"
+    source = sources.get_source(get_project(project_name).get("source"))
+    article = await source.scrape_article(session, url)
     if article is None:
         logger.warning("  scrape failed, skip")
         return (0, 0)

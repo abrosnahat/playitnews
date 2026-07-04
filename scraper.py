@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import re
@@ -270,6 +271,39 @@ async def _fetch_playground_m3u8(session: aiohttp.ClientSession, video_id: str) 
     return min(matches, key=_bitrate_key)
 
 
+async def _fetch_championat_m3u8(
+    session: aiohttp.ClientSession, record_id: str, referrer: str
+) -> Optional[str]:
+    """Resolve a championat.ru (Rambler Video Platform) record id to a playable m3u8 URL.
+
+    ``record_id`` looks like ``record::<uuid>`` (the ``data-id`` of the
+    ``div.video-wrapper.js-player`` widget). Calls the same JSON API the
+    in-page player uses (``api.vp.rambler.ru``) — no browser/JS required.
+    """
+    api_url = "https://api.vp.rambler.ru/api/v3/records/getPlayerData"
+    params = {
+        "params": json.dumps(
+            {"referrer": referrer, "uuid": record_id, "checkReferrerCount": True}
+        )
+    }
+    try:
+        async with session.get(
+            api_url, params=params, headers=HEADERS,
+            timeout=aiohttp.ClientTimeout(total=15), ssl=SSL_CONTEXT,
+        ) as resp:
+            if resp.status != 200:
+                logger.warning("Rambler player API HTTP %s для %s", resp.status, record_id)
+                return None
+            data = await resp.json(content_type=None)
+    except Exception as exc:
+        logger.warning("Ошибка запроса Rambler player API для %s: %s", record_id, exc)
+        return None
+    if not data.get("success"):
+        return None
+    play_list = data.get("result", {}).get("playList", {})
+    return play_list.get("directSource") or play_list.get("source") or play_list.get("old")
+
+
 async def download_videos(
     session: aiohttp.ClientSession,
     pg_embeds: list[dict],
@@ -319,6 +353,27 @@ async def download_videos(
                     logger.info("Видео скачано: %s", path)
                     break
                 logger.warning("Не удалось скачать видео %s (попытка %d/3)", embed["id"], attempt)
+                if attempt < 3:
+                    await asyncio.sleep(2.0 * attempt)
+
+        elif embed["type"] == "championat":
+            # data-id is "record::<uuid>" — strip the prefix for a safe filename
+            record_id = embed["id"]
+            video_id = record_id.split("::", 1)[-1] if "::" in record_id else record_id
+            referrer = embed.get("referrer", "")
+            for attempt in range(1, 4):
+                m3u8_url = await _fetch_championat_m3u8(session, record_id, referrer)
+                if not m3u8_url:
+                    logger.warning("Не удалось получить m3u8 для видео championat %s (попытка %d/3)", record_id, attempt)
+                    if attempt < 3:
+                        await asyncio.sleep(2.0 * attempt)
+                    continue
+                path = await _download_hls_video(video_id, m3u8_url)
+                if path:
+                    video_paths.append(path)
+                    logger.info("Видео championat скачано: %s", path)
+                    break
+                logger.warning("Не удалось скачать видео championat %s (попытка %d/3)", record_id, attempt)
                 if attempt < 3:
                     await asyncio.sleep(2.0 * attempt)
 

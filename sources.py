@@ -38,6 +38,18 @@ class PlaygroundSource:
         return await scraper.scrape_article(session, url)
 
 
+def _extract_championat_video_embeds(scope, referrer: str) -> list[dict]:
+    """Find championat's Rambler Video Platform widgets: ``<div class="video-wrapper
+    js-player" data-id="record::<uuid>">`` (the ``_inited`` class is added client-side
+    by their JS and isn't present in the raw HTML)."""
+    embeds: list[dict] = []
+    for wrapper in scope.select("div.video-wrapper[data-id]"):
+        data_id = wrapper.get("data-id", "").strip()
+        if data_id.startswith("record::"):
+            embeds.append({"type": "championat", "id": data_id, "referrer": referrer})
+    return embeds
+
+
 class ChampionatSource:
     """championat.ru UFC — reads the 'Обсуждаемые' tab of the top-news block."""
 
@@ -109,7 +121,9 @@ class ChampionatSource:
             or soup.select_one("article")
             or soup.select_one("main")
         )
+        pg_embeds: list[dict] = []
         if body:
+            pg_embeds = _extract_championat_video_embeds(body, url)
             for tag in body.select(
                 "script, style, nav, aside, .banner, .advertisement, "
                 ".external-article, .related-articles, .share, .comments"
@@ -150,8 +164,9 @@ class ChampionatSource:
                 if _is_valid_image_url(hero):
                     image_urls.append(hero)
 
-        # championat embeds video via a custom widget we don't parse → no pg_embeds.
-        return Article(url=url, title=title, text=text, image_urls=image_urls, pg_embeds=[])
+        # championat embeds video via the Rambler Video Platform widget — resolved
+        # and downloaded through scraper.download_videos (type "championat").
+        return Article(url=url, title=title, text=text, image_urls=image_urls, pg_embeds=pg_embeds)
 
 
 _SOURCES: dict[str, NewsSource] = {
