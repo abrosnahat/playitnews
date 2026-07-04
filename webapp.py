@@ -1130,9 +1130,9 @@ def api_create_manual_post():
             final_path = uploaded_path  # keep temp name on failure
 
     include_images = bool(request.form.get("include_images"))
-    # Manual "New video from text" defaults to the talking-head avatar unless the
-    # client explicitly opts out (talking_head="0"/"false"/"no").
-    use_talking_head = (request.form.get("talking_head", "1") or "1").strip().lower() not in ("0", "false", "no", "")
+    # Manual "New video from text" no longer defaults to the talking-head avatar —
+    # the client must explicitly opt in (talking_head="1"/"true"/"yes").
+    use_talking_head = (request.form.get("talking_head", "0") or "0").strip().lower() not in ("0", "false", "no", "")
     # Talking-head and monitor frame are mutually exclusive — head wins.
     use_monitor_frame = not use_talking_head
 

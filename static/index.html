@@ -1656,7 +1656,7 @@
 
         <div class="field">
           <label class="row" style="display:flex;align-items:center;gap:8px;cursor:pointer;text-transform:none">
-            <input id="mfTalkHead" type="checkbox" checked />
+            <input id="mfTalkHead" type="checkbox" />
             <span>🗣️ Talking-head avatar (bottom half, lip-synced)</span>
           </label>
         </div>
@@ -2069,7 +2069,7 @@
           <span class="switch-track"></span>
         </label>
         <label class="switch-row">
-          <input id="talkHead_${p.id}" type="checkbox" checked onchange="onTalkHeadToggle(${p.id})">
+          <input id="talkHead_${p.id}" type="checkbox" onchange="onTalkHeadToggle(${p.id})">
           <span class="switch-head"><span class="switch-icon">${ICON.mic}</span><span class="switch-label">Talking-head avatar</span></span>
           <span class="switch-track"></span>
         </label>
