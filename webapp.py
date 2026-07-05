@@ -1017,6 +1017,51 @@ def api_media():
 
 
 # ---------------------------------------------------------------------------
+# Routes: standalone Gemini TTS tool ("paste text → generate voice")
+# ---------------------------------------------------------------------------
+
+@app.route("/api/tts/voices")
+def api_tts_voices():
+    """List available Gemini TTS voice names + the configured EN/RU defaults."""
+    return jsonify({
+        "voices": video_generator.GEMINI_VOICE_NAMES,
+        "default_en": video_generator.GEMINI_TTS_VOICE_EN,
+        "default_ru": video_generator.GEMINI_TTS_VOICE_RU,
+    })
+
+
+@app.route("/api/tts/generate", methods=["POST"])
+def api_tts_generate():
+    """Synthesize speech from arbitrary pasted text via Gemini TTS."""
+    body = request.get_json(silent=True) or {}
+    text = (body.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "text is required"}), 400
+    if len(text) > 5000:
+        return jsonify({"error": "text is too long (max 5000 characters)"}), 400
+
+    lang = (body.get("lang") or "en").strip().lower()
+    voice = (body.get("voice") or "").strip() or None
+    try:
+        speed = float(body.get("speed", 1.0))
+    except (TypeError, ValueError):
+        speed = 1.0
+
+    try:
+        audio_path = _run_async(
+            video_generator.synthesize_gemini_tts_standalone(text, voice=voice, lang=lang, speed=speed)
+        )
+    except Exception as exc:
+        logger.exception("Standalone TTS generation failed")
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify({
+        "success": True,
+        "audio_path": audio_path,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Routes: video generation (background thread + SSE progress)
 # ---------------------------------------------------------------------------
 

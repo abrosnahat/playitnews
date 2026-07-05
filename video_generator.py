@@ -1552,6 +1552,147 @@ def _is_gemini_voice_name(name: str) -> bool:
     return name in _GEMINI_VOICE_NAMES
 
 
+GEMINI_VOICE_NAMES = sorted(_GEMINI_VOICE_NAMES)
+
+
+def _gemini_speed_prompt(speed: float, lang: str) -> str:
+    """
+    Build a pace instruction for the Gemini TTS prompt.
+
+    Gemini TTS has NO numeric speaking-rate parameter in the API (verified —
+    `SpeechConfig`/`VoiceConfig`/`PrebuiltVoiceConfig` only expose voice name
+    + language code). Speed is steered purely through natural-language
+    instructions in the prompt text, so `speed` (0.5–2.0, 1.0 = natural) is
+    translated into a target words-per-minute figure the model reads back.
+    """
+    speed = max(0.5, min(2.0, speed or 1.0))
+    base_wpm = 130 if lang == "ru" else 150   # natural conversational pace
+    wpm = round(base_wpm * speed)
+    if lang == "ru":
+        return (
+            f"Читай текст в естественном темпе, примерно {wpm} слов в минуту. "
+            "Произнеси ТОЛЬКО текст ниже:\n\n"
+        )
+    return (
+        f"Read the text at a natural pace, approximately {wpm} words per minute. "
+        "Speak ONLY the transcript below:\n\n"
+    )
+
+
+async def synthesize_gemini_tts_standalone(
+    text: str,
+    voice: str | None = None,
+    lang: str = "en",
+    speed: float = 1.0,
+    max_retries: int = 3,
+) -> str:
+    """
+    Ad-hoc Gemini TTS synthesis for the webapp's "paste text → voice" tool.
+
+    Unlike `_synthesize_voice_gemini` (used by the video pipeline), this skips
+    the Whisper word-timing recovery step — callers just want a playable /
+    downloadable audio file, not subtitle cues. `speed` (0.5–2.0, default 1.0)
+    controls pace via a words-per-minute instruction — see `_gemini_speed_prompt`.
+
+    Returns the absolute path to the generated WAV file (24 kHz mono PCM).
+    Raises RuntimeError on missing SDK/API key, empty text, or API failure.
+    """
+    if not _GENAI_OK:
+        raise RuntimeError(
+            "google-genai SDK not installed. Run: pip install google-genai"
+        )
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY (or GOOGLE_API_KEY) not set in .env — "
+            "get one at https://aistudio.google.com/apikey"
+        )
+
+    text = (text or "").strip()
+    if not text:
+        raise RuntimeError("Text is empty — nothing to synthesize")
+
+    lang = (lang or "en").strip().lower()
+    if lang not in ("en", "ru"):
+        lang = "en"
+
+    chosen_voice = voice or (GEMINI_TTS_VOICE_RU if lang == "ru" else GEMINI_TTS_VOICE_EN)
+    if not _is_gemini_voice_name(chosen_voice):
+        chosen_voice = GEMINI_TTS_VOICE_RU if lang == "ru" else GEMINI_TTS_VOICE_EN
+
+    director = _gemini_speed_prompt(speed, lang)
+    prompt = f"{director}{text}\n"
+
+    client = _genai.Client(api_key=api_key)
+    speech_cfg = _gtypes.SpeechConfig(
+        voice_config=_gtypes.VoiceConfig(
+            prebuilt_voice_config=_gtypes.PrebuiltVoiceConfig(
+                voice_name=chosen_voice,
+            )
+        ),
+        language_code="ru-RU" if lang == "ru" else "en-US",
+    )
+
+    last_err: Exception | None = None
+    response = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_TTS_MODEL,
+                contents=prompt,
+                config=_gtypes.GenerateContentConfig(
+                    response_modalities=["AUDIO"],
+                    speech_config=speech_cfg,
+                ),
+            )
+            break
+        except Exception as exc:                          # noqa: BLE001
+            last_err = exc
+            logger.warning(
+                "Gemini TTS (standalone) attempt %d/%d failed: %s",
+                attempt, max_retries, exc.__class__.__name__,
+            )
+            if attempt < max_retries:
+                await asyncio.sleep(2 ** attempt)
+    if response is None:
+        raise RuntimeError(f"Gemini TTS failed after {max_retries} retries: {last_err}")
+
+    try:
+        part = response.candidates[0].content.parts[0]
+        pcm_bytes = part.inline_data.data
+    except (AttributeError, IndexError) as exc:
+        raise RuntimeError(f"Gemini TTS returned no audio: {exc}") from exc
+
+    import base64 as _b64
+    import wave as _wave
+    try:
+        pcm = _b64.b64decode(pcm_bytes) if isinstance(pcm_bytes, str) else pcm_bytes
+    except Exception as exc:
+        raise RuntimeError(f"Gemini TTS audio decode failed: {exc}") from exc
+
+    out_dir = os.path.join(VIDEOS_DIR, "tts_manual")
+    os.makedirs(out_dir, exist_ok=True)
+    audio_path = os.path.join(out_dir, f"tts_{uuid.uuid4().hex[:10]}.wav")
+    with _wave.open(audio_path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)         # 16-bit
+        wf.setframerate(24_000)
+        wf.writeframes(pcm)
+
+    try:
+        um = getattr(response, "usage_metadata", None)
+        if um:
+            audio_tok = int(getattr(um, "candidates_token_count", 0) or 0)
+            logger.info(
+                "Gemini TTS (standalone) usage: model=%s voice=%s audio=%d tok (%.1f s)",
+                GEMINI_TTS_MODEL, chosen_voice, audio_tok, audio_tok / 25.0,
+            )
+    except Exception as exc:                                # noqa: BLE001
+        logger.debug("Gemini usage_metadata read failed: %s", exc)
+
+    return audio_path
+
+
 async def _synthesize_voice(
     text: str, workdir: str, voice: str | None = None
 ) -> tuple[str, list[tuple[float, float, str]]]:

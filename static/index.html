@@ -290,7 +290,8 @@
       .new-btn:hover { transform: translateY(-1px); box-shadow: 0 12px 28px -12px rgba(124, 92, 255, 1); }
       .new-btn svg { width: 16px; height: 16px; }
 
-      #manualModal {
+      #manualModal,
+      #ttsModal {
         position: fixed;
         inset: 0;
         z-index: 120;
@@ -302,7 +303,8 @@
         -webkit-backdrop-filter: blur(6px);
         padding: 18px;
       }
-      #manualModal.open { display: flex; }
+      #manualModal.open,
+      #ttsModal.open { display: flex; }
       .modal-card {
         width: 100%;
         max-width: 560px;
@@ -1668,11 +1670,62 @@
       </div>
     </div>
 
+    <!-- Text-to-speech modal -->
+    <div id="ttsModal" onclick="ttsBackdrop(event)">
+      <div class="modal-card" onclick="event.stopPropagation()">
+        <div class="modal-head">
+          <svg class="mh-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v4"/><path d="M8 23h8"/></svg>
+          <div class="mh-title">Text-to-speech (Gemini TTS)</div>
+          <button class="icon-btn" title="Close" onclick="closeTtsModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+        </div>
+
+        <div class="field">
+          <label for="ttsText">Text</label>
+          <textarea id="ttsText" maxlength="5000" placeholder="Paste or type the text to voice…"></textarea>
+          <div class="hint">Up to 5000 characters. Sent to Gemini TTS as-is.</div>
+        </div>
+
+        <div class="field">
+          <label>Language</label>
+          <div class="lang-seg" id="ttsLang">
+            <label><input type="radio" name="ttslang" value="en" checked /><span>EN</span></label>
+            <label><input type="radio" name="ttslang" value="ru" /><span>RU</span></label>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="ttsVoice">Voice</label>
+          <select id="ttsVoice"></select>
+        </div>
+
+        <div class="field">
+          <label for="ttsSpeed">Speed <span id="ttsSpeedVal" style="text-transform:none;font-weight:500">1.0×</span></label>
+          <input type="range" id="ttsSpeed" min="0.5" max="2" step="0.05" value="1"
+                 oninput="document.getElementById('ttsSpeedVal').textContent = (+this.value).toFixed(2) + '×'" />
+          <div class="hint">Gemini TTS has no numeric rate control — this is sent as a "read at ~N words/min" instruction, so pacing may vary slightly between takes.</div>
+        </div>
+
+        <div class="modal-actions">
+          <button class="btn btn-danger" onclick="closeTtsModal()">Cancel</button>
+          <button class="btn btn-primary" id="ttsSubmit" onclick="submitTts()">Generate voice</button>
+        </div>
+
+        <div class="field" id="ttsResultWrap" style="display:none;margin-top:6px">
+          <label>Result</label>
+          <audio id="ttsAudio" controls style="width:100%"></audio>
+          <div class="hint"><a id="ttsDownload" href="#" download>Download audio file</a></div>
+        </div>
+      </div>
+    </div>
+
     <!-- Header -->
     <header class="header">
       <nav class="project-tabs" id="projectTabs" style="display:none"></nav>
       <div class="header-right">
         <span class="count-badge" id="countBadge">0 posts</span>
+        <button class="icon-btn" id="ttsBtn" title="Text-to-speech (Gemini TTS)" onclick="openTtsModal()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v4"/><path d="M8 23h8"/></svg>
+        </button>
         <button class="new-btn" id="newPostBtn" title="Create a post from pasted text" onclick="openManualModal()">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
           New
@@ -3468,10 +3521,98 @@
         }
       }
 
+      // ─── Text-to-speech modal ────────────────────────────────────────────────
+      let _ttsVoicesData = null;
+
+      async function loadTtsVoices() {
+        if (_ttsVoicesData) return _ttsVoicesData;
+        try {
+          const res = await fetch("/api/tts/voices");
+          _ttsVoicesData = await res.json();
+        } catch (e) {
+          _ttsVoicesData = { voices: [], default_en: "", default_ru: "" };
+        }
+        return _ttsVoicesData;
+      }
+
+      function _ttsApplyDefaultVoice() {
+        const lang = document.querySelector('#ttsLang input[name="ttslang"]:checked')?.value || "en";
+        const sel = document.getElementById("ttsVoice");
+        const def = lang === "ru" ? _ttsVoicesData?.default_ru : _ttsVoicesData?.default_en;
+        if (def && sel.querySelector(`option[value="${def}"]`)) sel.value = def;
+      }
+
+      async function openTtsModal() {
+        const data = await loadTtsVoices();
+        const sel = document.getElementById("ttsVoice");
+        if (!sel.options.length) {
+          sel.innerHTML = data.voices.map((v) => `<option value="${v}">${v}</option>`).join("");
+          document
+            .querySelectorAll('#ttsLang input[name="ttslang"]')
+            .forEach((el) => el.addEventListener("change", _ttsApplyDefaultVoice));
+        }
+        _ttsApplyDefaultVoice();
+        const speedEl = document.getElementById("ttsSpeed");
+        speedEl.value = 1;
+        document.getElementById("ttsSpeedVal").textContent = "1.00×";
+        document.getElementById("ttsResultWrap").style.display = "none";
+        document.getElementById("ttsModal").classList.add("open");
+        document.getElementById("ttsText").focus();
+      }
+
+      function closeTtsModal() {
+        document.getElementById("ttsModal").classList.remove("open");
+      }
+
+      function ttsBackdrop(ev) {
+        if (ev.target.id === "ttsModal") closeTtsModal();
+      }
+
+      async function submitTts() {
+        const text = document.getElementById("ttsText").value.trim();
+        const lang = document.querySelector('#ttsLang input[name="ttslang"]:checked')?.value || "en";
+        const voice = document.getElementById("ttsVoice").value;
+        const speed = +document.getElementById("ttsSpeed").value || 1;
+
+        if (!text) {
+          toast("Please enter some text", "error");
+          return;
+        }
+
+        const submitBtn = document.getElementById("ttsSubmit");
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Generating…";
+        try {
+          const res = await fetch("/api/tts/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text, lang, voice, speed }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "Generation failed");
+
+          const url = "/api/media?path=" + enc(data.audio_path);
+          const audio = document.getElementById("ttsAudio");
+          audio.src = url;
+          const dl = document.getElementById("ttsDownload");
+          dl.href = url;
+          document.getElementById("ttsResultWrap").style.display = "block";
+          toast("Voice generated", "success");
+        } catch (e) {
+          toast(`Failed: ${e.message}`, "error");
+        } finally {
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Generate voice";
+        }
+      }
+
       // ─── Init ──────────────────────────────────────────────────────────────────
       document.addEventListener("keydown", (e) => {
         if (e.key === "Escape" && document.getElementById("manualModal").classList.contains("open")) {
           closeManualModal();
+        }
+        if (e.key === "Escape" && document.getElementById("ttsModal").classList.contains("open")) {
+          closeTtsModal();
         }
       });
       loadProjects();
