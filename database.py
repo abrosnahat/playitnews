@@ -272,6 +272,26 @@ def add_video_path(post_id: int, path: str) -> None:
         )
 
 
+def add_image_path(post_id: int, path: str) -> None:
+    """Append a local image file path to the post's image_paths list (deduped)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT image_paths FROM scheduled_posts WHERE id = ?", (post_id,)
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            paths = json.loads(row[0] or "[]")
+        except Exception:
+            paths = []
+        if path not in paths:
+            paths.append(path)
+        conn.execute(
+            "UPDATE scheduled_posts SET image_paths = ? WHERE id = ?",
+            (json.dumps(paths), post_id),
+        )
+
+
 
 def set_notification_message_id(post_id: int, message_id: int) -> None:
     with get_conn() as conn:

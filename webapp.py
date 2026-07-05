@@ -43,6 +43,7 @@ from config import (
     INSTAGRAM_USER_ID_RU,
     INSTAGRAM_ACCESS_TOKEN_RU,
     VIDEOS_DIR,
+    IMAGES_DIR,
     required_platforms as project_required_platforms,
     platform_credentials,
 )
@@ -1067,6 +1068,8 @@ def api_tts_generate():
 
 # Manual post: allowed uploaded video extensions
 _ALLOWED_VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
+# Manual post: allowed uploaded image extensions
+_ALLOWED_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 
 
 def _is_probable_youtube_url(url: str) -> bool:
@@ -1103,6 +1106,7 @@ def api_create_manual_post():
       - lang     ('en' | 'ru' | 'both', default 'both')
       - youtube_url (str, optional) — a YouTube link to use as the clip source
       - video    (file, optional) — an uploaded video file to use as the clip source
+      - images   (file(s), optional) — one or more uploaded pictures to include in the video
 
     If neither youtube_url nor an uploaded file is provided, the generator falls
     back to searching YouTube based on the article title/text.
@@ -1122,6 +1126,7 @@ def api_create_manual_post():
         return jsonify({"error": "youtube_url must be a youtube.com or youtu.be link"}), 400
 
     os.makedirs(VIDEOS_DIR, exist_ok=True)
+    os.makedirs(IMAGES_DIR, exist_ok=True)
 
     # Save an uploaded video file (if any) before creating the post so we know its path.
     uploaded_path: str | None = None
@@ -1141,6 +1146,24 @@ def api_create_manual_post():
             logger.exception("Manual post: failed to save uploaded video")
             return jsonify({"error": f"Failed to save video: {exc}"}), 500
 
+    # Save any uploaded picture(s) (if any) before creating the post so we know their paths.
+    uploaded_image_paths: list[str] = []
+    image_files = [f for f in request.files.getlist("images") if f and f.filename]
+    for idx, img_file in enumerate(image_files):
+        ext = os.path.splitext(img_file.filename)[1].lower()
+        if ext not in _ALLOWED_IMAGE_EXT:
+            return jsonify({
+                "error": f"Unsupported image type '{ext}'. Allowed: {', '.join(sorted(_ALLOWED_IMAGE_EXT))}"
+            }), 400
+        tmp_name = f"manual_upload_{int(datetime.now().timestamp())}_{idx}{ext}"
+        img_path = os.path.join(IMAGES_DIR, tmp_name)
+        try:
+            img_file.save(img_path)
+        except Exception as exc:
+            logger.exception("Manual post: failed to save uploaded image")
+            return jsonify({"error": f"Failed to save image: {exc}"}), 500
+        uploaded_image_paths.append(img_path)
+
     # Create the post. The pasted body is stored as post_text (and ru_post_text)
     # so the existing script generator turns it into the narration directly —
     # no Telegram-formatted post is produced for manual entries.
@@ -1149,7 +1172,7 @@ def api_create_manual_post():
             article_url="",
             article_title=title[:300],
             post_text=body,
-            image_paths=[],
+            image_paths=uploaded_image_paths,
             scheduled_at=datetime.now(),
             video_paths=[uploaded_path] if uploaded_path else [],
             ru_post_text=body,
@@ -1161,6 +1184,12 @@ def api_create_manual_post():
                 os.remove(uploaded_path)
             except OSError:
                 pass
+        for img_path in uploaded_image_paths:
+            if os.path.exists(img_path):
+                try:
+                    os.remove(img_path)
+                except OSError:
+                    pass
         return jsonify({"error": f"Failed to create post: {exc}"}), 500
 
     # Rename the uploaded file to include the post id (clean, predictable name).
@@ -1174,7 +1203,22 @@ def api_create_manual_post():
         except OSError:
             final_path = uploaded_path  # keep temp name on failure
 
-    include_images = bool(request.form.get("include_images"))
+    # Rename the uploaded image(s) to include the post id (clean, predictable names).
+    for i, img_path in enumerate(uploaded_image_paths):
+        if not os.path.exists(img_path):
+            continue
+        ext = os.path.splitext(img_path)[1].lower()
+        final_img_path = os.path.join(IMAGES_DIR, f"manual_{post_id}_{i}{ext}")
+        try:
+            shutil.move(img_path, final_img_path)
+            db.remove_media_path(post_id, "image", img_path)
+            db.add_image_path(post_id, final_img_path)
+        except OSError:
+            pass
+
+    # Include the article images automatically when a picture was uploaded,
+    # in addition to the existing opt-in `include_images` form flag.
+    include_images = bool(request.form.get("include_images")) or bool(uploaded_image_paths)
     # Manual "New video from text" no longer defaults to the talking-head avatar —
     # the client must explicitly opt in (talking_head="1"/"true"/"yes").
     use_talking_head = (request.form.get("talking_head", "0") or "0").strip().lower() not in ("0", "false", "no", "")

@@ -1657,6 +1657,15 @@
         </div>
 
         <div class="field">
+          <label>Upload picture(s) <span style="text-transform:none;font-weight:500">(optional)</span></label>
+          <div class="file-drop" id="mfImageDrop" onclick="document.getElementById('mfImages').click()">
+            <span id="mfImageLabel">Click to choose picture(s) (jpg, png, webp…)</span>
+          </div>
+          <input type="file" id="mfImages" accept="image/*" multiple style="display:none" onchange="manualImagesPicked()" />
+          <div class="hint">Uploaded pictures are added into the generated video alongside the clips.</div>
+        </div>
+
+        <div class="field">
           <label class="row" style="display:flex;align-items:center;gap:8px;cursor:pointer;text-transform:none">
             <input id="mfTalkHead" type="checkbox" />
             <span>🗣️ Talking-head avatar (bottom half, lip-synced)</span>
@@ -3464,6 +3473,25 @@
         }
       }
 
+      function manualImagesPicked() {
+        const input = document.getElementById("mfImages");
+        const drop = document.getElementById("mfImageDrop");
+        const label = document.getElementById("mfImageLabel");
+        if (input.files && input.files.length) {
+          if (input.files.length === 1) {
+            const f = input.files[0];
+            const mb = (f.size / (1024 * 1024)).toFixed(1);
+            label.textContent = `${f.name} · ${mb} MB`;
+          } else {
+            label.textContent = `${input.files.length} pictures selected`;
+          }
+          drop.classList.add("has-file");
+        } else {
+          label.textContent = "Click to choose picture(s) (jpg, png, webp…)";
+          drop.classList.remove("has-file");
+        }
+      }
+
       async function submitManualPost() {
         const title = document.getElementById("mfTitle").value.trim();
         const body = document.getElementById("mfBody").value.trim();
@@ -3472,6 +3500,8 @@
           document.querySelector('#mfLang input[name="mflang"]:checked')?.value || "both";
         const fileInput = document.getElementById("mfFile");
         const file = fileInput.files && fileInput.files[0];
+        const imagesInput = document.getElementById("mfImages");
+        const images = imagesInput.files ? Array.from(imagesInput.files) : [];
 
         if (!title) {
           toast("Please enter a title", "error");
@@ -3494,6 +3524,7 @@
           fd.append("talking_head", document.getElementById("mfTalkHead")?.checked ? "1" : "0");
           if (youtube) fd.append("youtube_url", youtube);
           if (file) fd.append("video", file);
+          images.forEach((img) => fd.append("images", img));
 
           const res = await fetch("/api/posts/manual", { method: "POST", body: fd });
           const data = await res.json();
@@ -3509,6 +3540,8 @@
           document.getElementById("mfYoutube").value = "";
           fileInput.value = "";
           manualFilePicked();
+          imagesInput.value = "";
+          manualImagesPicked();
           // Jump to the active feed and let the card pick up the running task.
           currentPage = 1;
           await loadPosts(true);
