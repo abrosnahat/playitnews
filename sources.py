@@ -54,7 +54,7 @@ class ChampionatSource:
     """championat.ru UFC — reads the 'Обсуждаемые' tab of the top-news block."""
 
     BASE = "https://www.championat.ru"
-    LISTING_URL = "https://www.championat.ru/news/boxing/_ufc/1.html"
+    LISTING_URL = "https://www.championat.ru/news/boxing/1.html"
 
     async def get_latest_links(self, session: aiohttp.ClientSession) -> list[dict]:
         html = await fetch(session, self.LISTING_URL)
