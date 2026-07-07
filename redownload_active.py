@@ -120,8 +120,8 @@ async def _redownload_one(
     if deleted_imgs or deleted_vids:
         logger.info("  cleaned: %d image(s), %d video(s)", deleted_imgs, deleted_vids)
 
-    # 2) re-scrape article (project-aware — championat/ufc posts need the
-    # championat source, not the playground.ru default, to pick up video embeds)
+    # 2) re-scrape article (project-aware — ufc posts use the fighttime
+    # source, not the playground.ru default, to pick up the right hero image)
     project_name = post.get("project") or "gaming"
     source = sources.get_source(get_project(project_name).get("source"))
     article = await source.scrape_article(session, url)
