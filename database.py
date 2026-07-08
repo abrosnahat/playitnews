@@ -148,6 +148,23 @@ def update_post_text(post_id: int, new_text: str) -> None:
         )
 
 
+def update_post_text_ru(post_id: int, new_text: str) -> None:
+    new_text = _normalize_tg_html(new_text) or ""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE scheduled_posts SET ru_post_text = ? WHERE id = ?",
+            (new_text, post_id),
+        )
+
+
+def update_article_title(post_id: int, new_title: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE scheduled_posts SET article_title = ? WHERE id = ?",
+            (new_title, post_id),
+        )
+
+
 def set_generated_video_path(post_id: int, path: str | None) -> None:
     with get_conn() as conn:
         conn.execute(
