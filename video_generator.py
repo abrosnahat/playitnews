@@ -1506,38 +1506,14 @@ async def _synthesize_voice_gemini(
     # ---- Recover word timing via existing Whisper pipeline ----
     audio_dur = _get_audio_duration(audio_path)
 
-    # Synthesise a MULTI-cue VTT — one cue per sentence, with timestamps
-    # estimated proportionally to each sentence's character length across
-    # audio_dur. A single cue spanning the WHOLE audio (the old approach)
-    # collapses `_run_whisper_sync`'s per-sentence RU mapping into one giant
-    # window == the entire transcript, which defeats its whole purpose (bound
-    # word-mapping drift to a single sentence) and made RU subtitles from
-    # Gemini TTS noticeably worse than edge-tts (which writes real per-cue
-    # boundaries). Estimated boundaries don't need to be exact — they just
-    # need to roughly separate sentences so Whisper's own word timings land
-    # in the right window.
-    def _fmt_ts(sec: float) -> str:
-        h, rem = divmod(max(sec, 0.0), 3600)
-        m, s   = divmod(rem, 60)
-        return f"{int(h):02d}:{int(m):02d}:{s:06.3f}"
-
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?\u2026])\s+", text.strip()) if s.strip()]
-    if not sentences:
-        sentences = [text.strip()]
-
-    total_chars = sum(len(s) for s in sentences) or 1
+    # Synthesise a single-cue VTT covering [0, audio_dur] — same trick the
+    # docs recommend so _run_whisper_sync has a sentence anchor to bind to.
     vtt_path = os.path.join(workdir, "subs.vtt")
-    lines = ["WEBVTT", ""]
-    t_cursor = 0.0
-    for sentence in sentences:
-        frac = len(sentence) / total_chars
-        t_end = min(t_cursor + audio_dur * frac, audio_dur)
-        lines.append(f"{_fmt_ts(t_cursor)} --> {_fmt_ts(t_end)}")
-        lines.append(sentence)
-        lines.append("")
-        t_cursor = t_end
+    h, rem = divmod(audio_dur, 3600)
+    m, s   = divmod(rem, 60)
+    end_ts = f"{int(h):02d}:{int(m):02d}:{s:06.3f}"
     with open(vtt_path, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines))
+        fh.write(f"WEBVTT\n\n00:00:00.000 --> {end_ts}\n{text.strip()}\n")
 
     sentence_cues = _parse_vtt_cues(vtt_path)
     word_cues = await asyncio.to_thread(

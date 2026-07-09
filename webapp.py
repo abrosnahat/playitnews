@@ -1043,14 +1043,10 @@ def api_tts_generate():
 
     lang = (body.get("lang") or "en").strip().lower()
     voice = (body.get("voice") or "").strip() or None
-    try:
-        speed = float(body.get("speed", 1.0))
-    except (TypeError, ValueError):
-        speed = 1.0
 
     try:
         audio_path = _run_async(
-            video_generator.synthesize_gemini_tts_standalone(text, voice=voice, lang=lang, speed=speed)
+            video_generator.synthesize_gemini_tts_standalone(text, voice=voice, lang=lang)
         )
     except Exception as exc:
         logger.exception("Standalone TTS generation failed")

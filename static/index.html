@@ -1689,9 +1689,9 @@
         </div>
 
         <div class="field">
-          <label for="ttsText">Text</label>
-          <textarea id="ttsText" maxlength="5000" placeholder="Paste or type the text to voice…"></textarea>
-          <div class="hint">Up to 5000 characters. Sent to Gemini TTS as-is.</div>
+          <label for="ttsText">Prompt + text</label>
+          <textarea id="ttsText" maxlength="5000" placeholder="Write everything Gemini TTS should read, including any style/delivery instructions, e.g.:&#10;Read slowly and calmly, like a documentary narrator.&#10;&#10;Your transcript goes here..."></textarea>
+          <div class="hint">Up to 5000 characters. Sent to Gemini TTS exactly as written — include any pace/tone/emotion instructions directly in this field.</div>
         </div>
 
         <div class="field">
@@ -1705,13 +1705,6 @@
         <div class="field">
           <label for="ttsVoice">Voice</label>
           <select id="ttsVoice"></select>
-        </div>
-
-        <div class="field">
-          <label for="ttsSpeed">Speed <span id="ttsSpeedVal" style="text-transform:none;font-weight:500">1.0×</span></label>
-          <input type="range" id="ttsSpeed" min="0.5" max="2" step="0.05" value="1"
-                 oninput="document.getElementById('ttsSpeedVal').textContent = (+this.value).toFixed(2) + '×'" />
-          <div class="hint">Gemini TTS has no numeric rate control — this is sent as a "read at ~N words/min" instruction, so pacing may vary slightly between takes.</div>
         </div>
 
         <div class="modal-actions">
@@ -3585,9 +3578,6 @@
             .forEach((el) => el.addEventListener("change", _ttsApplyDefaultVoice));
         }
         _ttsApplyDefaultVoice();
-        const speedEl = document.getElementById("ttsSpeed");
-        speedEl.value = 1;
-        document.getElementById("ttsSpeedVal").textContent = "1.00×";
         document.getElementById("ttsResultWrap").style.display = "none";
         document.getElementById("ttsModal").classList.add("open");
         document.getElementById("ttsText").focus();
@@ -3605,7 +3595,6 @@
         const text = document.getElementById("ttsText").value.trim();
         const lang = document.querySelector('#ttsLang input[name="ttslang"]:checked')?.value || "en";
         const voice = document.getElementById("ttsVoice").value;
-        const speed = +document.getElementById("ttsSpeed").value || 1;
 
         if (!text) {
           toast("Please enter some text", "error");
@@ -3619,7 +3608,7 @@
           const res = await fetch("/api/tts/generate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text, lang, voice, speed }),
+            body: JSON.stringify({ text, lang, voice }),
           });
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || "Generation failed");
