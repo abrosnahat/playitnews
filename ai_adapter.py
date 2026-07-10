@@ -11,8 +11,13 @@ from config import (
     GEMINI_TEXT_MODEL,
     GEMINI_VIDEO_MODEL,
 )
+import gemini_keys
 
 logger = logging.getLogger(__name__)
+
+
+class _GeminiQuotaExceeded(Exception):
+    """Raised when a Gemini API call returns 429 / RESOURCE_EXHAUSTED."""
 
 
 # Map local Ollama model names to their cloud (Gemini API) equivalents so the
@@ -21,6 +26,44 @@ def _gemini_model_for(ollama_model: str | None) -> str:
     if ollama_model and ollama_model == OLLAMA_VIDEO_MODEL:
         return GEMINI_VIDEO_MODEL
     return GEMINI_TEXT_MODEL
+
+
+async def _gemini_post_with_retry(url: str, body: dict, headers: dict, timeout: int) -> dict:
+    """POST to the Gemini API with up to 3 attempts on 5xx errors.
+
+    Raises ``_GeminiQuotaExceeded`` immediately (no retry) on 429 /
+    RESOURCE_EXHAUSTED — the caller handles that by rotating API keys.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, 4):   # up to 3 attempts
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    json=body,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                ) as resp:
+                    if resp.status == 429:
+                        text_body = await resp.text()
+                        raise _GeminiQuotaExceeded(text_body[:500])
+                    if resp.status >= 500 and attempt < 3:
+                        last_exc = Exception(f"HTTP {resp.status}")
+                        logger.warning("Gemini API %s (attempt %d/3), retrying…", resp.status, attempt)
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    resp.raise_for_status()
+                    return await resp.json()
+        except aiohttp.ClientResponseError as exc:
+            if exc.status == 429:
+                raise _GeminiQuotaExceeded(str(exc)) from exc
+            if exc.status >= 500 and attempt < 3:
+                last_exc = exc
+                logger.warning("Gemini API %s (attempt %d/3), retrying…", exc.status, attempt)
+                await asyncio.sleep(2 ** attempt)
+                continue
+            raise
+    raise last_exc  # type: ignore[misc]
 
 
 async def _gemini_chat(payload: dict, timeout: int) -> dict:
@@ -60,35 +103,30 @@ async def _gemini_chat(payload: dict, timeout: int) -> dict:
         body["generationConfig"] = {"maxOutputTokens": num_predict}
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
 
+    max_key_attempts = max(gemini_keys.key_count(), 1)
+    data: dict | None = None
     last_exc: Exception | None = None
-    for attempt in range(1, 4):   # up to 3 attempts
+    for key_attempt in range(1, max_key_attempts + 1):
+        api_key = gemini_keys.get_current_key() or GEMINI_API_KEY
+        headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url,
-                    json=body,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=timeout),
-                ) as resp:
-                    if resp.status >= 500 and attempt < 3:
-                        last_exc = Exception(f"HTTP {resp.status}")
-                        logger.warning("Gemini API %s (attempt %d/3), retrying…", resp.status, attempt)
-                        await asyncio.sleep(2 ** attempt)
-                        continue
-                    resp.raise_for_status()
-                    data = await resp.json()
+            data = await _gemini_post_with_retry(url, body, headers, timeout)
             break
-        except aiohttp.ClientResponseError as exc:
-            if exc.status >= 500 and attempt < 3:
-                last_exc = exc
-                logger.warning("Gemini API %s (attempt %d/3), retrying…", exc.status, attempt)
-                await asyncio.sleep(2 ** attempt)
+        except _GeminiQuotaExceeded as exc:
+            last_exc = exc
+            if key_attempt < max_key_attempts:
+                logger.warning(
+                    "Gemini API quota exceeded on key #%d/%d — rotating to next key",
+                    key_attempt, max_key_attempts,
+                )
+                gemini_keys.rotate_key(reason="429 RESOURCE_EXHAUSTED")
                 continue
-            raise
-    else:
-        raise last_exc  # type: ignore[misc]
+            raise RuntimeError(
+                f"All {max_key_attempts} Gemini API key(s) exhausted quota: {exc}"
+            ) from exc
+    if data is None:
+        raise last_exc or RuntimeError("Gemini API request failed")
 
     try:
         parts = data["candidates"][0]["content"]["parts"]

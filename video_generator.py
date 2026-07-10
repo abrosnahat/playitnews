@@ -65,6 +65,7 @@ load_dotenv()
 
 import scraper as _scraper
 from config import VIDEOS_DIR, YT_CLIP_SKIP, YT_MAX_FILESIZE
+import gemini_keys
 
 # Directory with royalty-free background music tracks (mp3/wav/flac/ogg/m4a)
 MUSIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music")
@@ -263,6 +264,66 @@ try:
     _GENAI_OK = True
 except Exception:                                          # noqa: BLE001
     _GENAI_OK = False
+
+
+async def _gemini_tts_generate(prompt: str, chosen_voice: str, language_code: str, max_retries: int):
+    """Call Gemini TTS ``generate_content``, retrying transient errors and
+    rotating to the next configured GEMINI_API_KEY_N on quota exhaustion
+    (HTTP 429 / RESOURCE_EXHAUSTED). Returns the raw SDK response.
+
+    Raises RuntimeError if no API key is configured or all keys/retries fail.
+    """
+    speech_cfg = _gtypes.SpeechConfig(
+        voice_config=_gtypes.VoiceConfig(
+            prebuilt_voice_config=_gtypes.PrebuiltVoiceConfig(voice_name=chosen_voice)
+        ),
+        language_code=language_code,
+    )
+    gen_config = _gtypes.GenerateContentConfig(
+        response_modalities=["AUDIO"],
+        speech_config=speech_cfg,
+    )
+
+    max_key_attempts = max(gemini_keys.key_count(), 1)
+    last_err: Exception | None = None
+    for key_attempt in range(1, max_key_attempts + 1):
+        api_key = gemini_keys.get_current_key() or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "GEMINI_API_KEY (or GOOGLE_API_KEY) not set in .env — "
+                "get one at https://aistudio.google.com/apikey"
+            )
+        client = _genai.Client(api_key=api_key)
+        quota_hit = False
+        for attempt in range(1, max_retries + 1):
+            try:
+                return client.models.generate_content(
+                    model=GEMINI_TTS_MODEL,
+                    contents=prompt,
+                    config=gen_config,
+                )
+            except Exception as exc:                      # noqa: BLE001
+                last_err = exc
+                if gemini_keys.is_quota_error(exc):
+                    quota_hit = True
+                    logger.warning(
+                        "Gemini TTS quota exceeded on key #%d/%d: %s",
+                        key_attempt, max_key_attempts, exc.__class__.__name__,
+                    )
+                    break   # don't burn retries on an exhausted key — rotate instead
+                logger.warning(
+                    "Gemini TTS attempt %d/%d failed: %s",
+                    attempt, max_retries, exc.__class__.__name__,
+                )
+                if attempt < max_retries:
+                    await asyncio.sleep(2 ** attempt)
+        if quota_hit and key_attempt < max_key_attempts:
+            gemini_keys.rotate_key(reason="429 RESOURCE_EXHAUSTED (TTS)")
+            continue
+        break   # either quota exhausted on all keys, or a non-quota failure
+
+    raise RuntimeError(f"Gemini TTS failed after retries: {last_err}")
+
 
 # Active backend selector. "edge" = original edge-tts (default),
 # "gemini" = route through Gemini TTS.
@@ -1395,12 +1456,6 @@ async def _synthesize_voice_gemini(
         raise RuntimeError(
             "google-genai SDK not installed. Run: pip install google-genai"
         )
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "GEMINI_API_KEY (or GOOGLE_API_KEY) not set in .env — "
-            "get one at https://aistudio.google.com/apikey"
-        )
 
     # Determine language from the voice name passed by the caller (edge-tts
     # uses locale-prefixed names like "ru-RU-DmitryNeural"). For Gemini TTS
@@ -1425,42 +1480,11 @@ async def _synthesize_voice_gemini(
     director = _GEMINI_DIR_RU if whisper_lang == "ru" else _GEMINI_DIR_EN
     prompt = f"{director}{text.strip()}\n"
 
-    client = _genai.Client(api_key=api_key)
-    speech_cfg = _gtypes.SpeechConfig(
-        voice_config=_gtypes.VoiceConfig(
-            prebuilt_voice_config=_gtypes.PrebuiltVoiceConfig(
-                voice_name=chosen_voice,
-            )
-        ),
-        language_code="ru-RU" if whisper_lang == "ru" else "en-US",
+    response = await _gemini_tts_generate(
+        prompt, chosen_voice,
+        "ru-RU" if whisper_lang == "ru" else "en-US",
+        max_retries,
     )
-
-    # Preview models occasionally return text tokens instead of audio → 500.
-    # Exponential backoff retry per Google's own TTS docs.
-    last_err: Exception | None = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            response = client.models.generate_content(
-                model=GEMINI_TTS_MODEL,
-                contents=prompt,
-                config=_gtypes.GenerateContentConfig(
-                    response_modalities=["AUDIO"],
-                    speech_config=speech_cfg,
-                ),
-            )
-            break
-        except Exception as exc:                          # noqa: BLE001
-            last_err = exc
-            logger.warning(
-                "Gemini TTS attempt %d/%d failed: %s",
-                attempt, max_retries, exc.__class__.__name__,
-            )
-            if attempt < max_retries:
-                await asyncio.sleep(2 ** attempt)
-    else:                                                # all attempts failed
-        raise RuntimeError(
-            f"Gemini TTS failed after {max_retries} retries: {last_err}"
-        )
 
     # ---- Decode inline audio (WAV L16 24 kHz mono per Google docs) ----
     try:
@@ -1601,12 +1625,6 @@ async def synthesize_gemini_tts_standalone(
         raise RuntimeError(
             "google-genai SDK not installed. Run: pip install google-genai"
         )
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "GEMINI_API_KEY (or GOOGLE_API_KEY) not set in .env — "
-            "get one at https://aistudio.google.com/apikey"
-        )
 
     text = (text or "").strip()
     if not text:
@@ -1623,39 +1641,9 @@ async def synthesize_gemini_tts_standalone(
     director = _gemini_speed_prompt(speed, lang)
     prompt = f"{director}{text}\n"
 
-    client = _genai.Client(api_key=api_key)
-    speech_cfg = _gtypes.SpeechConfig(
-        voice_config=_gtypes.VoiceConfig(
-            prebuilt_voice_config=_gtypes.PrebuiltVoiceConfig(
-                voice_name=chosen_voice,
-            )
-        ),
-        language_code="ru-RU" if lang == "ru" else "en-US",
+    response = await _gemini_tts_generate(
+        prompt, chosen_voice, "ru-RU" if lang == "ru" else "en-US", max_retries,
     )
-
-    last_err: Exception | None = None
-    response = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            response = client.models.generate_content(
-                model=GEMINI_TTS_MODEL,
-                contents=prompt,
-                config=_gtypes.GenerateContentConfig(
-                    response_modalities=["AUDIO"],
-                    speech_config=speech_cfg,
-                ),
-            )
-            break
-        except Exception as exc:                          # noqa: BLE001
-            last_err = exc
-            logger.warning(
-                "Gemini TTS (standalone) attempt %d/%d failed: %s",
-                attempt, max_retries, exc.__class__.__name__,
-            )
-            if attempt < max_retries:
-                await asyncio.sleep(2 ** attempt)
-    if response is None:
-        raise RuntimeError(f"Gemini TTS failed after {max_retries} retries: {last_err}")
 
     try:
         part = response.candidates[0].content.parts[0]
