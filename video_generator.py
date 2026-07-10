@@ -1930,7 +1930,45 @@ async def _download_full_yt_video(
     return chosen
 
 
+# Detects a direct short-form video link (YouTube incl. Shorts, Instagram Reel,
+# TikTok, VK clip) pasted into the per-post "YouTube search query" field — as
+# opposed to a plain-text search query, which is the field's normal use.
+_DIRECT_VIDEO_URL_RE = re.compile(
+    r"^https?://([\w-]+\.)?(youtube\.com|youtu\.be|instagram\.com|tiktok\.com|vk\.com|vkvideo\.ru)/",
+    re.I,
+)
+
+
 _OUTRO_SKIP = 5.0  # don't take material from the last 5 s of a source video
+
+# Below this duration, a source video is used whole (no cutting into multiple
+# clips, no intro skip) — typical for YouTube Shorts / Reels / TikTok clips,
+# which are already a single short, complete moment.
+_SHORT_VIDEO_THRESHOLD = 60.0
+
+
+async def _clips_from_source(
+    video_path: str,
+    n_clips: int,
+    workdir: str,
+    intro_skip: float,
+    clip_name_prefix: str = "clip",
+) -> list[str]:
+    """Cut n_clips segments from video_path, unless it's shorter than
+    _SHORT_VIDEO_THRESHOLD — then use it whole, un-cut and without the
+    intro skip (nothing to trim on an already-short clip)."""
+    duration = _get_audio_duration(video_path)
+    if duration < _SHORT_VIDEO_THRESHOLD:
+        logger.info(
+            "Source video is short (%.1fs < %.0fs) — using it whole, no cutting/intro-skip: %s",
+            duration, _SHORT_VIDEO_THRESHOLD, os.path.basename(video_path),
+        )
+        return [video_path]
+    return await asyncio.to_thread(
+        _cut_clips_from_video, video_path, n_clips, workdir, intro_skip, clip_name_prefix,
+    )
+
+
 
 # Smart clip selection: pick the most visually active windows (scene cuts /
 # fast motion / action) instead of random positions. Disable with
@@ -3359,8 +3397,7 @@ async def fetch_gameplay_clips(
                 vi + 1, len(source_videos), src_vid,
             )
             prefix = f"vid{vi}_clip" if len(source_videos) > 1 else "clip"
-            vid_clips = await asyncio.to_thread(
-                _cut_clips_from_video,
+            vid_clips = await _clips_from_source(
                 src_vid, N_CLIPS_ARTICLE, workdir, float(YT_CLIP_SKIP), prefix,
             )
             all_clips.extend(vid_clips)
@@ -3375,17 +3412,26 @@ async def fetch_gameplay_clips(
         )
     else:
         # ── No article video: download ONE YT video and cut clips from it ──
-        logger.info(
-            "No article video — downloading 1 YT video for '%s' (skip=%d)",
-            search_query, yt_skip,
-        )
-        yt_video = await _download_full_yt_video(
-            search_query, workdir, skip=yt_skip,
-        )
+        # If the user pasted a direct video link (YouTube/Shorts, Instagram Reel,
+        # TikTok, VK) into the search-query field, fetch that exact video instead
+        # of treating the link text as a search query.
+        direct_url = user_query and bool(_DIRECT_VIDEO_URL_RE.match(search_query.strip()))
+        if direct_url:
+            logger.info("Custom query is a direct video link — downloading it: %s", search_query[:100])
+            yt_video = await _download_full_yt_video(
+                search_query.strip(), workdir, is_url=True,
+            )
+        else:
+            logger.info(
+                "No article video — downloading 1 YT video for '%s' (skip=%d)",
+                search_query, yt_skip,
+            )
+            yt_video = await _download_full_yt_video(
+                search_query, workdir, skip=yt_skip,
+            )
         clips: list[str] = []
         if yt_video:
-            clips = await asyncio.to_thread(
-                _cut_clips_from_video,
+            clips = await _clips_from_source(
                 yt_video, N_CLIPS_ARTICLE, workdir, float(YT_CLIP_SKIP),
                 "yt_clip",
             )
