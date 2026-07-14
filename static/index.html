@@ -2017,6 +2017,11 @@
         const isPending = p.status === "pending";
         const isActionable = p.status === "sent" || p.status === "approved";
         const isManual = !p.article_url; // manual posts have no source article URL
+        const projPlatforms = (PROJECT_MAP[p.project] || {}).platforms || null;
+        const tgEnFooter = (projPlatforms && projPlatforms["telegram-en"] && projPlatforms["telegram-en"].footer) || "@playitgamesnews";
+        const tgRuFooter = (projPlatforms && projPlatforms["telegram-ru"] && projPlatforms["telegram-ru"].footer) || "@readitgames";
+        const hasTgEn = !projPlatforms || ("telegram-en" in projPlatforms);
+        const hasTgRu = !projPlatforms || ("telegram-ru" in projPlatforms);
         const hasEnVid = p.en_video_exists;
         const hasRuVid = p.ru_video_exists;
 
@@ -2102,8 +2107,8 @@
     </div>`
             : `<div class="btn-row">
       <button class="btn btn-danger btn-sm" style="flex:1" onclick="markDone(${p.id}, this)">${ICON.check} Done — remove</button>
-      <button class="btn btn-outline btn-sm" style="flex:1" onclick="republishEn(${p.id}, this)">${ICON.repeat} EN → @playitgamesnews</button>
-      <button class="btn btn-outline btn-sm" style="flex:1" onclick="republishRu(${p.id}, this)">${ICON.repeat} RU → @readitgames</button>
+      ${hasTgEn ? `<button class="btn btn-outline btn-sm" style="flex:1" onclick="republishEn(${p.id}, this)">${ICON.repeat} EN → ${tgEnFooter}</button>` : ""}
+      ${hasTgRu ? `<button class="btn btn-outline btn-sm" style="flex:1" onclick="republishRu(${p.id}, this)">${ICON.repeat} RU → ${tgRuFooter}</button>` : ""}
       <button class="btn btn-outline btn-sm" style="flex:1" onclick="redownloadMedia(${p.id}, this)" title="Re-scrape the article and re-download its images and videos">${ICON.download} Re-download media</button>
     </div>`;
           btnHtml += `<div class="btn-section">

@@ -475,7 +475,10 @@ def api_projects():
             "title":    proj.get("title", name),
             "source":   proj.get("source"),
             "platforms": {
-                key: {"label": (cfg or {}).get("label", key)}
+                key: {
+                    "label": (cfg or {}).get("label", key),
+                    "footer": (cfg or {}).get("footer", ""),
+                }
                 for key, cfg in platforms.items()
             },
             "required_platforms": sorted(config.required_platforms(name)),
@@ -946,30 +949,48 @@ def api_republish_en(post_id: int):
 
 async def _do_republish_ru(post_id: int) -> None:
     post = db.get_scheduled_post(post_id)
+    project = post.get("project") or "gaming"
     ru_text = post["ru_post_text"]
     images  = [p for p in post.get("image_paths", [])  if os.path.exists(p)]
     raw_videos = [p for p in post.get("video_paths", []) if os.path.exists(p)]
     videos = _prepare_videos_for_tg(raw_videos, post_id=post_id)
+    ru_cr = platform_credentials(project, "telegram-ru")
+    if project == "gaming":
+        ru_channel = TELEGRAM_SECOND_CHANNEL_ID
+    else:
+        ru_channel = ru_cr.get("channel") or ""
+    ru_footer = ru_cr.get("footer") or "@readitgames"
+    if not ru_channel:
+        raise ValueError(f"No Telegram RU channel configured for project '{project}'")
     async with _make_bot() as bot:
         await _send_post_to_channel(
-            bot, TELEGRAM_SECOND_CHANNEL_ID, ru_text, "@readitgames",
+            bot, ru_channel, ru_text, ru_footer,
             images, videos, post_id=post_id,
         )
-    logger.info("Post #%d republished to @readitgames", post_id)
+    logger.info("Post #%d republished to %s", post_id, ru_channel)
 
 
 async def _do_republish_en(post_id: int) -> None:
     post = db.get_scheduled_post(post_id)
+    project = post.get("project") or "gaming"
     en_text = post["post_text"]
     images  = [p for p in post.get("image_paths", [])  if os.path.exists(p)]
     raw_videos = [p for p in post.get("video_paths", []) if os.path.exists(p)]
     videos = _prepare_videos_for_tg(raw_videos, post_id=post_id)
+    en_cr = platform_credentials(project, "telegram-en")
+    if project == "gaming":
+        en_channel = TELEGRAM_CHANNEL_ID
+    else:
+        en_channel = en_cr.get("channel") or ""
+    en_footer = en_cr.get("footer") or "@playitgamesnews"
+    if not en_channel:
+        raise ValueError(f"No Telegram EN channel configured for project '{project}'")
     async with _make_bot() as bot:
         await _send_post_to_channel(
-            bot, TELEGRAM_CHANNEL_ID, en_text, "@playitgamesnews",
+            bot, en_channel, en_text, en_footer,
             images, videos, post_id=post_id,
         )
-    logger.info("Post #%d republished to @playitgamesnews", post_id)
+    logger.info("Post #%d republished to %s", post_id, en_channel)
 
 
 # ---------------------------------------------------------------------------
