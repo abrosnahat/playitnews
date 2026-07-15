@@ -405,44 +405,78 @@ async def _download_youtube_video(video_id: str) -> Optional[str]:
         cookie_args = []
     else:
         cookie_args = ["--cookies-from-browser", yt_cookies_browser]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "yt-dlp",
-            "--no-playlist",
-            "--no-warnings",
-            *cookie_args,
-            "--format", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]/best",
-            "--max-filesize", "1500M",
-            "--merge-output-format", "mp4",
-            "--output", output_path,
-            url,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-        if proc.returncode not in (0, 101):
-            logger.warning(
-                "yt-dlp error downloading %s (rc=%d): %s",
-                video_id, proc.returncode, stderr.decode()[-400:],
-            )
-            return None
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 10240:
-            logger.info("YouTube видео скачано: %s", output_path)
-            return output_path
-        # yt-dlp may have chosen a different extension
-        for ext in (".webm", ".mkv"):
-            alt = os.path.join(VIDEOS_DIR, f"yt_{video_id}{ext}")
-            if os.path.exists(alt) and os.path.getsize(alt) > 10240:
-                return alt
-        logger.warning("YouTube видео не найдено после скачивания: %s", video_id)
-        return None
-    except asyncio.TimeoutError:
-        logger.error("yt-dlp timeout при скачивании YouTube видео: %s", video_id)
-        return None
-    except Exception as exc:
-        logger.error("Ошибка скачивания YouTube видео %s: %s", video_id, exc)
-        return None
+
+    # Require at least 720p when it exists, but don't fail on old/low-res source videos.
+    fmt = (
+        "bestvideo[height>=720][height<=1080]+bestaudio/best[height>=720][height<=1080]/"
+        "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+    )
+
+    # The "android_vr" client exposes the full DASH ladder (up to 4K) without needing
+    # cookies at all, and is the most reliable against 403s. Cookies (needed only for
+    # age-restricted/private videos) actually break android_vr — it silently returns
+    # an empty format list — which then forces a fallback to tv/web clients that only
+    # expose a single low-res muxed format (18, ~360p). So: try android_vr with NO
+    # cookies first (best quality), and only fall back to cookies (tv/ios/web) if that
+    # fails outright (e.g. the video really does require login).
+    phases = [
+        (["--extractor-args", "youtube:player_client=android_vr"], []),
+        (["--extractor-args", "youtube:player_client=tv,ios,web"], cookie_args),
+    ]
+
+    # 403 on videoplayback URLs from googlevideo is usually transient (edge-server
+    # hiccup / signed-URL race / temporary client block) rather than a hard failure —
+    # retry a couple of times per phase with backoff before falling back / giving up.
+    last_stderr = ""
+    for phase_extractor_args, phase_cookie_args in phases:
+        for attempt in range(1, 3):
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "yt-dlp",
+                    "--no-playlist",
+                    "--no-warnings",
+                    *phase_cookie_args,
+                    *phase_extractor_args,
+                    "--format", fmt,
+                    "--max-filesize", "1500M",
+                    "--merge-output-format", "mp4",
+                    "--output", output_path,
+                    url,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                )
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+                if proc.returncode not in (0, 101):
+                    last_stderr = stderr.decode(errors="replace")[-1500:]
+                    logger.warning(
+                        "yt-dlp error downloading %s (rc=%d, попытка %d/2, client=%s): %s",
+                        video_id, proc.returncode, attempt, phase_extractor_args[-1], last_stderr,
+                    )
+                    if attempt < 2:
+                        await asyncio.sleep(3.0 * attempt)
+                    continue
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 10240:
+                    logger.info("YouTube видео скачано: %s", output_path)
+                    return output_path
+                # yt-dlp may have chosen a different extension
+                for ext in (".webm", ".mkv"):
+                    alt = os.path.join(VIDEOS_DIR, f"yt_{video_id}{ext}")
+                    if os.path.exists(alt) and os.path.getsize(alt) > 10240:
+                        return alt
+                logger.warning("YouTube видео не найдено после скачивания: %s (попытка %d/2)", video_id, attempt)
+                if attempt < 2:
+                    await asyncio.sleep(3.0 * attempt)
+            except asyncio.TimeoutError:
+                logger.error("yt-dlp timeout при скачивании YouTube видео: %s (попытка %d/2)", video_id, attempt)
+                if attempt < 2:
+                    await asyncio.sleep(3.0 * attempt)
+            except Exception as exc:
+                logger.error("Ошибка скачивания YouTube видео %s: %s", video_id, exc)
+                return None
+    if last_stderr:
+        logger.warning("YouTube видео %s не скачано ни одним клиентом: %s", video_id, last_stderr)
+    return None
 
 
 async def _download_vk_video(oid: str, vid: str) -> Optional[str]:
