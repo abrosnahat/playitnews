@@ -1854,9 +1854,15 @@ async def _download_full_yt_video(
     os.makedirs(clips_dir, exist_ok=True)
 
     # Prefer 720p mp4 to avoid YouTube n-challenge throttling on higher formats;
-    # fall back to merged 'best' (always available without n-challenge).
+    # fall back to merged 'best' (always available without n-challenge). Used
+    # for bulk ytsearch downloads, where 720p is plenty for cut-up gameplay clips.
     _FMT = ("bestvideo[height=720][ext=mp4]/bestvideo[height<=720][ext=mp4]"
             "/bestvideo[height<=720]/bestvideo[ext=mp4]/bestvideo/best")
+
+    # A direct link (is_url=True) is a single, deliberately-chosen video —
+    # e.g. a pasted YouTube Short/Reel/TikTok URL — so fetch it at the highest
+    # resolution available instead of the 720p cap used for bulk search results.
+    _FMT_URL = "bestvideo[ext=mp4]/bestvideo/best[ext=mp4]/best"
 
     if is_url:
         ydl_args = [
@@ -1864,7 +1870,7 @@ async def _download_full_yt_video(
             "--no-playlist", "--no-warnings",
             *_YT_COOKIE_ARGS,
             *_YT_EXTRACTOR_ARGS,
-            "--format", _FMT,
+            "--format", _FMT_URL,
             "--max-filesize", f"{YT_MAX_FILESIZE}M",
             "--output", os.path.join(clips_dir, "source.%(ext)s"),
             url_or_search,
