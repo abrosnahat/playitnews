@@ -51,12 +51,23 @@ async def fetch(session: aiohttp.ClientSession, url: str) -> Optional[str]:
     return None
 
 
-async def get_latest_article_links(session: aiohttp.ClientSession) -> list[dict]:
-    """Scrape the news listing page and return list of {url, title}."""
+async def get_latest_article_links(
+    session: aiohttp.ClientSession,
+    listing_url: str = NEWS_URL,
+    blocked_categories: list[str] | None = None,
+) -> list[dict]:
+    """Scrape a playground.ru news listing page and return list of {url, title}.
+
+    ``listing_url`` — which listing page to scrape (defaults to the main
+    ``/news`` feed). ``blocked_categories`` — URL path segments to skip;
+    defaults to ``BLOCKED_URL_CATEGORIES`` (module config) when not given.
+    """
+    if blocked_categories is None:
+        blocked_categories = BLOCKED_URL_CATEGORIES
     # Cookie pg_post_sorting=creation_date forces "newest first" sort order
     try:
         async with session.get(
-            NEWS_URL,
+            listing_url,
             headers=HEADERS,
             # cookies={"pg_post_sorting": "%7B%22news%22%3A%22creation_date%22%7D"},
             timeout=aiohttp.ClientTimeout(total=30),
@@ -64,7 +75,7 @@ async def get_latest_article_links(session: aiohttp.ClientSession) -> list[dict]
         ) as resp:
             html = await resp.text() if resp.status == 200 else None
     except Exception as exc:
-        logger.error("Ошибка загрузки страницы [%s]: %s", NEWS_URL, exc)
+        logger.error("Ошибка загрузки страницы [%s]: %s", listing_url, exc)
         html = None
     if not html:
         return []
@@ -100,7 +111,7 @@ async def get_latest_article_links(session: aiohttp.ClientSession) -> list[dict]
         title = title_tag.get_text(strip=True)
 
         # --- Filter by URL category ---
-        if any(cat in full_url for cat in BLOCKED_URL_CATEGORIES):
+        if any(cat in full_url for cat in blocked_categories):
             logger.debug("Пропускаем (категория): %s", full_url)
             continue
 

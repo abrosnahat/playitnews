@@ -38,6 +38,24 @@ class PlaygroundSource:
         return await scraper.scrape_article(session, url)
 
 
+class PlaygroundMoviesSource:
+    """playground.ru/news/movies — movies & TV series news only.
+
+    Same site/markup as ``PlaygroundSource``, just a different listing page
+    and no category blocklist (the listing page is already movies-only).
+    """
+
+    LISTING_URL = "https://www.playground.ru/news/movies"
+
+    async def get_latest_links(self, session: aiohttp.ClientSession) -> list[dict]:
+        return await scraper.get_latest_article_links(
+            session, listing_url=self.LISTING_URL, blocked_categories=[]
+        )
+
+    async def scrape_article(self, session: aiohttp.ClientSession, url: str) -> Optional[Article]:
+        return await scraper.scrape_article(session, url)
+
+
 class FightTimeSource:
     """fighttime.ru — MMA/UFC/boxing news listing + article scraper (Joomla/K2 site)."""
 
@@ -114,6 +132,7 @@ class FightTimeSource:
 
 _SOURCES: dict[str, NewsSource] = {
     "playground": PlaygroundSource(),
+    "playground_movies": PlaygroundMoviesSource(),
     "fighttime": FightTimeSource(),
 }
 

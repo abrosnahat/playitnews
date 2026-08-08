@@ -360,8 +360,8 @@ _GEMINI_DIR_RU = (
 # Optional call-to-action appended to the narration (opt-in via UI checkbox).
 # Drives viewers from Shorts/Reels to the Telegram channels. The hook is the
 # "full game trailer" — something the short clip doesn't fully show.
-CTA_PHRASE    = "Full game trailer is in our Telegram link in bio, join now!"
-CTA_PHRASE_RU = "Полный трейлер игры в нашем Telegram канале, ссылка в профиле!"
+CTA_PHRASE    = "Full trailer is in our Telegram, link in bio!"
+CTA_PHRASE_RU = "Полный трейлер в нашем Telegram канале, ссылка в профиле!"
 
 
 # yt-dlp cookie arguments — passes browser cookies to bypass YouTube bot check.
