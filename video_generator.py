@@ -94,6 +94,19 @@ USE_MONITOR_FRAME = os.getenv("USE_MONITOR_FRAME", "1") not in ("0", "false", "F
 # ---------------------------------------------------------------------------
 USE_TALKING_HEAD = os.getenv("USE_TALKING_HEAD", "0") not in ("0", "false", "False", "no", "")
 
+# ---------------------------------------------------------------------------
+# UFC project promo banner: a small looping clip (assets/banner.mp4) overlaid
+# top-center on every "ufc" project video. Its flat blue background is
+# chroma-keyed out so only the rounded banner card shows.
+# ---------------------------------------------------------------------------
+UFC_BANNER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "banner.mp4")
+UFC_BANNER_START = float(os.getenv("UFC_BANNER_START", "2.5"))          # secs — banner is on-screen by here
+UFC_BANNER_WIDTH = int(os.getenv("UFC_BANNER_WIDTH", "760"))            # px wide — readable, not overpowering
+UFC_BANNER_TOP_MARGIN = int(os.getenv("UFC_BANNER_TOP_MARGIN", "60"))   # px from top edge
+UFC_BANNER_CHROMA_COLOR = os.getenv("UFC_BANNER_CHROMA_COLOR", "0x031EF2")  # sampled from banner.mp4 bg
+UFC_BANNER_CHROMA_SIMILARITY = float(os.getenv("UFC_BANNER_CHROMA_SIMILARITY", "0.28"))
+UFC_BANNER_CHROMA_BLEND = float(os.getenv("UFC_BANNER_CHROMA_BLEND", "0.15"))
+
 # Inner ("on-screen") content size — 16:9, rendered first, then placed on monitor.
 INNER_W = 1600
 INNER_H = 900
@@ -3017,6 +3030,45 @@ async def _compose_talking_head_scene(
     return ok and os.path.exists(output_mp4)
 
 
+async def _compose_ufc_banner_overlay(
+    input_mp4: str, output_mp4: str, duration: float,
+) -> bool:
+    """
+    Overlay the looping UFC promo banner (assets/banner.mp4) top-center on
+    `input_mp4`. The banner's flat blue background is chroma-keyed to
+    transparent so only the rounded card shows. The banner starts within the
+    first few seconds (UFC_BANNER_START) and loops for the rest of the video.
+    """
+    if not os.path.exists(UFC_BANNER_PATH):
+        logger.warning("UFC banner overlay requested but %s not found", UFC_BANNER_PATH)
+        return False
+
+    start = max(0.0, min(UFC_BANNER_START, max(0.0, duration - 0.5)))
+    filter_complex = (
+        f"[1:v]scale={UFC_BANNER_WIDTH}:-1,"
+        f"colorkey={UFC_BANNER_CHROMA_COLOR}:{UFC_BANNER_CHROMA_SIMILARITY}:{UFC_BANNER_CHROMA_BLEND},"
+        f"despill=type=blue,format=yuva420p[banner];"
+        f"[0:v][banner]overlay=x=(W-w)/2:y={UFC_BANNER_TOP_MARGIN}:"
+        f"enable='gte(t,{start:.2f})':shortest=0[v]"
+    )
+    ok = await _run_async(
+        [
+            "ffmpeg", "-y",
+            "-i", input_mp4,
+            "-stream_loop", "-1", "-i", UFC_BANNER_PATH,
+            "-filter_complex", filter_complex,
+            "-map", "[v]", "-map", "0:a?",
+            "-c:a", "copy",
+            *_video_encoder_args(crf=20),
+            "-pix_fmt", "yuv420p",
+            "-t", f"{duration:.3f}",
+            output_mp4,
+        ],
+        timeout=180,
+    )
+    return ok
+
+
 async def _assemble_video(
     image_paths: list[str],
     video_clip_paths: list[str],
@@ -3027,6 +3079,7 @@ async def _assemble_video(
     n_article_clips: int = 0,
     use_monitor_frame: bool | None = None,
     use_talking_head: bool = False,
+    project: str | None = None,
 ) -> bool:
     """
     Assemble portrait video:
@@ -3305,6 +3358,16 @@ async def _assemble_video(
         else:
             logger.warning("Talking-head compose failed — falling back to gameplay-only 9:16")
 
+    # ── Step 3.8: UFC project promo banner overlay ────────────────────────
+    if project == "ufc":
+        banner_mp4 = os.path.join(workdir, "banner_overlay.mp4")
+        ok_banner = await _compose_ufc_banner_overlay(mixed_mp4, banner_mp4, audio_dur)
+        if ok_banner:
+            mixed_mp4 = banner_mp4
+            logger.info("UFC banner overlay composed")
+        else:
+            logger.warning("UFC banner overlay failed — continuing without banner")
+
     # ── Step 4: burn subtitles (Pillow PNG → ffmpeg overlay) ───────────────
     # Uses only the always-available `overlay` filter — no libass/libfreetype.
     final_mp4 = os.path.join(workdir, "final.mp4")
@@ -3564,6 +3627,7 @@ async def create_short_video(
             n_article_clips=n_article_clips,
             use_monitor_frame=use_monitor_frame,
             use_talking_head=use_talking_head,
+            project=post.get("project"),
         )
         return output_path if ok else None
 
