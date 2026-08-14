@@ -78,9 +78,6 @@ YOUTUBE_CATEGORY_ID: str = os.getenv("YOUTUBE_CATEGORY_ID", "20")
 # Run get_youtube_token.py once logged in as the RU account, then point this variable at the saved token.
 YOUTUBE_TOKEN_FILE_RU: str = os.getenv("YOUTUBE_TOKEN_FILE_RU", os.path.join(BASE_DIR, "youtube_token_ru.json"))
 
-# TikTok browser session (persistent Chromium profile, created by get_tiktok_session.py)
-TIKTOK_SESSION_DIR: str = os.getenv("TIKTOK_SESSION_DIR", os.path.join(BASE_DIR, "tiktok_session"))
-
 # VK API — загрузка коротких видео (VK Клипы)
 # Требуется access token со scope `video` (выдаётся по запросу в devsupport@corp.vk.com).
 # VK_GROUP_ID — числовой ID сообщества без минуса; если пусто, видео грузится в профиль владельца токена.

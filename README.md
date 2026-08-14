@@ -35,9 +35,7 @@ declared in [projects.json](projects.json).
    frame tagging), optional per-project overlays (e.g. UFC mid-roll ad / banner), burned-in subtitles.
 6. **Publish** — pushes the finished post/video to whichever platforms the
    project enables: Telegram channel, Instagram (Reels + carousels),
-   YouTube Shorts, VK Clips. TikTok has a persistent-browser session helper
-   ([get_tiktok_session.py](get_tiktok_session.py)) but automated TikTok
-   upload is not wired in yet.
+   YouTube Shorts, VK Clips.
 
 ---
 
@@ -70,7 +68,7 @@ declared in [projects.json](projects.json).
 | [youtube_publisher.py](youtube_publisher.py) | YouTube Data API v3 upload (Shorts). |
 | [vk_publisher.py](vk_publisher.py) | VK API — Clips upload + optional wall post. |
 | [github_uploader.py](github_uploader.py) | Uploads media to GitHub for public hosting (used where a public URL is required). |
-| [get_instagram_token.py](get_instagram_token.py), [get_youtube_token.py](get_youtube_token.py), [get_vk_token.py](get_vk_token.py), [get_tiktok_session.py](get_tiktok_session.py) | One-shot OAuth/session helpers, run manually once per account. |
+| [get_instagram_token.py](get_instagram_token.py), [get_youtube_token.py](get_youtube_token.py), [get_vk_token.py](get_vk_token.py) | One-shot OAuth/session helpers, run manually once per account. |
 | [redownload_active.py](redownload_active.py) | Utility to re-download missing/expired media for still-active posts. |
 
 ### Runtime directories / files (auto-created, gitignored)
@@ -80,7 +78,6 @@ declared in [projects.json](projects.json).
 - `assets/` — static assets checked into the repo: EAST text-detection model, optional mid-roll ad/banner overlays for video generation
 - `data.db` (SQLite, never delete in production), `playitnews.log`, `gemini_key_state.json`
 - `youtube_token.json`, `youtube_token_ru.json`, `client_secrets.json` — OAuth tokens (**not committed**)
-- `tiktok_session/` — persistent Chromium profile for TikTok (session capture only)
 
 ---
 
@@ -110,7 +107,6 @@ Configure whichever platforms a project needs. Values referenced from
 - **Instagram Graph API**: Business/Creator account + Facebook Page, app with `instagram_content_publish` permission → `INSTAGRAM_USER_ID` / `INSTAGRAM_ACCESS_TOKEN` (+ `_RU` variants). Helper: `get_instagram_token.py`.
 - **YouTube Data API v3**: `client_secrets.json` from Google Cloud Console + `get_youtube_token.py` to produce `youtube_token.json` (`_ru` variant for a second channel).
 - **VK API**: `VK_ACCESS_TOKEN` with `video` scope + `VK_GROUP_ID`. Helper: `get_vk_token.py`.
-- **TikTok**: `get_tiktok_session.py` opens a browser to log in and saves the session to `tiktok_session/` (upload automation not yet implemented).
 
 ### 5. Configure `.env`
 There is no `.env.example` in this repo — create `.env` in the project root and fill in the variables referenced in [config.py](config.py): Telegram tokens/IDs, `GEMINI_API_KEY` (+ platform credentials above), plus optional tuning knobs (`CHECK_INTERVAL_MINUTES`, `YT_CLIP_DURATION`, `YT_CLIP_SKIP`, `YT_MAX_CLIPS`, `YT_MAX_FILESIZE`, `PIXABAY_API_KEY`, `SMART_FRAME_MATCH`, `TTS_BACKEND`, `TTS_PODCAST_POLISH`, etc. — see comments in `config.py` / `video_generator.py`).
@@ -167,7 +163,7 @@ approval/editing/publishing all happens in the dashboard.
 
 ## Things to avoid
 
-- Don't commit `.env`, `*.json` token files, `data.db`, `playitnews.log`, `gemini_key_state.json`, `tiktok_session/`, or media under `images/` / `videos/` / `music/`.
+- Don't commit `.env`, `*.json` token files, `data.db`, `playitnews.log`, `gemini_key_state.json`, or media under `images/` / `videos/` / `music/`.
 - Don't hardcode credentials — always read through `config.py` / `projects.json`.
 - Don't run the bot twice against the same Telegram token (causes `getUpdates` conflicts); `start.ps1`/`start.sh` handle cleanup — respect it.
 - Don't switch the LLM backend without keeping `ai_adapter.py` and the `GEMINI_*` env vars consistent (Ollama support has been removed — Gemini/Gemma is the only backend).

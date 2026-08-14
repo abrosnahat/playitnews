@@ -9,7 +9,6 @@ Guidance for Claude Code when working in this repository.
 - Telegram channels (`@playitnews` EN, `@readitgames` RU)
 - Instagram (Reels, EN + RU accounts)
 - YouTube (Shorts, EN + RU channels)
-- TikTok (via persistent browser session)
 
 The pipeline scrapes articles, downloads images and video clips (HLS / YouTube embeds via `yt-dlp`), generates short videos with TTS narration (`edge-tts`) and subtitles (`faster-whisper`), and routes everything through an admin approval flow on Telegram.
 
@@ -33,8 +32,8 @@ The pipeline scrapes articles, downloads images and video clips (HLS / YouTube e
 | `analyze_video.py` | Helpers for clip selection / scoring |
 | `instagram_publisher.py` | Instagram Graph API Reels publishing |
 | `youtube_publisher.py` | YouTube Data API v3 upload |
-| `github_uploader.py` | Uploads media to GitHub for public hosting (used by Instagram/TikTok flows) |
-| `get_*_token.py` | One-shot OAuth / session helpers (Instagram, YouTube, TikTok) |
+| `github_uploader.py` | Uploads media to GitHub for public hosting (used by Instagram flows) |
+| `get_*_token.py` | One-shot OAuth / session helpers (Instagram, YouTube) |
 
 ### Runtime directories (auto-created)
 - `images/` — downloaded article images
@@ -46,7 +45,6 @@ The pipeline scrapes articles, downloads images and video clips (HLS / YouTube e
 - `data.db` (SQLite) — never delete in production
 - `playitnews.log` — rolling log
 - `youtube_token.json`, `youtube_token_ru.json`, `client_secrets.json` — OAuth tokens (do **not** commit)
-- `tiktok_session/` — persistent Chromium profile for TikTok
 
 ## Development
 
@@ -90,7 +88,7 @@ All secrets live in `.env` (loaded by `config.py` via `python-dotenv`). Key vars
 
 ## Things to avoid
 
-- Don't commit `.env`, `*.json` token files, `data.db`, `playitnews.log`, `tiktok_session/`, or media under `images/` / `videos/` / `music/`.
+- Don't commit `.env`, `*.json` token files, `data.db`, `playitnews.log`, or media under `images/` / `videos/` / `music/`.
 - Don't hardcode credentials — always read through `config.py`.
 - Don't run the bot twice against the same Telegram token (causes `getUpdates` conflicts). `start.sh` handles cleanup; respect it.
 - Don't switch the LLM backend without updating `ai_adapter.py` and the `GEMINI_*` env vars together (Ollama is no longer supported).
