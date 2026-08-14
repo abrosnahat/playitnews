@@ -94,6 +94,25 @@ USE_MONITOR_FRAME = os.getenv("USE_MONITOR_FRAME", "1") not in ("0", "false", "F
 # ---------------------------------------------------------------------------
 USE_TALKING_HEAD = os.getenv("USE_TALKING_HEAD", "0") not in ("0", "false", "False", "no", "")
 
+# ---------------------------------------------------------------------------
+# UFC project mid-roll ad integration (assets/midroll.mp4).
+#
+# For "ufc"-project videos only: the main video freezes at an early timestamp
+# (strictly before the halfway point) and a short green-screen host clip is
+# cut in on top of the frozen frame (green keyed out via colorkey/despill so
+# the host appears to stand in front of the paused footage). The clip's own
+# audio plays while the narration is paused; the main video then resumes
+# exactly where it left off (total runtime grows by the clip's duration).
+# ---------------------------------------------------------------------------
+UFC_MIDROLL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "midroll.mp4")
+# Insertion point as a fraction of total narration length — always further
+# clamped to <= 50% of the duration (never later than the midpoint).
+UFC_MIDROLL_START_RATIO = float(os.getenv("UFC_MIDROLL_START_RATIO", "0.35"))
+UFC_MIDROLL_MIN_START = float(os.getenv("UFC_MIDROLL_MIN_START", "1.5"))  # seconds
+UFC_MIDROLL_CHROMA_COLOR = os.getenv("UFC_MIDROLL_CHROMA_COLOR", "0x2dff08")
+UFC_MIDROLL_SIMILARITY = float(os.getenv("UFC_MIDROLL_SIMILARITY", "0.30"))
+UFC_MIDROLL_BLEND = float(os.getenv("UFC_MIDROLL_BLEND", "0.12"))
+
 # Inner ("on-screen") content size — 16:9, rendered first, then placed on monitor.
 INNER_W = 1600
 INNER_H = 900
@@ -3017,6 +3036,129 @@ async def _compose_talking_head_scene(
     return ok and os.path.exists(output_mp4)
 
 
+async def _insert_ufc_midroll_ad(
+    input_mp4: str,
+    output_mp4: str,
+    audio_dur: float,
+    workdir: str,
+) -> bool:
+    """
+    Splice the UFC mid-roll ad clip (``assets/midroll.mp4``) into an already
+    fully-composed + subtitled portrait video (``input_mp4``, 1080x1920).
+
+    The main video freezes at ``insert_at`` (< duration/2): a still frame is
+    grabbed at that timestamp and used as a looping background for the ad
+    clip's duration, with the ad clip overlaid on top after removing its
+    green background (colorkey + despill). The ad clip's own audio plays
+    during this segment; the main narration is paused. The main video then
+    resumes from ``insert_at`` onward, so total runtime grows by the ad
+    clip's duration. Returns False (caller keeps the original) on any error.
+    """
+    if not os.path.exists(UFC_MIDROLL_PATH):
+        logger.warning("UFC midroll asset missing at %s — skipping ad insert", UFC_MIDROLL_PATH)
+        return False
+
+    midroll_dur = _get_audio_duration(UFC_MIDROLL_PATH)
+    if midroll_dur <= 0:
+        logger.warning("Could not read midroll.mp4 duration — skipping ad insert")
+        return False
+
+    insert_at = min(audio_dur / 2.0, max(UFC_MIDROLL_MIN_START, audio_dur * UFC_MIDROLL_START_RATIO))
+    insert_at = min(insert_at, max(0.0, audio_dur - 0.2))
+    if insert_at <= 0.0:
+        logger.warning("Video too short for midroll ad insert (%.1fs) — skipping", audio_dur)
+        return False
+
+    # 1. Freeze frame at the insertion point.
+    freeze_png = os.path.join(workdir, "midroll_freeze.png")
+    ok = await _run_async(
+        ["ffmpeg", "-y", "-ss", f"{insert_at:.3f}", "-i", input_mp4,
+         "-frames:v", "1", "-q:v", "2", freeze_png],
+        timeout=60,
+    )
+    if not ok or not os.path.exists(freeze_png):
+        logger.warning("Midroll freeze-frame extraction failed — skipping ad insert")
+        return False
+
+    # 2. Build the ad segment: frozen background + chroma-keyed host overlay,
+    #    with the ad clip's own audio.
+    ad_segment = os.path.join(workdir, "midroll_ad.mp4")
+    filter_complex = (
+        f"[0:v]scale={VID_W}:{VID_H},setsar=1,format=yuv420p[bg];"
+        f"[1:v]scale={VID_W}:{VID_H}:force_original_aspect_ratio=decrease,"
+        f"pad={VID_W}:{VID_H}:(ow-iw)/2:(oh-ih)/2:color=black,"
+        f"colorkey={UFC_MIDROLL_CHROMA_COLOR}:{UFC_MIDROLL_SIMILARITY}:{UFC_MIDROLL_BLEND},"
+        f"despill=type=green[fg];"
+        f"[bg][fg]overlay=0:0:shortest=1,format=yuv420p[v]"
+    )
+    ok = await _run_async(
+        ["ffmpeg", "-y",
+         "-loop", "1", "-i", freeze_png,
+         "-i", UFC_MIDROLL_PATH,
+         "-filter_complex", filter_complex,
+         "-map", "[v]", "-map", "1:a",
+         "-r", str(VID_FPS),
+         *_video_encoder_args(crf=20),
+         "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-ar", "44100", "-ac", "2",
+         "-t", f"{midroll_dur:.3f}",
+         ad_segment],
+        timeout=120,
+    )
+    if not ok or not os.path.exists(ad_segment):
+        logger.warning("Midroll ad segment compose failed — skipping ad insert")
+        return False
+
+    # 3. Cut the main video into before/after parts around the insertion point.
+    before_seg = os.path.join(workdir, "midroll_before.mp4")
+    after_seg = os.path.join(workdir, "midroll_after.mp4")
+    ok_before = await _run_async(
+        ["ffmpeg", "-y", "-i", input_mp4, "-t", f"{insert_at:.3f}",
+         "-vf", f"fps={VID_FPS},setsar=1,format=yuv420p",
+         *_video_encoder_args(crf=20),
+         "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "44100", "-ac", "2",
+         before_seg],
+        timeout=120,
+    )
+    ok_after = await _run_async(
+        ["ffmpeg", "-y", "-ss", f"{insert_at:.3f}", "-i", input_mp4,
+         "-vf", f"fps={VID_FPS},setsar=1,format=yuv420p",
+         *_video_encoder_args(crf=20),
+         "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "44100", "-ac", "2",
+         after_seg],
+        timeout=120,
+    )
+    if not (ok_before and ok_after and os.path.exists(before_seg) and os.path.exists(after_seg)):
+        logger.warning("Midroll before/after split failed — skipping ad insert")
+        return False
+
+    # 4. Concat before → ad → after into the final spliced video.
+    concat_txt = os.path.join(workdir, "midroll_concat.txt")
+    with open(concat_txt, "w", encoding="utf-8") as fh:
+        for seg in (before_seg, ad_segment, after_seg):
+            fh.write(f"file '{seg}'\n")
+    ok = await _run_async(
+        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_txt,
+         "-vf", f"fps={VID_FPS},setsar=1,format=yuv420p",
+         "-af", "aformat=sample_rates=44100:channel_layouts=stereo",
+         *_video_encoder_args(crf=20),
+         "-pix_fmt", "yuv420p",
+         "-video_track_timescale", "15360",
+         "-c:a", "aac", "-ar", "44100", "-ac", "2",
+         output_mp4],
+        timeout=300,
+    )
+    if not ok or not os.path.exists(output_mp4):
+        logger.warning("Midroll final concat failed — skipping ad insert")
+        return False
+
+    logger.info(
+        "UFC midroll ad inserted at %.1fs (clip %.1fs long, new total ~%.1fs)",
+        insert_at, midroll_dur, audio_dur + midroll_dur,
+    )
+    return True
+
+
 async def _assemble_video(
     image_paths: list[str],
     video_clip_paths: list[str],
@@ -3027,6 +3169,7 @@ async def _assemble_video(
     n_article_clips: int = 0,
     use_monitor_frame: bool | None = None,
     use_talking_head: bool = False,
+    project: str | None = None,
 ) -> bool:
     """
     Assemble portrait video:
@@ -3315,6 +3458,15 @@ async def _assemble_video(
         logger.warning("Subtitle burn failed — sending video without subtitles")
         shutil.copy2(mixed_mp4, final_mp4)
 
+    # ── Step 5: UFC mid-roll ad integration (assets/midroll.mp4) ──────────
+    if project == "ufc" and os.path.exists(UFC_MIDROLL_PATH):
+        midroll_mp4 = os.path.join(workdir, "with_midroll.mp4")
+        ok_mid = await _insert_ufc_midroll_ad(final_mp4, midroll_mp4, audio_dur, workdir)
+        if ok_mid:
+            final_mp4 = midroll_mp4
+        else:
+            logger.warning("UFC midroll ad insert failed — continuing without it")
+
     shutil.copy2(final_mp4, output_path)
     return os.path.exists(output_path)
 
@@ -3564,6 +3716,7 @@ async def create_short_video(
             n_article_clips=n_article_clips,
             use_monitor_frame=use_monitor_frame,
             use_talking_head=use_talking_head,
+            project=post.get("project"),
         )
         return output_path if ok else None
 
