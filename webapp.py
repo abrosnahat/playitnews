@@ -1806,6 +1806,8 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         ht = " ".join(re.findall(r'#\w+', re.sub(r'<[^>]+>', '', post.get("post_text", ""))))
         if ht and ht not in raw:
             raw = raw.rstrip() + "\n\n" + ht
+        if project == "ufc" and "#kliply" not in raw.lower():
+            raw = raw.rstrip() + " #Kliply"
         return raw.rstrip() + "\n\nMore news in the telegram channel, link in the bio"
 
     def _caption_ru() -> str:
@@ -1814,6 +1816,8 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         ht = " ".join(re.findall(r'#\w+', re.sub(r'<[^>]+>', '', src)))
         if ht and ht not in raw:
             raw = raw.rstrip() + "\n\n" + ht
+        if project == "ufc" and "#kliply" not in raw.lower():
+            raw = raw.rstrip() + " #Kliply"
         return raw.rstrip() + "\n\nБольше новостей в telegram-канале, ссылка в био"
 
     def _tags(key: str = "post_text") -> list[str]:
