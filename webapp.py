@@ -316,7 +316,7 @@ class _SSEDetailLogHandler(logging.Handler):
     A video-generation task runs in a thread named ``vidgen-<post_id>`` and a
     social-publish task in ``publish-<post_id>``. While such a thread is active,
     every INFO record emitted by the heavy worker modules (video assembly,
-    MuseTalk lip-sync, whisper timing, Instagram/YouTube/CDN upload) is mirrored
+    whisper timing, Instagram/YouTube/CDN upload) is mirrored
     to the matching progress queue as a ``detail`` event so the dashboard can
     show every sub-step in real time.
     """
@@ -352,7 +352,7 @@ class _SSEDetailLogHandler(logging.Handler):
 _detail_handler = _SSEDetailLogHandler()
 _detail_handler.setLevel(logging.INFO)
 for _logger_name in (
-    "video_generator", "musetalk_avatar", "faster_whisper",
+    "video_generator", "faster_whisper",
     "instagram_publisher", "instagram_carousel_publisher",
     "youtube_publisher", "github_uploader", "thumbnail_generator",
     "carousel_builder", "vk_publisher",
@@ -1236,11 +1236,6 @@ def api_create_manual_post():
     # Include the article images automatically when a picture was uploaded,
     # in addition to the existing opt-in `include_images` form flag.
     include_images = bool(request.form.get("include_images")) or bool(uploaded_image_paths)
-    # Manual "New video from text" no longer defaults to the talking-head avatar —
-    # the client must explicitly opt in (talking_head="1"/"true"/"yes").
-    use_talking_head = (request.form.get("talking_head", "0") or "0").strip().lower() not in ("0", "false", "no", "")
-    # Talking-head and monitor frame are mutually exclusive — head wins.
-    use_monitor_frame = not use_talking_head
 
     def _run():
         try:
@@ -1254,7 +1249,7 @@ def api_create_manual_post():
                     _push(post_id, "Source video downloaded.", "progress")
                 else:
                     _push(post_id, "Could not download YouTube video — falling back to search.", "progress")
-            _run_async(_generate_video(post_id, lang, include_images=include_images, use_monitor_frame=use_monitor_frame, use_talking_head=use_talking_head))
+            _run_async(_generate_video(post_id, lang, include_images=include_images))
         except Exception as exc:
             _push(post_id, f"Fatal error: {exc}", "error")
         finally:
@@ -1283,11 +1278,6 @@ def api_generate_video(post_id: int):
         return jsonify({"error": "Post not found"}), 404
 
     include_images = bool(body.get("include_images", False))
-    use_monitor_frame = bool(body.get("monitor_frame", True))
-    use_talking_head = bool(body.get("talking_head", False))
-    # Talking-head and monitor frame are mutually exclusive — head wins.
-    if use_talking_head:
-        use_monitor_frame = False
     add_cta = bool(body.get("add_cta", False))
 
     # Optional custom YT search query override
@@ -1313,7 +1303,7 @@ def api_generate_video(post_id: int):
 
     def _run():
         try:
-            _run_async(_generate_video(post_id, lang, include_images=include_images, use_monitor_frame=use_monitor_frame, use_talking_head=use_talking_head, add_cta=add_cta))
+            _run_async(_generate_video(post_id, lang, include_images=include_images, add_cta=add_cta))
         except Exception as exc:
             _push(post_id, f"Fatal error: {exc}", "error")
         finally:
@@ -1483,7 +1473,7 @@ async def _generate_carousel(post_id: int, lang: str) -> None:
         raise
 
 
-async def _generate_video(post_id: int, lang: str, include_images: bool = False, use_monitor_frame: bool = True, use_talking_head: bool = False, add_cta: bool = False) -> None:
+async def _generate_video(post_id: int, lang: str, include_images: bool = False, add_cta: bool = False) -> None:
     """Core video generation logic (mirrors handle_create_video in bot.py)."""
     post = db.get_scheduled_post(post_id)
     if not post:
@@ -1614,8 +1604,6 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
                     prefetched_clips=shared_clips,
                     n_article_clips=len(article_videos),
                     include_article_images=include_images,
-                    use_monitor_frame=use_monitor_frame,
-                    use_talking_head=use_talking_head,
                     add_cta=add_cta,
                 )
                 if en_path:
@@ -1635,8 +1623,6 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
                     prefetched_clips=shared_clips,
                     n_article_clips=len(article_videos),
                     include_article_images=include_images,
-                    use_monitor_frame=use_monitor_frame,
-                    use_talking_head=use_talking_head,
                     add_cta=add_cta,
                 )
                 if ru_path:

@@ -1665,13 +1665,6 @@
           <div class="hint">Uploaded pictures are added into the generated video alongside the clips.</div>
         </div>
 
-        <div class="field">
-          <label class="row" style="display:flex;align-items:center;gap:8px;cursor:pointer;text-transform:none">
-            <input id="mfTalkHead" type="checkbox" />
-            <span>🗣️ Talking-head avatar (bottom half, lip-synced)</span>
-          </label>
-        </div>
-
         <div class="modal-actions">
           <button class="btn btn-danger" onclick="closeManualModal()">Cancel</button>
           <button class="btn btn-primary" id="mfSubmit" onclick="submitManualPost()">Generate video</button>
@@ -2125,16 +2118,6 @@
           <span class="switch-track"></span>
         </label>
         <label class="switch-row">
-          <input id="monFrame_${p.id}" type="checkbox" onchange="onMonFrameToggle(${p.id})">
-          <span class="switch-head"><span class="switch-icon">${ICON.monitor}</span><span class="switch-label">Use monitor frame</span></span>
-          <span class="switch-track"></span>
-        </label>
-        <label class="switch-row">
-          <input id="talkHead_${p.id}" type="checkbox" onchange="onTalkHeadToggle(${p.id})">
-          <span class="switch-head"><span class="switch-icon">${ICON.mic}</span><span class="switch-label">Talking-head avatar</span></span>
-          <span class="switch-track"></span>
-        </label>
-        <label class="switch-row">
           <input id="cta_${p.id}" type="checkbox">
           <span class="switch-head"><span class="switch-icon">${ICON.megaphone}</span><span class="switch-label">Add Telegram CTA</span></span>
           <span class="switch-track"></span>
@@ -2349,11 +2332,7 @@
         [/processing audio with duration/i, ICON.mic, "Распознавание аудио…"],
         [/TTS:\s*(\d+) word cues[^\n]*?([\d.]+)\s*s/i, ICON.check, (x) => "Голос готов (" + x[1] + " слов, " + x[2] + " с)", "done"],
         [/assembling video/i, ICON.film, "Сборка видео…"],
-        [/talking-head segments mode[^\n]*?(\d+)\/(\d+)/i, ICON.play, (x) => "Talking-head: " + x[1] + "/" + x[2] + " сегментов"],
         [/background music added/i, ICON.check, "Фоновая музыка добавлена", "done"],
-        [/generating talking-head avatar/i, ICON.play, "Генерация аватара…"],
-        [/musetalk: starting worker/i, ICON.play, "MuseTalk: липсинк-рендер…"],
-        [/talking-head scene composed/i, ICON.check, "Talking-head собран", "done"],
         [/burning\s+(\d+)\s+[^\n]*subtitle/i, ICON.film, "Прожиг субтитров…"],
       ];
 
@@ -2900,18 +2879,6 @@
       }
 
 
-      // ─── Talking-head / monitor-frame mutual exclusion ──────────────────────────
-      function onMonFrameToggle(id) {
-        const mon = document.getElementById(`monFrame_${id}`);
-        const th = document.getElementById(`talkHead_${id}`);
-        if (mon && th && mon.checked) th.checked = false;
-      }
-      function onTalkHeadToggle(id) {
-        const mon = document.getElementById(`monFrame_${id}`);
-        const th = document.getElementById(`talkHead_${id}`);
-        if (mon && th && th.checked) mon.checked = false;
-      }
-
       // ─── Generate video ────────────────────────────────────────────────────────
       async function generateVideo(id, lang) {
         const area = document.getElementById(`progressArea_${id}`);
@@ -2920,10 +2887,6 @@
         const ytQuery = ytqEl ? ytqEl.value.trim() : "";
         const incImgEl = document.getElementById(`incImg_${id}`);
         const includeImages = !!(incImgEl && incImgEl.checked);
-        const monFrameEl = document.getElementById(`monFrame_${id}`);
-        const monitorFrame = monFrameEl ? !!monFrameEl.checked : true;
-        const talkHeadEl = document.getElementById(`talkHead_${id}`);
-        const talkingHead = !!(talkHeadEl && talkHeadEl.checked);
         const ctaEl = document.getElementById(`cta_${id}`);
         const addCta = !!(ctaEl && ctaEl.checked);
         progressLogs[id] = { kind: "video", events: [] };
@@ -2941,8 +2904,6 @@
             body: JSON.stringify({
               lang,
               include_images: includeImages,
-              monitor_frame: monitorFrame,
-              talking_head: talkingHead,
               add_cta: addCta,
               ...(ytQuery ? { yt_query: ytQuery } : {}),
             }),
@@ -3520,7 +3481,6 @@
           fd.append("title", title);
           fd.append("body", body);
           fd.append("lang", lang);
-          fd.append("talking_head", document.getElementById("mfTalkHead")?.checked ? "1" : "0");
           if (youtube) fd.append("youtube_url", youtube);
           if (file) fd.append("video", file);
           images.forEach((img) => fd.append("images", img));

@@ -15,9 +15,3 @@ ufc_youtube_token.json
 projects.json
 tiktok_session/
 gemini_key_state.json
-
-# MuseTalk talking-head (isolated env, large model weights, render caches)
-musetalk_repo/.venv-musetalk/
-musetalk_repo/models/
-musetalk_repo/results/
-musetalk_repo/test_head_*.mp4

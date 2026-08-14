@@ -32,8 +32,7 @@ declared in [projects.json](projects.json).
    1080×1920 vertical video per post: TTS narration (`edge-tts` or Gemini
    TTS), `faster-whisper` word-level subtitle timing, YouTube/Pixabay
    b-roll clips selected and ordered to match the script (via Gemini Vision
-   frame tagging), optional MuseTalk lip-synced talking-head avatar, optional
-   per-project overlays (e.g. UFC mid-roll ad / banner), burned-in subtitles.
+   frame tagging), optional per-project overlays (e.g. UFC mid-roll ad / banner), burned-in subtitles.
 6. **Publish** — pushes the finished post/video to whichever platforms the
    project enables: Telegram channel, Instagram (Reels + carousels),
    YouTube Shorts, VK Clips. TikTok has a persistent-browser session helper
@@ -63,24 +62,22 @@ declared in [projects.json](projects.json).
 | [database.py](database.py) | SQLite (`data.db`) — seen articles, scheduled posts, publication state, per-post project tag. |
 | [config.py](config.py) | Loads `.env`, path constants, and the `projects.json` loader (`get_project`, `project_platforms`, `required_platforms`, `platform_credentials`, `project_ai`). |
 | [projects.json](projects.json) | Per-project source, check interval, platform credentials/labels, and AI prompt overrides. |
-| [video_generator.py](video_generator.py) | Builds the short video: TTS, subtitles, clip selection/ordering, talking-head compositing, project-specific overlays, final ffmpeg assembly. |
+| [video_generator.py](video_generator.py) | Builds the short video: TTS, subtitles, clip selection/ordering, project-specific overlays, final ffmpeg assembly. |
 | [thumbnail_generator.py](thumbnail_generator.py) | Renders the YouTube thumbnail (hook text over a frame). |
 | [carousel_builder.py](carousel_builder.py) | Builds Instagram carousel slide images. |
 | [analyze_video.py](analyze_video.py) | Clip scoring/selection helpers (scene-change + text-overlay detection) used by `video_generator.py`. |
-| [musetalk_avatar.py](musetalk_avatar.py) | Wrapper around the isolated MuseTalk (`musetalk_repo/`) subprocess for optional lip-synced talking-head video. |
 | [instagram_publisher.py](instagram_publisher.py) / [instagram_carousel_publisher.py](instagram_carousel_publisher.py) | Instagram Graph API — Reels / carousel publishing. |
 | [youtube_publisher.py](youtube_publisher.py) | YouTube Data API v3 upload (Shorts). |
 | [vk_publisher.py](vk_publisher.py) | VK API — Clips upload + optional wall post. |
 | [github_uploader.py](github_uploader.py) | Uploads media to GitHub for public hosting (used where a public URL is required). |
 | [get_instagram_token.py](get_instagram_token.py), [get_youtube_token.py](get_youtube_token.py), [get_vk_token.py](get_vk_token.py), [get_tiktok_session.py](get_tiktok_session.py) | One-shot OAuth/session helpers, run manually once per account. |
 | [redownload_active.py](redownload_active.py) | Utility to re-download missing/expired media for still-active posts. |
-| [calibrate_monitor.py](calibrate_monitor.py) | Helper for detecting/cropping the in-game monitor region in gameplay clips (`assets/monitors.json`). |
 
 ### Runtime directories / files (auto-created, gitignored)
 - `images/` — downloaded article images (`images/carousels/` for carousel slides)
 - `videos/` — per-article working dirs (`clips_*/`, `gen_*/`) with downloaded clips and assembled videos; `tts_manual/` for the dashboard's standalone TTS tool
 - `music/` — background music pool for video generation
-- `assets/` — static assets checked into the repo: EAST text-detection model, monitor calibration data, optional avatar video(s)/mid-roll ad/banner overlays for video generation
+- `assets/` — static assets checked into the repo: EAST text-detection model, optional mid-roll ad/banner overlays for video generation
 - `data.db` (SQLite, never delete in production), `playitnews.log`, `gemini_key_state.json`
 - `youtube_token.json`, `youtube_token_ru.json`, `client_secrets.json` — OAuth tokens (**not committed**)
 - `tiktok_session/` — persistent Chromium profile for TikTok (session capture only)
@@ -116,7 +113,7 @@ Configure whichever platforms a project needs. Values referenced from
 - **TikTok**: `get_tiktok_session.py` opens a browser to log in and saves the session to `tiktok_session/` (upload automation not yet implemented).
 
 ### 5. Configure `.env`
-There is no `.env.example` in this repo — create `.env` in the project root and fill in the variables referenced in [config.py](config.py): Telegram tokens/IDs, `GEMINI_API_KEY` (+ platform credentials above), plus optional tuning knobs (`CHECK_INTERVAL_MINUTES`, `YT_CLIP_DURATION`, `YT_CLIP_SKIP`, `YT_MAX_CLIPS`, `YT_MAX_FILESIZE`, `PIXABAY_API_KEY`, `SMART_FRAME_MATCH`, `TTS_BACKEND`, `TTS_PODCAST_POLISH`, `MUSETALK_*`, etc. — see comments in `config.py` / `video_generator.py`).
+There is no `.env.example` in this repo — create `.env` in the project root and fill in the variables referenced in [config.py](config.py): Telegram tokens/IDs, `GEMINI_API_KEY` (+ platform credentials above), plus optional tuning knobs (`CHECK_INTERVAL_MINUTES`, `YT_CLIP_DURATION`, `YT_CLIP_SKIP`, `YT_MAX_CLIPS`, `YT_MAX_FILESIZE`, `PIXABAY_API_KEY`, `SMART_FRAME_MATCH`, `TTS_BACKEND`, `TTS_PODCAST_POLISH`, etc. — see comments in `config.py` / `video_generator.py`).
 
 ### 6. Configure `projects.json`
 Add/edit a project block: `title`, `source` (a key from `sources.py`'s
@@ -125,11 +122,6 @@ target, referencing env vars or inline credentials, `counts_as_published`
 to exclude Telegram from the "fully published" count), and optional `ai`
 prompt overrides (`search_query`, `relevance`, `post_text_en`/`post_text_ru`,
 `video_script`, `thumbnail_hook`).
-
-### 7. Optional: MuseTalk talking-head avatar
-Fully isolated in `musetalk_repo/` with its own `.venv-musetalk` — see that
-folder's README for setup. Disabled unless a project/render explicitly
-requests `talking_head`.
 
 ---
 
@@ -153,7 +145,7 @@ first to avoid Telegram `getUpdates` conflicts and port clashes on `:5003`.
 
 Open `http://localhost:5003`. Each detected article becomes a post card:
 review/edit the EN and RU text, generate a short video (with optional
-talking-head avatar, monitor-frame cropping, or project-specific overlays),
+project-specific overlays),
 preview it, then publish per-platform (Telegram / Instagram / Instagram
 carousel / YouTube / VK) — separately for EN and RU where applicable. A
 project tab bar filters posts by project. A standalone "paste text → TTS
