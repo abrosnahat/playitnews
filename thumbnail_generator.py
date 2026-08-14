@@ -585,7 +585,7 @@ if __name__ == "__main__":
         title_ru = post.get("article_title", "No title")
         print(f"Post #{sys.argv[1]}: {title_ru}")
         print(f"Source image: {source}")
-        print("Translating title to English via Ollama...")
+        print("Translating title to English via Gemini...")
         title_en = asyncio.run(ai_adapter.translate_title_to_english(title_ru))
         print(f"EN title: {title_en}")
     else:

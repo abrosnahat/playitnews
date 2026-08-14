@@ -38,15 +38,6 @@ TG_MAX_BYTES: int = (2000 if TELEGRAM_LOCAL_MODE else 50) * 1024 * 1024
 TELEGRAM_API_ID: str = os.getenv("TELEGRAM_API_ID", "")
 TELEGRAM_API_HASH: str = os.getenv("TELEGRAM_API_HASH", "")
 
-# Ollama (local)
-OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-# Default model — used for Telegram post generation, translations, filters.
-OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "gemma4:latest")
-# Separate model for video script generation (reasoning-grade for better hooks/structure).
-OLLAMA_VIDEO_MODEL: str = os.getenv("OLLAMA_VIDEO_MODEL", "gemma4:31b")
-
-# LLM backend for text generation: "ollama" (local) or "gemini" (Google cloud).
-LLM_BACKEND: str = os.getenv("LLM_BACKEND", "ollama").strip().lower()
 # Google Gemini API (https://aistudio.google.com/apikey)
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 # Cloud model for text generation.

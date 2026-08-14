@@ -3,10 +3,6 @@ import asyncio
 import logging
 import aiohttp
 from config import (
-    OLLAMA_BASE_URL,
-    OLLAMA_MODEL,
-    OLLAMA_VIDEO_MODEL,
-    LLM_BACKEND,
     GEMINI_API_KEY,
     GEMINI_TEXT_MODEL,
     GEMINI_VIDEO_MODEL,
@@ -18,14 +14,6 @@ logger = logging.getLogger(__name__)
 
 class _GeminiQuotaExceeded(Exception):
     """Raised when a Gemini API call returns 429 / RESOURCE_EXHAUSTED."""
-
-
-# Map local Ollama model names to their cloud (Gemini API) equivalents so the
-# same call sites work regardless of backend.
-def _gemini_model_for(ollama_model: str | None) -> str:
-    if ollama_model and ollama_model == OLLAMA_VIDEO_MODEL:
-        return GEMINI_VIDEO_MODEL
-    return GEMINI_TEXT_MODEL
 
 
 async def _gemini_post_with_retry(url: str, body: dict, headers: dict, timeout: int) -> dict:
@@ -67,10 +55,10 @@ async def _gemini_post_with_retry(url: str, body: dict, headers: dict, timeout: 
 
 
 async def _gemini_chat(payload: dict, timeout: int) -> dict:
-    """Call Google's Generative Language API with an Ollama-shaped ``payload``.
+    """Call Google's Generative Language API with a chat-style ``payload``
+    (``{"messages": [...], "model": ..., "options": {...}}``).
 
-    Returns an Ollama-shaped dict ``{"message": {"content": str}}`` so callers
-    don't need to know which backend produced the text.
+    Returns a normalized dict ``{"message": {"content": str}}``.
     Retries up to 3 times on 5xx errors (gemma-4 preview is occasionally flaky).
     """
     messages = payload.get("messages", [])
@@ -83,7 +71,7 @@ async def _gemini_chat(payload: dict, timeout: int) -> dict:
         g_role = "model" if role == "assistant" else "user"
         contents.append({"role": g_role, "parts": [{"text": m.get("content", "")}]})
 
-    model = _gemini_model_for(payload.get("model"))
+    model = payload.get("model") or GEMINI_TEXT_MODEL
     body: dict = {"contents": contents}
     if system_parts:
         system_text = "\n\n".join(system_parts)
@@ -138,25 +126,6 @@ async def _gemini_chat(payload: dict, timeout: int) -> dict:
     except (KeyError, IndexError):
         text = ""
     return {"message": {"content": text}}
-
-
-async def _chat_raw(payload: dict, timeout: int) -> dict:
-    """Send a chat-completion request to the configured LLM backend.
-
-    Routes to Google Gemini when ``LLM_BACKEND == 'gemini'``, otherwise to the
-    local Ollama server. Always returns an Ollama-shaped dict
-    ``{"message": {"content": str}}``.
-    """
-    if LLM_BACKEND == "gemini":
-        return await _gemini_chat(payload, timeout=timeout)
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            f"{OLLAMA_BASE_URL}/api/chat",
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=timeout),
-        ) as resp:
-            resp.raise_for_status()
-            return await resp.json()
 
 
 def _render_prompt(template: str, **tokens) -> str:
@@ -281,7 +250,7 @@ async def adapt_article_ru(title: str, body: str, prompt=None) -> str:
     ]
 
     try:
-        content = await _call_ollama_chat(messages, num_predict=8000, num_ctx=4096, timeout=300)
+        content = await _call_llm_chat(messages, num_predict=8000, num_ctx=4096, timeout=300)
         post_text = _trim_post_text(_sanitize_telegram_html(_md_to_html(content)))
         # Validate: must have more than just a headline + hashtags (>150 chars body)
         body_only = re.sub(r'<[^>]+>', '', post_text).strip()
@@ -299,7 +268,7 @@ async def adapt_article_ru(title: str, body: str, prompt=None) -> str:
             f"Заголовок: {title}\n\nТекст: {body[:2000]}\n\nПост:"
         )
         try:
-            content = await _call_ollama_chat(
+            content = await _call_llm_chat(
                 [{"role": "user", "content": simple_prompt}],
                 num_predict=6000, num_ctx=4096, timeout=300,
             )
@@ -315,7 +284,7 @@ async def adapt_article_ru(title: str, body: str, prompt=None) -> str:
 async def adapt_article(title: str, body: str, prompt=None) -> str:
     """
     Translate, rephrase, and adapt the Russian article into an English Telegram post.
-    Uses local Ollama — no API key required.
+    Uses the Gemini API (requires ``GEMINI_API_KEY``).
 
     ``prompt`` — optional per-project prompt override (from projects.json).
     """
@@ -347,7 +316,7 @@ async def adapt_article(title: str, body: str, prompt=None) -> str:
     ]
 
     try:
-        content = await _call_ollama_chat(messages, num_predict=8000, num_ctx=4096, timeout=300)
+        content = await _call_llm_chat(messages, num_predict=8000, num_ctx=4096, timeout=300)
         post_text = _trim_post_text(_sanitize_telegram_html(_md_to_html(content)))
         # Validate: must have more than just a headline + hashtags (>150 chars body)
         body_only = re.sub(r'<[^>]+>', '', post_text).strip()
@@ -364,7 +333,7 @@ async def adapt_article(title: str, body: str, prompt=None) -> str:
             f"Title: {title}\n\nBody: {body[:2000]}\n\nPost:"
         )
         try:
-            content = await _call_ollama_chat(
+            content = await _call_llm_chat(
                 [{"role": "user", "content": simple_prompt}],
                 num_predict=8000, num_ctx=4096, timeout=300,
             )
@@ -405,10 +374,10 @@ _GAMING_KEYWORDS = [
 
 async def is_gaming_related(title: str, prompt=None) -> bool:
     """
-    Ask Ollama whether a news article title is about video games.
+    Ask Gemini whether a news article title is about video games.
     Returns True  → process the article.
     Returns False → skip it.
-    Falls back to True (fail-open) if Ollama is unavailable.
+    Falls back to True (fail-open) if Gemini is unavailable.
 
     ``prompt`` — optional per-project prompt override (from projects.json).
     """
@@ -440,7 +409,7 @@ async def is_gaming_related(title: str, prompt=None) -> bool:
     if _sys:
         _messages.insert(0, {"role": "system", "content": _sys})
     try:
-        answer = (await _call_ollama_chat(
+        answer = (await _call_llm_chat(
             _messages, num_predict=2000, num_ctx=2048, timeout=120
         )).upper()
         result = "YES" in answer
@@ -448,7 +417,7 @@ async def is_gaming_related(title: str, prompt=None) -> bool:
         return result
     except Exception as exc:
         logger.warning("AI фильтр недоступен (%s), разрешаем статью: %s", exc, title[:70])
-        return True  # fail-open: не блокируем если Ollama лежит
+        return True  # fail-open: не блокируем если Gemini недоступен
 
 
 async def shorten_post(text: str, target_chars: int = 900) -> str:
@@ -466,7 +435,7 @@ async def shorten_post(text: str, target_chars: int = 900) -> str:
         {"role": "user", "content": user_message},
     ]
     try:
-        raw = await _call_ollama_chat(messages, num_predict=8000, timeout=300)
+        raw = await _call_llm_chat(messages, num_predict=8000, timeout=300)
         shortened = _sanitize_telegram_html(_md_to_html(raw))
         if len(shortened) < 50:
             logger.warning("shorten_post returned too-short result (%d chars), hard-truncating", len(shortened))
@@ -474,7 +443,7 @@ async def shorten_post(text: str, target_chars: int = 900) -> str:
         logger.info("Gemma сократил пост: %d → %d симв.", len(text), len(shortened))
         return shortened
     except Exception as exc:
-        logger.error("Ошибка Ollama shorten API: %s", exc)
+        logger.error("Ошибка Gemini shorten API: %s", exc)
         return _hard_truncate(text, target_chars)
 
 
@@ -490,38 +459,33 @@ def _hard_truncate(text: str, limit: int) -> str:
     return _sanitize_telegram_html(truncated)
 
 
-async def _call_ollama_chat(
+async def _call_llm_chat(
     messages: list[dict],
     *,
     num_predict: int = 100,
     num_ctx: int = 16384,
     timeout: int = 60,
     model: str | None = None,
-    think: bool | None = None,
 ) -> str:
-    """Send a chat request to Ollama and return the model's raw content string.
+    """Send a chat request to Gemini and return the model's raw content string.
     Raises on network / HTTP errors so callers can handle them individually.
 
-    ``think``: when set, passed as top-level ``think`` field to Ollama's
-    ``/api/chat`` to enable/disable reasoning for hybrid models like qwen3.
-    Use ``think=False`` for reasoning models when you only want the final
-    answer (avoids the output being consumed entirely inside ``<think>``).
+    ``model`` defaults to ``GEMINI_TEXT_MODEL``; pass ``GEMINI_VIDEO_MODEL``
+    for the heavier reasoning-grade calls (e.g. video script generation).
     """
     payload = {
-        "model": model or OLLAMA_MODEL,
+        "model": model or GEMINI_TEXT_MODEL,
         "messages": messages,
         "stream": False,
         "options": {"num_predict": num_predict, "num_ctx": num_ctx},
     }
-    if think is not None:
-        payload["think"] = think
-    data = await _chat_raw(payload, timeout=timeout)
+    data = await _gemini_chat(payload, timeout=timeout)
     return data["message"]["content"].strip()
 
 
 async def extract_game_name(article_title: str) -> str:
     """
-    Ask Ollama to extract a concise YouTube search query from the article headline.
+    Ask Gemini to extract a concise YouTube search query from the article headline.
     For game news: returns the game title (e.g. "GTA 6", "Elden Ring 2").
     For other gaming/tech news: returns a short descriptive query suitable for
     finding relevant YouTube footage (e.g. "PC gaming setup", "game awards ceremony").
@@ -539,7 +503,7 @@ async def extract_game_name(article_title: str) -> str:
         "Search query:"
     )
     try:
-        name = (await _call_ollama_chat(
+        name = (await _call_llm_chat(
             [{"role": "user", "content": user_message}], num_predict=2000, timeout=120
         )).strip('"\'')
         if name and len(name) <= 60:
@@ -552,7 +516,7 @@ async def extract_game_name(article_title: str) -> str:
 
 async def extract_fighter_query(article_title: str) -> str:
     """
-    Ask Ollama to extract the MMA/UFC fighter name(s) from a Russian headline
+    Ask Gemini to extract the MMA/UFC fighter name(s) from a Russian headline
     and build a Russian-language YouTube search query for their fight footage.
 
     Returns a Russian query such as "Махачев против Гарри бой" or
@@ -572,7 +536,7 @@ async def extract_fighter_query(article_title: str) -> str:
         "Поисковый запрос:"
     )
     try:
-        query = (await _call_ollama_chat(
+        query = (await _call_llm_chat(
             [{"role": "user", "content": user_message}], num_predict=2000, timeout=120
         )).strip('"\'')
         if query and len(query) <= 80:
@@ -600,7 +564,7 @@ async def extract_search_query(article_title: str, prompt=None) -> str:
     if _sys:
         _messages.insert(0, {"role": "system", "content": _sys})
     try:
-        query = (await _call_ollama_chat(
+        query = (await _call_llm_chat(
             _messages, num_predict=2000, timeout=120
         )).strip('"\'')
         if query and len(query) <= 80:
@@ -630,7 +594,7 @@ async def translate_title_to_english(article_title: str) -> str:
         "English title:"
     )
     try:
-        translated = (await _call_ollama_chat(
+        translated = (await _call_llm_chat(
             [{"role": "system", "content": system_content},
              {"role": "user", "content": user_message}], num_predict=2000, timeout=120
         )).strip('"\'')
@@ -679,7 +643,7 @@ async def generate_thumbnail_hook(article_title: str, lang: str = "ru", prompt=N
             "Caption:"
         )
     try:
-        hook = (await _call_ollama_chat(
+        hook = (await _call_llm_chat(
             [{"role": "system", "content": system_content},
              {"role": "user", "content": user_message}],
             num_predict=2000, timeout=120
@@ -695,7 +659,7 @@ async def generate_thumbnail_hook(article_title: str, lang: str = "ru", prompt=N
         # Retry with even more explicit prompt
         try:
             simple = f"Write a 2-word English gaming thumbnail caption for: {article_title}. English only, no Russian:"
-            hook = (await _call_ollama_chat(
+            hook = (await _call_llm_chat(
                 [{"role": "system", "content": "Reply in English only."},
                  {"role": "user", "content": simple}],
                 num_predict=2000, timeout=120
@@ -758,7 +722,7 @@ async def generate_carousel_bullets(
         "- Return ONLY the bullet lines, nothing else."
     )
     try:
-        raw = await _call_ollama_chat(
+        raw = await _call_llm_chat(
             [{"role": "system", "content": system_content},
              {"role": "user", "content": user_message}],
             num_predict=4000, num_ctx=4096, timeout=180,
@@ -916,13 +880,12 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
         {"role": "user", "content": user_message},
     ]
     try:
-        script = await _call_ollama_chat(
+        script = await _call_llm_chat(
             messages,
             num_predict=8000,
             num_ctx=16384,
             timeout=300,
-            model=OLLAMA_VIDEO_MODEL,
-            think=False,
+            model=GEMINI_VIDEO_MODEL,
         )
         # --- Extract answer from thinking / reasoning blocks ---
         # Strategy: prefer content AFTER the closing thinking tag; fall back to
@@ -938,7 +901,7 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
             logger.debug("Gemma4 channel block: after=%d words, inside=%d words → used %s",
                          len(after.split()), len(inside.split()), "after" if after else "inside")
 
-        # Standard <think>…</think> (qwen3, deepseek-r1, gemma4 via Ollama wrapper)
+        # Standard <think>…</think> (qwen3, deepseek-r1, gemma4 via Gemini API)
         _th = re.search(r"<think>(.*?)</think>(.*)", script, flags=re.DOTALL | re.IGNORECASE)
         if _th:
             after = _th.group(2).strip()

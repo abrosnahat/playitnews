@@ -24,7 +24,7 @@ The pipeline scrapes articles, downloads images and video clips (HLS / YouTube e
 | File | Responsibility |
 | --- | --- |
 | `scraper.py` | playground.ru parsing, image and HLS video download, YouTube embed extraction |
-| `ai_adapter.py` | LLM calls (Ollama / Claude) for translation, adaptation, gaming-relevance check |
+| `ai_adapter.py` | LLM calls (Google Gemini/Gemma) for translation, adaptation, gaming-relevance check |
 | `bot.py` | Telegram handlers — Approve / Edit / Cancel admin buttons |
 | `database.py` | SQLite (`data.db`) — seen articles, scheduled posts, publication state |
 | `config.py` | Loads `.env`, defines paths, constants, content filters |
@@ -72,7 +72,7 @@ python3 webapp.py
 ### Configuration
 All secrets live in `.env` (loaded by `config.py` via `python-dotenv`). Key vars:
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, `TELEGRAM_CHANNEL_ID`, `TELEGRAM_SECOND_CHANNEL_ID`
-- `OLLAMA_BASE_URL`, `OLLAMA_MODEL` (local LLM for adaptation)
+- `GEMINI_API_KEY` (+ `GEMINI_API_KEY_1/2/3...` for rotation), `GEMINI_TEXT_MODEL`, `GEMINI_VIDEO_MODEL` (Gemini/Gemma cloud LLM for adaptation)
 - `INSTAGRAM_USER_ID[_RU]`, `INSTAGRAM_ACCESS_TOKEN[_RU]`
 - `YOUTUBE_TOKEN_FILE[_RU]`, `YOUTUBE_CLIENT_SECRETS`
 - `PIXABAY_API_KEY`
@@ -93,4 +93,4 @@ All secrets live in `.env` (loaded by `config.py` via `python-dotenv`). Key vars
 - Don't commit `.env`, `*.json` token files, `data.db`, `playitnews.log`, `tiktok_session/`, or media under `images/` / `videos/` / `music/`.
 - Don't hardcode credentials — always read through `config.py`.
 - Don't run the bot twice against the same Telegram token (causes `getUpdates` conflicts). `start.sh` handles cleanup; respect it.
-- Don't switch the LLM backend without updating `ai_adapter.py` and the `OLLAMA_*` env vars together.
+- Don't switch the LLM backend without updating `ai_adapter.py` and the `GEMINI_*` env vars together (Ollama is no longer supported).
