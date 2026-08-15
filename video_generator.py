@@ -1824,20 +1824,31 @@ _SHORTS_MAX_DURATION = 90.0
 # so the cut doesn't start/end mid-sentence.
 _SEGMENT_PAD = 1.5
 
+# Extra extractor-arg (search/tab pages only) that makes yt-dlp include an
+# APPROXIMATE upload timestamp for each flat search result (parsed from the
+# relative "N days/weeks ago" text on the results page) at no extra network
+# cost — lets us prefer fresher footage without a full per-video metadata
+# fetch. Harmless to pass alongside the youtube: extractor-args (different
+# extractor namespace).
+_YT_SEARCH_EXTRACTOR_ARGS = ["--extractor-args", "youtubetab:approximate_date"]
+
 
 async def _search_yt_candidates(query: str, count: int = 6) -> list[dict]:
     """
     Search YouTube for *query* and return lightweight metadata WITHOUT
-    downloading anything: [{"id","url","title","duration"}, ...] in search-rank
-    order. ``duration`` may be None if yt-dlp couldn't determine it from the
-    flat search listing (callers should treat that as "long-form, unknown").
+    downloading anything: [{"id","url","title","duration","timestamp"}, ...]
+    in search-rank order. ``duration`` may be None if yt-dlp couldn't
+    determine it from the flat search listing (callers should treat that as
+    "long-form, unknown"). ``timestamp`` (unix seconds, or None) is an
+    APPROXIMATE upload date parsed by yt-dlp from the results page — good
+    enough to rank "is this fresh" without extra requests.
     """
     args = [
         "yt-dlp",
         "--flat-playlist", "--dump-json", "--no-warnings",
         "--ignore-errors",
         "--match-filters", "live_status=not_live",
-        *_YT_COOKIE_ARGS, *_YT_EXTRACTOR_ARGS, *_YT_SLEEP_ARGS,
+        *_YT_COOKIE_ARGS, *_YT_EXTRACTOR_ARGS, *_YT_SEARCH_EXTRACTOR_ARGS, *_YT_SLEEP_ARGS,
         f"ytsearch{count}:{query}",
     ]
     out = await _run_capture_async(args, timeout=90)
@@ -1859,10 +1870,16 @@ async def _search_yt_candidates(query: str, count: int = 6) -> list[dict]:
             duration = float(duration) if duration is not None else None
         except (TypeError, ValueError):
             duration = None
+        timestamp = e.get("timestamp")
+        try:
+            timestamp = float(timestamp) if timestamp is not None else None
+        except (TypeError, ValueError):
+            timestamp = None
         candidates.append({
             "id": vid, "url": url,
             "title": e.get("title") or "",
             "duration": duration,
+            "timestamp": timestamp,
         })
     return candidates
 
@@ -1950,6 +1967,152 @@ async def _download_yt_segment(
     return path
 
 
+# ---------------------------------------------------------------------------
+# Gemini Vision frame verification
+#
+# Text-based search (entity queries) + transcript-based segment picking can
+# still land on the WRONG footage — auto-captions can be inaccurate/absent,
+# search ranking can surface a lookalike or an unrelated compilation, etc.
+# As a final check, grab one representative frame from each downloaded
+# candidate clip and ask Gemini Vision whether it plausibly matches what we
+# searched for. Non-matching clips are discarded so the next candidate gets
+# tried instead. Fails OPEN (accepts the clip) on any error/uncertainty —
+# this is a best-effort filter, not a hard requirement, so a flaky API call
+# never breaks video generation.
+# ---------------------------------------------------------------------------
+
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-3.1-flash-lite")
+_FRAME_MATCH_VERIFY = (
+    os.getenv("FRAME_MATCH_VERIFY", "1").strip().lower() not in ("0", "false", "no", "off", "")
+)
+
+
+def _extract_mid_frame(video_path: str, out_path: str) -> bool:
+    """Grab one JPEG frame from roughly the middle of *video_path*, downscaled
+    to 480px wide. Returns True on success."""
+    duration = _get_audio_duration(video_path)
+    ts = max(0.1, duration / 2)
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-ss", f"{ts:.2f}", "-i", video_path,
+                "-frames:v", "1", "-vf", "scale=480:-2",
+                out_path,
+            ],
+            capture_output=True, text=True, timeout=20,
+        )
+        return proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0
+    except Exception as exc:
+        logger.debug("Frame extraction failed for %s: %s", video_path, exc)
+        return False
+
+
+async def _gemini_vision_generate(prompt: str, image_bytes: bytes, mime_type: str = "image/jpeg", max_retries: int = 2) -> str:
+    """
+    Ask Gemini Vision a question about an image. Same API-key rotation/retry
+    pattern as ``_gemini_tts_generate``. Returns the text response (stripped).
+    Raises RuntimeError on total failure (no key / all retries exhausted).
+    """
+    if not _GENAI_OK:
+        raise RuntimeError("google-genai SDK not installed")
+
+    max_key_attempts = max(gemini_keys.key_count(), 1)
+    last_err: Exception | None = None
+    for key_attempt in range(1, max_key_attempts + 1):
+        api_key = gemini_keys.get_current_key() or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY (or GOOGLE_API_KEY) not set in .env")
+        client = _genai.Client(api_key=api_key)
+        quota_hit = False
+        for attempt in range(1, max_retries + 1):
+            try:
+                resp = client.models.generate_content(
+                    model=GEMINI_VISION_MODEL,
+                    contents=[
+                        _gtypes.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                        prompt,
+                    ],
+                )
+                return (resp.text or "").strip()
+            except Exception as exc:                      # noqa: BLE001
+                last_err = exc
+                if gemini_keys.is_quota_error(exc):
+                    quota_hit = True
+                    logger.warning(
+                        "Gemini Vision quota exceeded on key #%d/%d: %s",
+                        key_attempt, max_key_attempts, exc.__class__.__name__,
+                    )
+                    break
+                logger.debug("Gemini Vision attempt %d/%d failed: %s", attempt, max_retries, exc)
+                if attempt < max_retries:
+                    await asyncio.sleep(1.5 * attempt)
+        if quota_hit and key_attempt < max_key_attempts:
+            gemini_keys.rotate_key(reason="429 RESOURCE_EXHAUSTED (vision)")
+            continue
+        break
+
+    raise RuntimeError(f"Gemini Vision failed: {last_err}")
+
+
+async def _clip_matches_query(clip_path: str, query: str, workdir: str) -> bool:
+    """
+    Ask Gemini Vision whether a representative frame of *clip_path* plausibly
+    shows footage relevant to *query*. Returns True (accept) whenever this
+    can't be determined (disabled, SDK missing, extraction/API failure) —
+    it's a best-effort filter, never a hard gate.
+    """
+    if not _FRAME_MATCH_VERIFY or not _GENAI_OK:
+        return True
+    frame_path = os.path.join(workdir, f"frame_{uuid.uuid4().hex[:8]}.jpg")
+    try:
+        extracted = await asyncio.to_thread(_extract_mid_frame, clip_path, frame_path)
+        if not extracted:
+            return True
+        with open(frame_path, "rb") as fh:
+            image_bytes = fh.read()
+        prompt = (
+            "This is a single frame sampled from a candidate B-roll video clip "
+            f"for a short news video about: \"{query}\".\n"
+            "Does this frame plausibly belong to footage about that topic "
+            "(the right person, fight, event, or clearly relevant action) — "
+            "as opposed to something CLEARLY unrelated (a different person, "
+            "an ad/promo, an unrelated video, a blank/static title card, etc.)?\n"
+            "If you are not sure, answer YES (only reject when you are confident "
+            "it's unrelated).\n"
+            "Answer with a single word: YES or NO."
+        )
+        answer = await _gemini_vision_generate(prompt, image_bytes)
+        verdict = answer.strip().upper().startswith("Y") if answer else True
+        logger.info(
+            "Gemini vision check '%s' → %s (%s)",
+            query, "MATCH" if verdict else "NO MATCH", os.path.basename(clip_path),
+        )
+        return verdict
+    except Exception as exc:
+        logger.debug("Gemini vision check failed for '%s' (%s): %s — accepting by default",
+                     query, os.path.basename(clip_path), exc)
+        return True
+    finally:
+        try:
+            if os.path.exists(frame_path):
+                os.remove(frame_path)
+        except OSError:
+            pass
+
+
+async def _accept_matching_clips(candidate_paths: list[str], query: str, workdir: str) -> list[str]:
+    """Filter *candidate_paths* down to the ones Gemini Vision thinks plausibly
+    match *query* (see `_clip_matches_query`)."""
+    accepted: list[str] = []
+    for p in candidate_paths:
+        if await _clip_matches_query(p, query, workdir):
+            accepted.append(p)
+        else:
+            logger.info("Discarding non-matching clip for '%s': %s", query, os.path.basename(p))
+    return accepted
+
+
 async def _fetch_clips_for_query(
     query: str,
     n_clips: int,
@@ -1966,14 +2129,21 @@ async def _fetch_clips_for_query(
          best-matching timestamp range, and download ONLY that section.
       3. Fallback: download the whole top search result and randomly cut
          *n_clips* segments from it (the pre-existing behaviour).
+    Within each group, newer uploads are tried first (approximate upload date
+    from the search results) — fresher footage is more likely to actually
+    match a breaking news story than an old, unrelated clip that happens to
+    rank well for the same query.
     ``used_ids`` (optional, shared across calls) avoids re-picking the same
     source video for multiple different queries in one render.
     """
     if used_ids is None:
         used_ids = set()
 
+    # Shorts get a bigger dedicated search pool — they're strongly preferred
+    # (whole, ready-to-use clips, no segment-picking needed), so the more of
+    # them we find, the less often we need to fall back to long-form videos.
     candidates = await _search_yt_candidates(query, count=5)
-    candidates += await _search_yt_candidates(f"{query} shorts", count=4)
+    candidates += await _search_yt_candidates(f"{query} shorts", count=6)
     seen: set[str] = set()
     uniq: list[dict] = []
     for c in candidates:
@@ -1984,6 +2154,9 @@ async def _fetch_clips_for_query(
     if not uniq:
         logger.warning("No YT search results for '%s'", query)
         return []
+
+    # Prefer newer uploads (approximate timestamp — unknown dates sort last).
+    uniq.sort(key=lambda c: c.get("timestamp") or 0, reverse=True)
 
     # Rotate the candidate order by yt_skip so clicking "regenerate" (which
     # bumps yt_skip) picks different source videos instead of the same ones
@@ -2005,7 +2178,8 @@ async def _fetch_clips_for_query(
         if not video:
             continue
         used_ids.add(c["id"])
-        clips.extend(await _clips_from_source(video, n_clips - len(clips), workdir, 0.0, f"{clip_prefix}_short{si}"))
+        new_clips = await _clips_from_source(video, n_clips - len(clips), workdir, 0.0, f"{clip_prefix}_short{si}")
+        clips.extend(await _accept_matching_clips(new_clips, query, workdir))
 
     # 2. AI-picked segment from a long-form video. Bounded to a few attempts —
     #    each one costs a transcript fetch + LLM call + a slow yt-dlp download,
@@ -2033,19 +2207,23 @@ async def _fetch_clips_for_query(
             )
             if seg_path:
                 used_ids.add(c["id"])
-                clips.extend(await _clips_from_source(
+                new_clips = await _clips_from_source(
                     seg_path, n_clips - len(clips), workdir, 0.0, f"{clip_prefix}_seg{li}",
-                ))
-                continue
+                )
+                matched = await _accept_matching_clips(new_clips, query, workdir)
+                if matched:
+                    clips.extend(matched)
+                    continue
 
         # 3. Fallback: no transcript / no AI match / segment download failed
         #    → download the whole video and cut randomly (old behaviour).
         video = await _download_full_yt_video(c["url"], workdir, is_url=True)
         if video:
             used_ids.add(c["id"])
-            clips.extend(await _clips_from_source(
+            new_clips = await _clips_from_source(
                 video, n_clips - len(clips), workdir, float(YT_CLIP_SKIP), f"{clip_prefix}_fb{li}",
-            ))
+            )
+            clips.extend(await _accept_matching_clips(new_clips, query, workdir))
         break  # only fall back on one candidate, not all of them
 
     return clips

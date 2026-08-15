@@ -1020,11 +1020,11 @@ async def generate_video_script(post_text: str, article_title: str, lang: str = 
         script = _strip_cliche_opener(script)
         word_count = len(script.split())
         logger.info("%s video script generated: %d words", lang.upper(), word_count)
-        if word_count > 75:
-            # Trim to first 60 words to stay within target duration
-            script = " ".join(script.split()[:60])
-            logger.info("Script trimmed to 60 words for retention target")
-            word_count = 60
+        if word_count > 90:
+            # Trim to first 75 words to stay within target duration
+            script = " ".join(script.split()[:75])
+            logger.info("Script trimmed to 75 words for retention target")
+            word_count = 75
         # Drop a trailing incomplete sentence (model often gets cut mid-word
         # when it exceeds num_predict). Trim back to the last sentence-ending
         # punctuation if the script doesn't already end on one.
