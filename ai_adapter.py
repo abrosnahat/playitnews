@@ -1,4 +1,5 @@
 import re
+import json
 import asyncio
 import logging
 import aiohttp
@@ -574,6 +575,102 @@ async def extract_search_query(article_title: str, prompt=None) -> str:
         logger.warning("extract_search_query failed: %s", exc)
     return ""
 
+
+async def extract_entity_queries(script: str, prompt=None) -> list[str]:
+    """
+    Extract multiple short YouTube search queries — one per distinct person or
+    subject actually mentioned in the narration *script* — so B-roll footage
+    can be fetched to match what's being said at each point, instead of a
+    single query derived only from the headline.
+
+    ``prompt`` — required per-project override (projects.json → ai.entity_queries).
+    Requires a ``{script}`` token. When absent, this feature is a no-op
+    (returns an empty list) — callers should gate on the project config being
+    present before calling this at all.
+    Returns a list of query strings (may be empty on failure/no override).
+    """
+    _sys, _user = _prompt_parts(prompt)
+    if not _user:
+        return []
+    user_message = _render_prompt(_user, script=script)
+    _messages = [{"role": "user", "content": user_message}]
+    if _sys:
+        _messages.insert(0, {"role": "system", "content": _sys})
+    try:
+        raw = (await _call_llm_chat(_messages, num_predict=2000, timeout=120)).strip()
+        queries: list[str] = []
+        m = re.search(r"\[.*\]", raw, re.S)
+        if m:
+            try:
+                parsed = json.loads(m.group(0))
+                queries = [str(q).strip() for q in parsed if str(q).strip()]
+            except Exception:
+                queries = []
+        if not queries:
+            # Fallback: one query per non-empty line.
+            queries = [ln.strip(" -•\t\"'") for ln in raw.splitlines() if ln.strip()]
+        queries = [q for q in queries if q and len(q) <= 80][:4]
+        if queries:
+            logger.info("AI entity queries: %s", queries)
+        return queries
+    except Exception as exc:
+        logger.warning("extract_entity_queries failed: %s", exc)
+        return []
+
+
+async def pick_video_segment(
+    query: str, transcript_lines: list[str], duration: float,
+    min_len: float = 6.0, max_len: float = 12.0,
+) -> tuple[float, float] | None:
+    """
+    Given a timestamped YouTube auto-caption transcript and a topic/subject
+    we need B-roll footage for, ask the LLM to pick the single best-matching
+    segment — so only that portion needs to be downloaded, instead of the
+    whole video.
+
+    ``transcript_lines`` — list of "MM:SS text" strings (parsed captions,
+    ordered by time). ``duration`` — total video duration in seconds.
+    Returns (start_seconds, end_seconds), clamped to the video length and a
+    sane segment length, or None on failure / no usable transcript.
+    """
+    if not transcript_lines or duration <= 0:
+        return None
+    transcript = "\n".join(transcript_lines[:500])
+    user_message = (
+        "You are given the auto-generated transcript of a YouTube video "
+        "(timestamps in MM:SS), and a topic/subject we need short B-roll "
+        "footage for.\n\n"
+        f"Topic/subject: {query}\n"
+        f"Video duration: {duration:.0f} seconds\n\n"
+        f"Transcript:\n{transcript}\n\n"
+        f"Find the single best {min_len:.0f}-{max_len:.0f} second segment of "
+        "this video that best shows or discusses the topic above. Respond "
+        'with ONLY a JSON object {"start": <seconds>, "end": <seconds>} — '
+        "numbers only, no explanation."
+    )
+    try:
+        raw = (await _call_llm_chat(
+            [{"role": "user", "content": user_message}], num_predict=200, timeout=90
+        )).strip()
+        m = re.search(r"\{.*\}", raw, re.S)
+        if not m:
+            return None
+        data = json.loads(m.group(0))
+        start = float(data.get("start"))
+        end = float(data.get("end"))
+        if end <= start:
+            return None
+        start = max(0.0, min(start, max(0.0, duration - 1)))
+        end = min(end, duration)
+        if end - start < 5:
+            return None
+        if end - start > max_len + 10:
+            end = start + max_len
+        logger.info("AI picked video segment %.1f-%.1fs for '%s'", start, end, query)
+        return (start, end)
+    except Exception as exc:
+        logger.warning("pick_video_segment failed: %s", exc)
+        return None
 
 
 async def translate_title_to_english(article_title: str) -> str:

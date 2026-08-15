@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import bisect
 import concurrent.futures
+import json
 import logging
 import math
 import os
@@ -64,6 +65,7 @@ if os.name == "nt":
 load_dotenv()
 
 import scraper as _scraper
+import ai_adapter
 from config import VIDEOS_DIR, YT_CLIP_SKIP, YT_MAX_FILESIZE
 import gemini_keys
 
@@ -276,6 +278,35 @@ def _run(args: list[str], cwd: str | None = None, timeout: int = 120) -> bool:
 async def _run_async(args: list[str], cwd: str | None = None, timeout: int = 160) -> bool:
     """Async wrapper for _run (runs in thread pool to not block the event loop)."""
     return await asyncio.to_thread(_run, args, cwd, timeout)
+
+
+def _run_capture(args: list[str], timeout: int = 120) -> str:
+    """Run a command and return its captured stdout (empty string on failure).
+    Used where we need the JSON output of a command (e.g. yt-dlp --dump-json),
+    as opposed to `_run`, which only reports success/failure."""
+    try:
+        _env = os.environ.copy()
+        if os.name != "nt":
+            _extra_paths = [
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                os.path.expanduser("~/.nvm/versions/node/v20.19.5/bin"),
+            ]
+            _env["PATH"] = os.pathsep.join(_extra_paths) + os.pathsep + _env.get("PATH", "")
+        result = subprocess.run(
+            args, capture_output=True, text=True, timeout=timeout, env=_env,
+        )
+        if result.returncode not in (0, 101) and not result.stdout:
+            logger.warning("Command failed [%s] (rc=%d): %s", args[0], result.returncode, result.stderr[-400:])
+        return result.stdout or ""
+    except Exception as exc:
+        logger.warning("Command capture error (%s): %s", args[0] if args else "?", exc)
+        return ""
+
+
+async def _run_capture_async(args: list[str], timeout: int = 120) -> str:
+    """Async wrapper for _run_capture (runs in thread pool)."""
+    return await asyncio.to_thread(_run_capture, args, timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -1693,9 +1724,14 @@ async def _download_full_yt_video(
     Download a single full YouTube video (no time slicing).
     For search queries, picks the (skip+1)-th result for regeneration diversity.
     Returns local .mp4/.mkv path or None on failure.
+
+    Uses a FRESH subdirectory per call (never a shared one) — this function
+    may now be called several times against the same ``workdir`` (once per
+    Shorts candidate, once per fallback attempt, etc.), and a shared output
+    folder previously let a later call silently pick up a stale/unrelated
+    file left behind by an earlier call (or by `_download_yt_segment`).
     """
-    clips_dir = os.path.join(workdir, "yt_clips")
-    os.makedirs(clips_dir, exist_ok=True)
+    clips_dir = tempfile.mkdtemp(dir=workdir, prefix="src_")
 
     # Prefer 720p mp4 to avoid YouTube n-challenge throttling on higher formats;
     # fall back to merged 'best' (always available without n-challenge). Used
@@ -1711,7 +1747,7 @@ async def _download_full_yt_video(
     if is_url:
         ydl_args = [
             "yt-dlp",
-            "--no-playlist", "--no-warnings",
+            "--no-playlist", "--no-warnings", "--force-overwrites",
             *_YT_COOKIE_ARGS,
             *_YT_EXTRACTOR_ARGS,
             "--format", _FMT_URL,
@@ -1723,7 +1759,7 @@ async def _download_full_yt_video(
         fetch_count = skip + 3
         ydl_args = [
             "yt-dlp",
-            "--no-playlist", "--no-warnings",
+            "--no-playlist", "--no-warnings", "--force-overwrites",
             "--ignore-errors",
             "--match-filters", "live_status=not_live",  # skip premieres (is_upcoming) and live streams
             *_YT_COOKIE_ARGS,
@@ -1766,6 +1802,253 @@ async def _download_full_yt_video(
         os.path.basename(chosen), os.path.getsize(chosen) / 1024 / 1024,
     )
     return chosen
+
+
+# ---------------------------------------------------------------------------
+# Metadata-only YouTube search + AI-picked segment download
+#
+# Instead of always downloading a whole matched video and randomly cutting a
+# few seconds out of it, we can (a) search YouTube Shorts too — a short is
+# already a complete, relevant moment, no cutting needed — and (b) for
+# longer videos, fetch just the auto-generated transcript first (tiny,
+# skip-download), ask the LLM which timestamp range best matches what we're
+# looking for, and download ONLY that section via yt-dlp --download-sections.
+# Falls back to the old "download the whole video" behaviour whenever a step
+# fails (no transcript available, AI pick fails, etc.).
+# ---------------------------------------------------------------------------
+
+# A duration at/under this is treated like a YouTube Short/Reel/TikTok —
+# used whole, no segment-picking needed (mirrors _SHORT_VIDEO_THRESHOLD below).
+_SHORTS_MAX_DURATION = 90.0
+# Padding (s) added around an AI-picked transcript segment before download,
+# so the cut doesn't start/end mid-sentence.
+_SEGMENT_PAD = 1.5
+
+
+async def _search_yt_candidates(query: str, count: int = 6) -> list[dict]:
+    """
+    Search YouTube for *query* and return lightweight metadata WITHOUT
+    downloading anything: [{"id","url","title","duration"}, ...] in search-rank
+    order. ``duration`` may be None if yt-dlp couldn't determine it from the
+    flat search listing (callers should treat that as "long-form, unknown").
+    """
+    args = [
+        "yt-dlp",
+        "--flat-playlist", "--dump-json", "--no-warnings",
+        "--ignore-errors",
+        "--match-filters", "live_status=not_live",
+        *_YT_COOKIE_ARGS, *_YT_EXTRACTOR_ARGS, *_YT_SLEEP_ARGS,
+        f"ytsearch{count}:{query}",
+    ]
+    out = await _run_capture_async(args, timeout=90)
+    candidates: list[dict] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        vid = e.get("id")
+        if not vid:
+            continue
+        url = e.get("url") or f"https://www.youtube.com/watch?v={vid}"
+        duration = e.get("duration")
+        try:
+            duration = float(duration) if duration is not None else None
+        except (TypeError, ValueError):
+            duration = None
+        candidates.append({
+            "id": vid, "url": url,
+            "title": e.get("title") or "",
+            "duration": duration,
+        })
+    return candidates
+
+
+async def _fetch_yt_transcript_cues(
+    video_url: str, workdir: str, langs: tuple[str, ...] = ("ru", "en"),
+) -> list[tuple[float, float, str]] | None:
+    """
+    Download only the auto-generated captions (no video) for *video_url* and
+    parse them into [(start_sec, end_sec, text), ...]. Tries each language in
+    *langs* until one yields captions. Returns None if no captions exist.
+    """
+    sub_dir = tempfile.mkdtemp(dir=workdir, prefix="subs_")
+    for lang in langs:
+        out_tmpl = os.path.join(sub_dir, f"sub.%(ext)s")
+        args = [
+            "yt-dlp", "--no-playlist", "--no-warnings", "--skip-download",
+            "--write-auto-sub", "--sub-lang", lang, "--sub-format", "vtt",
+            *_YT_COOKIE_ARGS, *_YT_EXTRACTOR_ARGS,
+            "-o", out_tmpl,
+            video_url,
+        ]
+        ok = await _run_async(args, timeout=90)
+        vtt_files = [f for f in os.listdir(sub_dir) if f.endswith(".vtt")]
+        if vtt_files:
+            cues = _parse_vtt_cues(os.path.join(sub_dir, vtt_files[0]))
+            if cues:
+                logger.info("Fetched %d transcript cues (%s) for %s", len(cues), lang, video_url)
+                return cues
+        # Clean up before trying the next language.
+        for f in vtt_files:
+            try:
+                os.remove(os.path.join(sub_dir, f))
+            except OSError:
+                pass
+    logger.info("No usable auto-captions found for %s", video_url)
+    return None
+
+
+async def _download_yt_segment(
+    video_url: str, start: float, end: float, workdir: str, out_name: str = "segment",
+) -> str | None:
+    """
+    Download ONLY the [start, end] section (seconds) of *video_url* via
+    yt-dlp --download-sections, instead of the whole video. Returns the local
+    file path, or None on failure.
+
+    Uses a fresh subdirectory per call — this can be invoked repeatedly with
+    the same ``out_name`` (one per entity query, tried against several
+    candidate videos), and yt-dlp skips re-downloading when the destination
+    file already exists, which previously caused every retry to silently
+    reuse the FIRST candidate's (stale) file instead of the new one.
+    """
+    clips_dir = tempfile.mkdtemp(dir=workdir, prefix="seg_")
+    _FMT = ("bestvideo[height=720][ext=mp4]/bestvideo[height<=720][ext=mp4]"
+            "/bestvideo[height<=720]/bestvideo[ext=mp4]/bestvideo/best")
+    section = f"*{max(0.0, start):.2f}-{end:.2f}"
+    out_tmpl = os.path.join(clips_dir, f"{out_name}.%(ext)s")
+    args = [
+        "yt-dlp", "--no-playlist", "--no-warnings", "--force-overwrites",
+        *_YT_COOKIE_ARGS, *_YT_EXTRACTOR_ARGS,
+        "--format", _FMT,
+        "--max-filesize", f"{YT_MAX_FILESIZE}M",
+        "--download-sections", section,
+        "--force-keyframes-at-cuts",
+        "-o", out_tmpl,
+        video_url,
+    ]
+    logger.info("Downloading YT segment %s from %s", section, video_url)
+    ok = await _run_async(args, timeout=150)
+    if not ok:
+        logger.warning("yt-dlp segment download reported an error for %s", video_url)
+    matches = [
+        os.path.join(clips_dir, f) for f in os.listdir(clips_dir)
+        if f.startswith(out_name) and f.endswith((".mp4", ".webm", ".mkv")) and not f.endswith(".part")
+    ]
+    if not matches:
+        logger.warning("No segment file produced for %s (%s)", video_url, section)
+        return None
+    path = matches[0]
+    if os.path.getsize(path) < 10 * 1024:
+        logger.warning("Downloaded segment too small: %s", path)
+        return None
+    logger.info("YT segment ready: %s (%.1f MB)", os.path.basename(path), os.path.getsize(path) / 1024 / 1024)
+    return path
+
+
+async def _fetch_clips_for_query(
+    query: str,
+    n_clips: int,
+    workdir: str,
+    yt_skip: int = 0,
+    clip_prefix: str = "yt_clip",
+    used_ids: set[str] | None = None,
+) -> list[str]:
+    """
+    Find footage matching *query* and return cut clips, preferring (in order):
+      1. A YouTube Short/Reel-length result (already a complete relevant
+         moment) — used whole, no download-then-cut needed.
+      2. A long-form video: fetch its transcript only, ask the LLM for the
+         best-matching timestamp range, and download ONLY that section.
+      3. Fallback: download the whole top search result and randomly cut
+         *n_clips* segments from it (the pre-existing behaviour).
+    ``used_ids`` (optional, shared across calls) avoids re-picking the same
+    source video for multiple different queries in one render.
+    """
+    if used_ids is None:
+        used_ids = set()
+
+    candidates = await _search_yt_candidates(query, count=5)
+    candidates += await _search_yt_candidates(f"{query} shorts", count=4)
+    seen: set[str] = set()
+    uniq: list[dict] = []
+    for c in candidates:
+        if c["id"] in seen or c["id"] in used_ids:
+            continue
+        seen.add(c["id"])
+        uniq.append(c)
+    if not uniq:
+        logger.warning("No YT search results for '%s'", query)
+        return []
+
+    # Rotate the candidate order by yt_skip so clicking "regenerate" (which
+    # bumps yt_skip) picks different source videos instead of the same ones
+    # every time — mirrors the diversity the old skip-based search gave.
+    if yt_skip:
+        offset = yt_skip % len(uniq)
+        uniq = uniq[offset:] + uniq[:offset]
+
+    shorts = [c for c in uniq if c["duration"] and c["duration"] <= _SHORTS_MAX_DURATION]
+    long_form = [c for c in uniq if not c["duration"] or c["duration"] > _SHORTS_MAX_DURATION]
+
+    clips: list[str] = []
+
+    # 1. Shorts first — each is a whole, ready-to-use clip.
+    for si, c in enumerate(shorts):
+        if len(clips) >= n_clips:
+            break
+        video = await _download_full_yt_video(c["url"], workdir, is_url=True)
+        if not video:
+            continue
+        used_ids.add(c["id"])
+        clips.extend(await _clips_from_source(video, n_clips - len(clips), workdir, 0.0, f"{clip_prefix}_short{si}"))
+
+    # 2. AI-picked segment from a long-form video. Bounded to a few attempts —
+    #    each one costs a transcript fetch + LLM call + a slow yt-dlp download,
+    #    so we don't keep trying candidates forever if segments aren't panning out.
+    _MAX_LONGFORM_ATTEMPTS = 3
+    for li, c in enumerate(long_form[:_MAX_LONGFORM_ATTEMPTS]):
+        if len(clips) >= n_clips:
+            break
+        try:
+            cues = await _fetch_yt_transcript_cues(c["url"], workdir)
+            segment = None
+            if cues:
+                transcript_lines = [
+                    f"{int(s // 60):02d}:{int(s % 60):02d} {t}" for s, _e, t in cues
+                ][:400]
+                segment = await ai_adapter.pick_video_segment(query, transcript_lines, c["duration"] or 0.0)
+        except Exception as exc:
+            logger.warning("Segment-pick failed for '%s' (%s): %s", query, c["url"], exc)
+            segment = None
+
+        if segment:
+            start, end = segment
+            seg_path = await _download_yt_segment(
+                c["url"], start - _SEGMENT_PAD, end + _SEGMENT_PAD, workdir, f"{clip_prefix}_seg{li}",
+            )
+            if seg_path:
+                used_ids.add(c["id"])
+                clips.extend(await _clips_from_source(
+                    seg_path, n_clips - len(clips), workdir, 0.0, f"{clip_prefix}_seg{li}",
+                ))
+                continue
+
+        # 3. Fallback: no transcript / no AI match / segment download failed
+        #    → download the whole video and cut randomly (old behaviour).
+        video = await _download_full_yt_video(c["url"], workdir, is_url=True)
+        if video:
+            used_ids.add(c["id"])
+            clips.extend(await _clips_from_source(
+                video, n_clips - len(clips), workdir, float(YT_CLIP_SKIP), f"{clip_prefix}_fb{li}",
+            ))
+        break  # only fall back on one candidate, not all of them
+
+    return clips
 
 
 # Detects a direct short-form video link (YouTube incl. Shorts, Instagram Reel,
@@ -2600,6 +2883,7 @@ async def fetch_gameplay_clips(
     search_query: str,
     yt_skip: int = 0,
     user_query: bool = False,
+    search_queries: list[str] | None = None,
 ) -> tuple[list[str], list[str], str]:
     """
     Find source video(s), cut random 3–4 s segments to fill the full runtime.
@@ -2611,6 +2895,15 @@ async def fetch_gameplay_clips(
     If the article has NO downloaded video:
       Download N_YT_VIDEOS YouTube search results and cut CLIPS_PER_VIDEO
       random segments from each → N_YT_VIDEOS × CLIPS_PER_VIDEO clips total.
+
+    ``search_queries`` (optional): a list of distinct search queries — one per
+    entity/subject mentioned in the video's *script* (see
+    ``ai_adapter.extract_entity_queries``). When given (and the user hasn't
+    pasted a custom direct video link), one YT video is downloaded PER query
+    and cut into clips, pooling the results — so the resulting clip pool
+    actually contains footage of each entity mentioned in the narration,
+    instead of just whatever the single headline-based query returned.
+    Ignored when empty/None (falls back to the single ``search_query`` path).
 
     Returns ([], pre_cut_clips, shared_workdir).
     article_videos is always [] — clips are pre-cut, so no additional
@@ -2682,29 +2975,52 @@ async def fetch_gameplay_clips(
         # TikTok, VK) into the search-query field, fetch that exact video instead
         # of treating the link text as a search query.
         direct_url = user_query and bool(_DIRECT_VIDEO_URL_RE.match(search_query.strip()))
+        clips: list[str] = []
+        entity_queries = [q for q in (search_queries or []) if q and q.strip()]
         if direct_url:
             logger.info("Custom query is a direct video link — downloading it: %s", search_query[:100])
             yt_video = await _download_full_yt_video(
                 search_query.strip(), workdir, is_url=True,
             )
+            if yt_video:
+                clips = await _clips_from_source(
+                    yt_video, N_CLIPS_ARTICLE, workdir, float(YT_CLIP_SKIP),
+                    "yt_clip",
+                )
+        elif entity_queries and not user_query:
+            # ── Multi-entity fetch: footage PER mentioned subject ───────────
+            # Prefers Shorts (used whole) or an AI-picked transcript segment
+            # of a long video, only falling back to a full-video download.
+            CLIPS_PER_ENTITY = 4
+            logger.info(
+                "Fetching footage for %d entity queries: %s",
+                len(entity_queries), entity_queries,
+            )
+            used_ids: set[str] = set()
+            for qi, q in enumerate(entity_queries):
+                q_clips = await _fetch_clips_for_query(
+                    q, CLIPS_PER_ENTITY, workdir, yt_skip=yt_skip,
+                    clip_prefix=f"yt_clip_e{qi}", used_ids=used_ids,
+                )
+                logger.info("Prepared %d clips for entity query '%s'", len(q_clips), q)
+                clips.extend(q_clips)
+            logger.info(
+                "Total: prepared %d clips from %d entity queries",
+                len(clips), len(entity_queries),
+            )
         else:
             logger.info(
-                "No article video — downloading 1 YT video for '%s' (skip=%d)",
+                "No article video — fetching footage for '%s' (skip=%d)",
                 search_query, yt_skip,
             )
-            yt_video = await _download_full_yt_video(
-                search_query, workdir, skip=yt_skip,
+            clips = await _fetch_clips_for_query(
+                search_query, N_CLIPS_ARTICLE, workdir, yt_skip=yt_skip,
+                clip_prefix="yt_clip",
             )
-        clips: list[str] = []
-        if yt_video:
-            clips = await _clips_from_source(
-                yt_video, N_CLIPS_ARTICLE, workdir, float(YT_CLIP_SKIP),
-                "yt_clip",
+            logger.info(
+                "Prepared %d clips for '%s'",
+                len(clips), search_query,
             )
-        logger.info(
-            "Prepared %d clips from 1 YT video for '%s'",
-            len(clips), search_query,
-        )
 
     return [], clips, workdir
 

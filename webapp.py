@@ -1578,12 +1578,29 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
             latin_tokens = [t for t in first_chunk.split() if re.match(r"^[A-Za-z0-9'&.]+$", t)]
             search_query = " ".join(latin_tokens).strip() or title[:50]
 
+        # Optional: derive one search query PER entity/subject actually
+        # mentioned in the generated script (projects.json → ai.entity_queries),
+        # so fetched footage matches what's being said, not just the headline.
+        # Skipped when the user pasted a custom query/link for this render.
+        entity_queries: list[str] | None = None
+        if not user_query:
+            entity_prompt = config.project_ai(project, "entity_queries")
+            if entity_prompt:
+                source_script = ru_script if do_ru else en_script
+                entity_queries = await ai_adapter.extract_entity_queries(
+                    source_script or "", entity_prompt
+                )
+
         # --- Step 3: Fetch gameplay clips ---
-        progress(f"Step 3/4: Searching YouTube for '{search_query}'…")
+        if entity_queries:
+            progress(f"Step 3/4: Searching YouTube footage for: {', '.join(entity_queries)}…")
+        else:
+            progress(f"Step 3/4: Searching YouTube for '{search_query}'…")
         if check_cancel(): raise InterruptedError("Cancelled")
         yt_skip = db.increment_yt_skip(post_id, YT_SKIP_STEP) - YT_SKIP_STEP
         article_videos, yt_clips, clips_workdir = await video_generator.fetch_gameplay_clips(
             post=post, search_query=search_query, yt_skip=yt_skip, user_query=user_query,
+            search_queries=entity_queries,
         )
         shared_clips = article_videos + yt_clips
         progress(f"Found {len(shared_clips)} video clips. Rendering…")
