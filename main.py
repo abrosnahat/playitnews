@@ -26,12 +26,14 @@ import database as db
 from ai_adapter import adapt_article, adapt_article_ru, is_gaming_related
 from bot import build_handlers, error_handler, send_admin_notification
 from config import (
+    AUTO_APPROVE_TELEGRAM,
     CHECK_INTERVAL_MINUTES,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_ADMIN_CHAT_ID,
     TELEGRAM_LOCAL_API_URL,
     TELEGRAM_LOCAL_API_FILE_URL,
     TELEGRAM_LOCAL_MODE,
+    WEBAPP_LOCAL_URL,
     get_project,
     project_ai,
     project_names,
@@ -56,6 +58,30 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext._updater").setLevel(logging.CRITICAL)  # suppress disconnect noise
 logger = logging.getLogger(__name__)
+
+
+async def _auto_approve_post(post_id: int) -> None:
+    """Immediately approve/publish a freshly-created post to Telegram, via the
+    dashboard's own approve endpoint (webapp.py), so we reuse its exact
+    publish logic (channel resolution, media formatting, retries) instead of
+    duplicating it here. Best-effort: logs and continues on any failure —
+    the post simply stays 'pending' and can still be approved manually from
+    the dashboard.
+    """
+    url = f"{WEBAPP_LOCAL_URL}/api/posts/{post_id}/approve"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                if resp.status == 200:
+                    logger.info("Пост #%d автоматически апрувлен и опубликован в Telegram", post_id)
+                else:
+                    body = await resp.text()
+                    logger.warning(
+                        "Автоапрув поста #%d не удался (HTTP %d): %s",
+                        post_id, resp.status, body[:300],
+                    )
+    except Exception as exc:
+        logger.warning("Автоапрув поста #%d не удался (dashboard недоступен?): %s", post_id, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +144,9 @@ async def process_article(app: Application, article_url: str, article_title: str
         video_paths=video_paths,
         scheduled_at=scheduled_at,
     )
+
+    if AUTO_APPROVE_TELEGRAM:
+        await _auto_approve_post(post_id)
 
 
 async def check_news(app: Application, project_name: str = "gaming") -> None:

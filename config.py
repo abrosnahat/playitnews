@@ -50,6 +50,13 @@ GEMINI_VIDEO_MODEL: str = os.getenv("GEMINI_VIDEO_MODEL", GEMINI_TEXT_MODEL)
 # Monitoring
 CHECK_INTERVAL_MINUTES: int = int(os.getenv("CHECK_INTERVAL_MINUTES", "30"))
 
+# Auto-approve newly-created posts (publish to Telegram immediately, no admin
+# click needed). Set AUTO_APPROVE_TELEGRAM=0 in .env to go back to manual
+# approval via the dashboard.
+AUTO_APPROVE_TELEGRAM: bool = os.getenv("AUTO_APPROVE_TELEGRAM", "1") == "1"
+# Local dashboard base URL used by main.py to call the approve endpoint.
+WEBAPP_LOCAL_URL: str = os.getenv("WEBAPP_LOCAL_URL", "http://localhost:5003").rstrip("/")
+
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGES_DIR = os.path.join(BASE_DIR, "images")
