@@ -31,6 +31,7 @@ import instagram_carousel_publisher
 import carousel_builder
 import youtube_publisher
 import vk_publisher
+import threads_publisher
 import config
 from config import (
     TELEGRAM_BOT_TOKEN,
@@ -42,6 +43,8 @@ from config import (
     TG_MAX_BYTES,
     INSTAGRAM_USER_ID_RU,
     INSTAGRAM_ACCESS_TOKEN_RU,
+    THREADS_USER_ID_RU,
+    THREADS_ACCESS_TOKEN_RU,
     VIDEOS_DIR,
     IMAGES_DIR,
     required_platforms as project_required_platforms,
@@ -355,7 +358,7 @@ for _logger_name in (
     "video_generator", "faster_whisper",
     "instagram_publisher", "instagram_carousel_publisher",
     "youtube_publisher", "github_uploader", "thumbnail_generator",
-    "carousel_builder", "vk_publisher",
+    "carousel_builder", "vk_publisher", "threads_publisher",
 ):
     logging.getLogger(_logger_name).addHandler(_detail_handler)
 
@@ -834,7 +837,7 @@ def api_mark_done(post_id: int):
     all_platforms = json.dumps([
         "instagram", "instagram-ru", "youtube", "youtube-ru",
         "instagram-carousel", "instagram-carousel-ru",
-        "vk",
+        "vk", "threads", "threads-ru",
     ])
     with db.get_conn() as conn:
         conn.execute(
@@ -1673,7 +1676,7 @@ def api_publish(post_id: int, platform: str):
     valid = {
         "instagram", "instagram-ru", "youtube", "youtube-ru",
         "instagram-carousel", "instagram-carousel-ru",
-        "vk",
+        "vk", "threads", "threads-ru",
         "all", "all-ru", "all-combined",
     }
     if platform not in valid:
@@ -1701,7 +1704,7 @@ def api_publish(post_id: int, platform: str):
                 "youtube": "youtube", "youtube-ru": "youtube-ru",
                 "instagram-carousel": "instagram-carousel",
                 "instagram-carousel-ru": "instagram-carousel-ru",
-                "vk": "vk",
+                "vk": "vk", "threads": "threads", "threads-ru": "threads-ru",
             }
             if platform in _PLATFORM_KEYS:
                 succeeded = [platform]
@@ -1714,6 +1717,7 @@ def api_publish(post_id: int, platform: str):
                     "IG Carousel EN": "instagram-carousel",
                     "IG Carousel RU": "instagram-carousel-ru",
                     "VK": "vk",
+                    "Threads EN": "threads", "Threads RU": "threads-ru",
                 }
                 for part in result.split(" | "):
                     if part.startswith("✅"):
@@ -1822,6 +1826,13 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
     def _tags(key: str = "post_text") -> list[str]:
         src = re.sub(r'<[^>]+>', '', post.get(key) or post.get("post_text", ""))
         return [h.lstrip("#") for h in re.findall(r'#\w+', src)]
+
+    def _first_image() -> Optional[str]:
+        """First still-existing article image, used e.g. as the Threads image post."""
+        for p in post.get("image_paths", []):
+            if p and os.path.exists(p):
+                return p
+        return None
 
     async def _make_thumb(path: str, lang: str = "en", title: Optional[str] = None) -> Optional[str]:
         try:
@@ -1967,6 +1978,35 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         )
         return f"VK — {vk_url}"
 
+    elif platform == "threads":
+        progress("Adapting post for Threads…")
+        threads_text = await ai_adapter.adapt_post_for_threads(
+            post.get("article_title", ""), post.get("post_text", ""), lang="en",
+            prompt=config.project_ai(project, "post_text_threads"),
+        )
+        progress("Publishing post to Threads…")
+        _cr = _creds("threads")
+        media_id = await threads_publisher.publish_post(
+            text=threads_text, image_path=_first_image(),
+            user_id=_cr.get("user_id") or None, access_token=_cr.get("token") or None,
+        )
+        return f"Threads EN — Media ID: {media_id}"
+
+    elif platform == "threads-ru":
+        progress("Adapting post for Threads RU…")
+        threads_text_ru = await ai_adapter.adapt_post_for_threads(
+            post.get("article_title", ""), post.get("ru_post_text") or post.get("post_text", ""), lang="ru",
+            prompt=config.project_ai(project, "post_text_threads"),
+        )
+        progress("Publishing post to Threads RU…")
+        _cr = _creds("threads-ru")
+        media_id = await threads_publisher.publish_post(
+            text=threads_text_ru, image_path=_first_image(),
+            user_id=(_cr.get("user_id") or THREADS_USER_ID_RU),
+            access_token=(_cr.get("token") or THREADS_ACCESS_TOKEN_RU),
+        )
+        return f"Threads RU — Media ID: {media_id}"
+
     elif platform in ("all", "all-ru", "all-combined"):
         tasks: dict[str, asyncio.Task] = {}
         results: list[str] = []
@@ -2001,6 +2041,11 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
                         thumbnail_path=en_thumb,
                     )
                 )
+
+        # NOTE: Threads is intentionally NOT published here as part of "all"/"all-combined" —
+        # Threads auto-publishes via Meta's Instagram cross-post integration already, so a
+        # separate Threads post from this bulk flow would duplicate it. Use the standalone
+        # "Threads EN"/"Threads RU" buttons if a manual Threads post is ever needed.
 
         if platform in ("all-ru", "all-combined") and ru_path and os.path.exists(ru_path):
             ru_title = (post.get("article_title") or f"Gaming news #{post_id}")[:100]

@@ -807,6 +807,12 @@
       .btn-vk:hover:not(:disabled) {
         transform: translateY(-1px);
       }
+      .btn-threads {
+        background: linear-gradient(135deg, #444, #000);
+      }
+      .btn-threads:hover:not(:disabled) {
+        transform: translateY(-1px);
+      }
       .btn-sm {
         padding: 7px 13px;
         font-size: 12px;
@@ -1781,6 +1787,8 @@
           '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 17a24.12 24.12 0 0 1 0-10 2 2 0 0 1 1.4-1.4 49.56 49.56 0 0 1 16.2 0A2 2 0 0 1 21.5 7a24.12 24.12 0 0 1 0 10 2 2 0 0 1-1.4 1.4 49.55 49.55 0 0 1-16.2 0A2 2 0 0 1 2.5 17"/><path d="m10 15 5-3-5-3z"/></svg>',
         vk:
           '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12.79 16.5c-5.06 0-7.95-3.47-8.07-9.25h2.54c.08 4.24 1.95 6.04 3.43 6.41V7.25h2.39v3.66c1.46-.16 3-1.82 3.5-3.66h2.39a6.99 6.99 0 0 1-3.21 4.59c1.61.83 2.93 2.31 3.6 4.66h-2.63c-.52-1.63-1.93-2.89-3.65-3.08v3.08h-.69z"/></svg>',
+        threads:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5 0 8-3.5 8-9.5S17 3 12 3 4 6.5 4 12c0 3.5 1.8 6 5 7"/><path d="M9.5 12.2c0-2 1.2-3.4 3.2-3.4 2.3 0 3.3 1.6 3.3 4 0 3.3-2 5.7-5.3 5.7-2.6 0-4-1.3-4.4-2.8"/></svg>',
         play:
           '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="6 3 20 12 6 21 6 3"/></svg>',
         globe:
@@ -2093,6 +2101,14 @@
         }
         if (isActionable || isManual) {
           const ytSkip = p.yt_skip_count || 0;
+          const pub = new Set(p.published_platforms || []);
+          const done = (k) =>
+            pub.has(k)
+              ? ` <span class="pub-done" title="Already published">${ICON.check}</span>`
+              : "";
+          // Only show publish buttons for platforms this post's project has.
+          const _projPlat = (PROJECT_MAP[p.project] || {}).platforms || null;
+          const hasPlat = (k) => !_projPlat || (k in _projPlat);
           btnHtml += isManual
             ? `<div class="btn-row">
       <button class="btn btn-danger btn-sm" style="flex:1" onclick="cancelPost(${p.id})">${ICON.x} Remove</button>
@@ -2129,14 +2145,6 @@
       </div>
     </div>`;
           if (hasEnVid || hasRuVid) {
-            const pub = new Set(p.published_platforms || []);
-            const done = (k) =>
-              pub.has(k)
-                ? ` <span class="pub-done" title="Already published">${ICON.check}</span>`
-                : "";
-            // Only show publish buttons for platforms this post's project has.
-            const _projPlat = (PROJECT_MAP[p.project] || {}).platforms || null;
-            const hasPlat = (k) => !_projPlat || (k in _projPlat);
             let pubBtns = "";
             if (hasEnVid) {
               if (hasPlat("instagram"))
@@ -2160,6 +2168,18 @@
         <div class="btn-group">${pubBtns}</div>
       </div>`;
           }
+
+          // ─── Threads (text-only, no video needed) ───────────────────────────────────────
+          let threadsBtns = "";
+          if (enText && hasPlat("threads"))
+            threadsBtns += `<button class="btn btn-threads${pub.has("threads") ? " btn-published" : ""}" onclick="publishTo(${p.id},'threads',this)">${ICON.threads} Threads EN${done("threads")}</button>`;
+          if (ruText && hasPlat("threads-ru"))
+            threadsBtns += `<button class="btn btn-threads${pub.has("threads-ru") ? " btn-published" : ""}" onclick="publishTo(${p.id},'threads-ru',this)">${ICON.threads} Threads RU${done("threads-ru")}</button>`;
+          if (threadsBtns)
+            btnHtml += `<div class="btn-section">
+        <div class="btn-section-label">${ICON.threads} Publish to Threads (text only)</div>
+        <div class="btn-group">${threadsBtns}</div>
+      </div>`;
 
           // ─── Instagram CAROUSEL section ─────────────────────────────────────
           const carEn = (p.carousel_paths_en || []).filter(Boolean);
@@ -2454,6 +2474,8 @@
         ig_ru:  { label: "Instagram RU", icon: ICON.instagram },
         yt_ru:  { label: "YouTube RU",   icon: ICON.youtube },
         vk:     { label: "VK",           icon: ICON.vk },
+        th_en:  { label: "Threads EN",  icon: ICON.threads },
+        th_ru:  { label: "Threads RU",  icon: ICON.threads },
         car_en: { label: "Карусель EN",  icon: ICON.camera },
         car_ru: { label: "Карусель RU",  icon: ICON.camera },
         finish: { label: "Готово",       icon: ICON.check },
@@ -2469,14 +2491,16 @@
 
       function _pubTargetsFor(platform) {
         switch (platform) {
-          case "all-combined": return ["ig_en", "yt_en", "ig_ru", "yt_ru", "vk"];
-          case "all":          return ["ig_en", "yt_en"];
-          case "all-ru":       return ["ig_ru", "yt_ru", "vk"];
+          case "all-combined": return ["ig_en", "yt_en", "th_en", "ig_ru", "yt_ru", "th_ru", "vk"];
+          case "all":          return ["ig_en", "yt_en", "th_en"];
+          case "all-ru":       return ["ig_ru", "yt_ru", "th_ru", "vk"];
           case "instagram":            return ["ig_en"];
           case "instagram-ru":         return ["ig_ru"];
           case "youtube":              return ["yt_en"];
           case "youtube-ru":           return ["yt_ru"];
           case "vk":                   return ["vk"];
+          case "threads":              return ["th_en"];
+          case "threads-ru":           return ["th_ru"];
           case "instagram-carousel":   return ["car_en"];
           case "instagram-carousel-ru":return ["car_ru"];
           default: return [];
@@ -2507,6 +2531,9 @@
         [/vk video\.save/i, ICON.vk, "VK: запрос адреса загрузки…"],
         [/vk:\s*загружаю видеофайл/i, ICON.vk, "VK: загрузка файла…"],
         [/vk:\s*видео загружено/i, ICON.check, "VK: видео загружено"],
+        [/creating threads container/i, ICON.threads, "Создание Threads-контейнера…"],
+        [/published threads post/i, ICON.check, "Threads: опубликовано"],
+        [/uploading video to threads/i, ICON.threads, "Загрузка в Threads…"],
         [/uploading\s+\d+-slide carousel/i, ICON.camera, "Загрузка карусели…"],
         [/building (en|ru) carousel/i, ICON.camera, "Сборка карусели…"],
         [/slides ready/i, ICON.check, "Слайды готовы"],
@@ -2516,10 +2543,11 @@
       // Maps a single publish message to the target it belongs to (en/ru, ig/yt/carousel).
       function _pubMsgTarget(m) {
         const s = (m || "").toLowerCase();
-        const mm = s.match(/starting (instagram|youtube|vk)\s+(en|ru)?\s*upload/);
+        const mm = s.match(/starting (instagram|youtube|vk|threads)\s+(en|ru)?\s*upload/);
         if (mm) {
           const ru = mm[2] === "ru";
           if (mm[1] === "vk") return "vk";
+          if (mm[1] === "threads") return ru ? "th_ru" : "th_en";
           return mm[1] === "instagram" ? (ru ? "ig_ru" : "ig_en") : (ru ? "yt_ru" : "yt_en");
         }
         const ru = /\bru\b/.test(s);
@@ -2527,6 +2555,7 @@
         if (/uploading reel to instagram/.test(s)) return ru ? "ig_ru" : "ig_en";
         if (/uploading short to youtube/.test(s)) return ru ? "yt_ru" : "yt_en";
         if (/uploading video to vk/.test(s)) return "vk";
+        if (/uploading video to threads/.test(s)) return ru ? "th_ru" : "th_en";
         return null;
       }
 
@@ -2545,6 +2574,7 @@
         if (/carousel|slides ready|building (en|ru) carousel/.test(s)) return "car";
         if (/youtube|short to youtube/.test(s)) return "yt";
         if (/\bvk\b|video to vk|vk video\.save/.test(s)) return "vk";
+        if (/threads/.test(s)) return "threads";
         if (/instagram|reel|container|github|cdn|public (video|cover) url|uploaded\s+\S+\s*→/.test(s)) return "ig";
         return null;
       }

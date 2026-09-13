@@ -27,14 +27,20 @@ from ai_adapter import adapt_article, adapt_article_ru, is_gaming_related
 from bot import build_handlers, error_handler, send_admin_notification
 from config import (
     AUTO_APPROVE_TELEGRAM,
+    AUTO_PUBLISH_THREADS,
     CHECK_INTERVAL_MINUTES,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_ADMIN_CHAT_ID,
     TELEGRAM_LOCAL_API_URL,
     TELEGRAM_LOCAL_API_FILE_URL,
     TELEGRAM_LOCAL_MODE,
+    THREADS_USER_ID,
+    THREADS_ACCESS_TOKEN,
+    THREADS_USER_ID_RU,
+    THREADS_ACCESS_TOKEN_RU,
     WEBAPP_LOCAL_URL,
     get_project,
+    platform_credentials,
     project_ai,
     project_names,
     setup_dirs,
@@ -82,6 +88,43 @@ async def _auto_approve_post(post_id: int) -> None:
                     )
     except Exception as exc:
         logger.warning("Автоапрув поста #%d не удался (dashboard недоступен?): %s", post_id, exc)
+
+
+async def _auto_publish_threads(post_id: int, project_name: str) -> None:
+    """Immediately publish a freshly-created post to Threads (EN and/or RU,
+    whichever has credentials configured), via the dashboard's own publish
+    endpoint (webapp.py) — same reuse pattern as _auto_approve_post. Threads
+    posts are text+image only (see threads_publisher.py), so unlike
+    Instagram/YouTube/VK they don't need to wait for video generation and can
+    publish right at article-intake time. Best-effort/non-fatal per platform:
+    any failure is just logged, the post can still be published manually from
+    the dashboard.
+    """
+    _global_creds = {
+        "threads": (THREADS_USER_ID, THREADS_ACCESS_TOKEN),
+        "threads-ru": (THREADS_USER_ID_RU, THREADS_ACCESS_TOKEN_RU),
+    }
+    for platform, (global_uid, global_tok) in _global_creds.items():
+        creds = platform_credentials(project_name, platform)
+        if not ((creds.get("user_id") or global_uid) and (creds.get("token") or global_tok)):
+            continue  # no credentials configured anywhere for this platform — skip silently
+        url = f"{WEBAPP_LOCAL_URL}/api/posts/{post_id}/publish/{platform}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status == 200:
+                        logger.info("Пост #%d автопубликация в %s запущена", post_id, platform)
+                    else:
+                        body = await resp.text()
+                        logger.warning(
+                            "Автопубликация поста #%d в %s не удалась (HTTP %d): %s",
+                            post_id, platform, resp.status, body[:300],
+                        )
+        except Exception as exc:
+            logger.warning(
+                "Автопубликация поста #%d в %s не удался (dashboard недоступен?): %s",
+                post_id, platform, exc,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +190,9 @@ async def process_article(app: Application, article_url: str, article_title: str
 
     if AUTO_APPROVE_TELEGRAM:
         await _auto_approve_post(post_id)
+
+    if AUTO_PUBLISH_THREADS:
+        await _auto_publish_threads(post_id, project_name)
 
 
 async def check_news(app: Application, project_name: str = "gaming") -> None:

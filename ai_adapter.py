@@ -347,6 +347,85 @@ async def adapt_article(title: str, body: str, prompt=None) -> str:
         return f"{title}\n\n[AI processing failed. Please edit before publishing.]\n\n#gaming #news"
 
 
+# Threads posts are capped at 500 chars (emoji counted as multi-byte) — stay
+# safely under that so threads_publisher never has to hard-truncate mid-word.
+_THREADS_TEXT_LIMIT = 450
+
+
+async def adapt_post_for_threads(title: str, body: str, lang: str = "en", prompt=None) -> str:
+    """
+    Rewrite an already-adapted article post (Telegram HTML) into a short,
+    native-feeling Threads text post.
+
+    ``body`` may contain Telegram HTML/markdown — it is stripped before being
+    sent to the LLM and the result is always plain text (no HTML/markdown,
+    no "link in bio" footer — Threads posts are text-only here). ``prompt``
+    is an optional per-project override (projects.json → ai.post_text_threads,
+    a per-language ``{"en": {...}, "ru": {...}}`` mapping, same convention as
+    ``video_script``).
+    """
+    plain_body = re.sub(r'<[^>]+>', '', body or "").strip()
+    _sys, _user = _prompt_parts(prompt, lang=lang)
+
+    if lang == "ru":
+        default_system = (
+            "Ты — автор постов для Threads (Meta). Пишешь коротко, живо, по-разговорному, "
+            "без канцелярита и без HTML. Только русский язык."
+        )
+        default_user = (
+            "Адаптируй следующую игровую новость в короткий нативный пост для Threads.\n\n"
+            "Правила:\n"
+            "- Только простой текст, БЕЗ HTML и markdown\n"
+            "- Разговорный, живой тон, зацепка в первой строке\n"
+            "- Максимум 400 символов вместе с хэштегами\n"
+            "- В конце 2–4 релевантных хэштега через пробел\n"
+            "- Не упоминай источник, не пиши ссылок\n\n"
+            f"Заголовок: {title}\n\nТекст:\n{plain_body[:3000]}\n\nПост для Threads:"
+        )
+    else:
+        default_system = (
+            "You are a copywriter for Threads (Meta). You write short, punchy, conversational "
+            "posts — no corporate tone, no HTML."
+        )
+        default_user = (
+            "Adapt the following gaming news into a short, native-feeling Threads post.\n\n"
+            "Rules:\n"
+            "- Plain text only, NO HTML or markdown\n"
+            "- Conversational, punchy tone, hook in the first line\n"
+            "- Maximum 400 characters including hashtags\n"
+            "- End with 2-4 relevant hashtags separated by spaces\n"
+            "- Do not mention the source website, do not include links\n\n"
+            f"Title: {title}\n\nText:\n{plain_body[:3000]}\n\nThreads post:"
+        )
+
+    system_message = _sys or default_system
+    user_message = _render_prompt(_user, title=title, body=plain_body[:3000]) if _user else default_user
+
+    messages = [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_message},
+    ]
+
+    fallback = plain_body or title
+    if len(fallback) > _THREADS_TEXT_LIMIT:
+        fallback = fallback[:_THREADS_TEXT_LIMIT - 1].rstrip() + "…"
+
+    try:
+        raw = await _call_llm_chat(messages, num_predict=1000, num_ctx=4096, timeout=180)
+        text = re.sub(r'<[^>]+>', '', raw or "")
+        text = re.sub(r'[*_`~]', '', text).strip()
+        if not text or len(text) < 20:
+            logger.warning("adapt_post_for_threads (%s) returned empty/too-short result, using fallback", lang)
+            return fallback
+        if len(text) > _THREADS_TEXT_LIMIT:
+            text = text[:_THREADS_TEXT_LIMIT - 1].rstrip() + "…"
+        logger.info("Threads post adapted (%s): '%s' (%d симв.)", lang, title[:60], len(text))
+        return text
+    except Exception as exc:
+        logger.warning("adapt_post_for_threads (%s) failed, falling back to trimmed original: %s", lang, exc)
+        return fallback
+
+
 # Keywords that guarantee a title is gaming-related — bypass LLM entirely
 _GAMING_KEYWORDS = [
     # Игровые термины (RU)

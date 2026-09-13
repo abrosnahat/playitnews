@@ -54,6 +54,11 @@ CHECK_INTERVAL_MINUTES: int = int(os.getenv("CHECK_INTERVAL_MINUTES", "30"))
 # click needed). Set AUTO_APPROVE_TELEGRAM=0 in .env to go back to manual
 # approval via the dashboard.
 AUTO_APPROVE_TELEGRAM: bool = os.getenv("AUTO_APPROVE_TELEGRAM", "1") == "1"
+# Auto-publish newly-created posts to Threads immediately (EN/RU, whichever
+# has credentials configured) — Threads posts are text+image only, so unlike
+# Instagram/YouTube/VK they don't need to wait for video generation. Set
+# AUTO_PUBLISH_THREADS=0 in .env to go back to manual publishing only.
+AUTO_PUBLISH_THREADS: bool = os.getenv("AUTO_PUBLISH_THREADS", "1") == "1"
 # Local dashboard base URL used by main.py to call the approve endpoint.
 WEBAPP_LOCAL_URL: str = os.getenv("WEBAPP_LOCAL_URL", "http://localhost:5003").rstrip("/")
 
@@ -72,6 +77,17 @@ INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
 # Instagram Graph API — Russian account (separate channel)
 INSTAGRAM_USER_ID_RU: str = os.getenv("INSTAGRAM_USER_ID_RU", "")
 INSTAGRAM_ACCESS_TOKEN_RU: str = os.getenv("INSTAGRAM_ACCESS_TOKEN_RU", "")
+
+# Threads API (Meta) — English account
+# Requires a Meta app created with the "Threads" use case + a user access
+# token granted with threads_basic + threads_content_publish permissions.
+# Use get_threads_token.py to obtain THREADS_USER_ID / THREADS_ACCESS_TOKEN.
+THREADS_USER_ID: str = os.getenv("THREADS_USER_ID", "")
+THREADS_ACCESS_TOKEN: str = os.getenv("THREADS_ACCESS_TOKEN", "")
+
+# Threads API — Russian account (separate channel)
+THREADS_USER_ID_RU: str = os.getenv("THREADS_USER_ID_RU", "")
+THREADS_ACCESS_TOKEN_RU: str = os.getenv("THREADS_ACCESS_TOKEN_RU", "")
 
 # YouTube Data API v3
 # client_secrets.json path (downloaded from Google Cloud Console)
