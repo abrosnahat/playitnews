@@ -29,6 +29,7 @@ from config import (
     AUTO_APPROVE_TELEGRAM,
     AUTO_PUBLISH_THREADS,
     CHECK_INTERVAL_MINUTES,
+    FOOTAGE_UPDATE_HOURS,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_ADMIN_CHAT_ID,
     TELEGRAM_LOCAL_API_URL,
@@ -242,6 +243,26 @@ async def job_check_news(context) -> None:
     await check_news(context.application, project_name)
 
 
+async def job_update_footage(context) -> None:
+    """Периодическая подкачка новых Shorts в FOOTAGE DATABASE + индексация.
+
+    Быстрая операция: yt-dlp с --break-on-existing останавливается на первом
+    уже скачанном ролике, индексируются только новые файлы (обычно 1-5/день).
+    """
+    try:
+        import footage_db
+        downloaded, indexed = await footage_db.update()
+        if downloaded or indexed:
+            logger.info(
+                "Footage DB обновлена: скачано %d, проиндексировано %d, всего %d клипов",
+                downloaded, indexed, footage_db.index_size(),
+            )
+        else:
+            logger.info("Footage DB: новых роликов нет")
+    except Exception:
+        logger.exception("Ошибка обновления footage DB")
+
+
 # ---------------------------------------------------------------------------
 # Application bootstrap
 # ---------------------------------------------------------------------------
@@ -310,6 +331,20 @@ def main() -> None:
             data=name,
         )
         logger.info("Проект '%s': проверка каждые %d мин", name, interval_min)
+
+    # FOOTAGE DATABASE: автоподкачка новых Shorts, если хоть один проект
+    # использует локальную базу футажа (projects.json → video.footage_db).
+    footage_enabled = any(
+        (get_project(n).get("video") or {}).get("footage_db") for n in names
+    )
+    if footage_enabled and FOOTAGE_UPDATE_HOURS > 0:
+        job_queue.run_repeating(
+            job_update_footage,
+            interval=FOOTAGE_UPDATE_HOURS * 3600,
+            first=300,  # через 5 мин после старта (не мешаем первой проверке новостей)
+            name="footage-update",
+        )
+        logger.info("Footage DB: автоподкачка новых Shorts каждые %d ч", FOOTAGE_UPDATE_HOURS)
 
     logger.info(
         "Бот запущен. Проектов: %d. Публикация по Approve.",

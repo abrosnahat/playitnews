@@ -2169,18 +2169,6 @@
       </div>`;
           }
 
-          // ─── Threads (text-only, no video needed) ───────────────────────────────────────
-          let threadsBtns = "";
-          if (enText && hasPlat("threads"))
-            threadsBtns += `<button class="btn btn-threads${pub.has("threads") ? " btn-published" : ""}" onclick="publishTo(${p.id},'threads',this)">${ICON.threads} Threads EN${done("threads")}</button>`;
-          if (ruText && hasPlat("threads-ru"))
-            threadsBtns += `<button class="btn btn-threads${pub.has("threads-ru") ? " btn-published" : ""}" onclick="publishTo(${p.id},'threads-ru',this)">${ICON.threads} Threads RU${done("threads-ru")}</button>`;
-          if (threadsBtns)
-            btnHtml += `<div class="btn-section">
-        <div class="btn-section-label">${ICON.threads} Publish to Threads (text only)</div>
-        <div class="btn-group">${threadsBtns}</div>
-      </div>`;
-
           // ─── Instagram CAROUSEL section ─────────────────────────────────────
           const carEn = (p.carousel_paths_en || []).filter(Boolean);
           const carRu = (p.carousel_paths_ru || []).filter(Boolean);

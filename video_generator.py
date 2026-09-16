@@ -66,6 +66,7 @@ load_dotenv()
 
 import scraper as _scraper
 import ai_adapter
+import config as _config
 from config import VIDEOS_DIR, YT_CLIP_SKIP, YT_MAX_FILESIZE
 import gemini_keys
 
@@ -2896,6 +2897,7 @@ async def _assemble_video(
     output_path: str,
     workdir: str,
     n_article_clips: int = 0,
+    clip_durations: list[float] | None = None,
 ) -> bool:
     """
     Assemble portrait video:
@@ -2926,7 +2928,15 @@ async def _assemble_video(
         logger.error("No media available for video assembly")
         return False
 
-    seg_dur = audio_dur / len(all_media)       # equal time per media item
+    if clip_durations and len(clip_durations) == len(all_media):
+        # Per-scene durations (footage-DB scene matching) — scaled so the
+        # total exactly matches the narration length.
+        seg_durs = [max(0.5, float(d)) for d in clip_durations]
+        _total = sum(seg_durs)
+        seg_durs = [d * audio_dur / _total for d in seg_durs]
+        logger.info("Per-scene segment durations: %s", [round(d, 1) for d in seg_durs])
+    else:
+        seg_durs = [audio_dur / len(all_media)] * len(all_media)  # equal time per item
 
     seg_w, seg_h = VID_W, VID_H
 
@@ -2939,12 +2949,12 @@ async def _assemble_video(
         seg_path = os.path.join(workdir, f"seg_{i:03d}.mp4")
         if img_flag:
             ok = await asyncio.to_thread(
-                _make_image_segment, media, seg_dur, seg_path, seg_w, seg_h,
+                _make_image_segment, media, seg_durs[i], seg_path, seg_w, seg_h,
             )
         else:
             skip = YT_CLIP_SKIP if media in article_clip_set else 0.0
             ok = await asyncio.to_thread(
-                _make_video_segment, media, seg_dur, seg_path, skip, seg_w, seg_h,
+                _make_video_segment, media, seg_durs[i], seg_path, skip, seg_w, seg_h,
             )
         if not ok:
             return None
@@ -3203,6 +3213,112 @@ async def fetch_gameplay_clips(
     return [], clips, workdir
 
 
+# ---------------------------------------------------------------------------
+# Local FOOTAGE DATABASE (footage_db.py + planner.py)
+#
+# When the post's project enables it (projects.json → video.footage_db) and
+# the local index has clips, the narration script is turned into a structured
+# scene plan (planner.plan_scenes) and each scene is matched against the
+# pre-downloaded, pre-tagged footage library instead of searching YouTube.
+# Falls back to the legacy YouTube path on any failure.
+# ---------------------------------------------------------------------------
+
+def _scene_windows_from_cues(
+    scenes: list[dict],
+    cues: list[tuple[float, float, str]],
+    audio_dur: float,
+) -> list[tuple[float, float]]:
+    """Real narration time window per scene, from word-level TTS cues.
+
+    Word counts per scene are mapped proportionally onto the cue list, so
+    minor paraphrase drift in the scene plan doesn't break the alignment.
+    Falls back to a word-count-proportional split of ``audio_dur`` when no
+    cues are available.
+    """
+    counts = [max(1, len((s.get("text") or "").split())) for s in scenes]
+    total = sum(counts)
+    if not cues:
+        windows: list[tuple[float, float]] = []
+        t = 0.0
+        for c in counts:
+            d = audio_dur * c / total
+            windows.append((t, t + d))
+            t += d
+        windows[-1] = (windows[-1][0], audio_dur)
+        return windows
+    n = len(cues)
+    windows = []
+    prev_t = 0.0
+    prev_idx = 0
+    acc = 0
+    for ci, c in enumerate(counts):
+        acc += c
+        b = min(max(round(acc / total * n), prev_idx + 1), n)
+        end_t = audio_dur if ci == len(counts) - 1 else float(cues[b - 1][1])
+        if end_t <= prev_t:
+            end_t = prev_t + 0.5
+        windows.append((prev_t, end_t))
+        prev_t = end_t
+        prev_idx = b
+    return windows
+
+
+async def _clips_via_footage_db(
+    post: dict,
+    script: str,
+    cues: list[tuple[float, float, str]],
+    audio_dur: float,
+    lang: str,
+) -> tuple[list[str], list[float]] | None:
+    """Scene-matched clips from the local footage DB, or None → legacy path.
+
+    Returns (ordered_clip_paths, per_scene_durations). Clips are referenced
+    in place from footage_db/ (read-only — segment building only reads them).
+    """
+    project = post.get("project")
+    vcfg = (_config.get_project(project).get("video") or {}) if project else {}
+    if not vcfg.get("footage_db"):
+        return None
+    if os.getenv("FOOTAGE_DB_ENABLED", "1") != "1":
+        return None
+    import footage_db as _fdb   # lazy — avoids import cost when feature is off
+    import planner as _planner
+    if _fdb.index_size() == 0:
+        logger.info("[FOOTAGE] DB enabled but index is empty — using YouTube path")
+        return None
+
+    plan = await _planner.plan_scenes(script, lang=lang)
+    scenes = plan.get("scenes") or []
+    if len(scenes) < 2:
+        return None
+    picks = await _fdb.match_scenes(scenes)
+    matched = sum(1 for p in picks if p)
+    if matched < max(2, int(len(scenes) * 0.5)):
+        logger.info(
+            "[FOOTAGE] matched only %d/%d scenes — falling back to YouTube",
+            matched, len(scenes),
+        )
+        return None
+
+    # Fill unmatched scenes with the previous scene's clip (visual continuity)
+    first_pick = next(p for p in picks if p)
+    clips: list[str] = []
+    for i, p in enumerate(picks):
+        chosen = p or (picks[i - 1] if i > 0 and picks[i - 1] else first_pick)
+        clips.append(chosen["path"])
+
+    windows = _scene_windows_from_cues(scenes, cues, audio_dur)
+    durations = [max(0.5, e - s) for s, e in windows]
+    for i, (sc, p) in enumerate(zip(scenes, picks)):
+        logger.info(
+            "[FOOTAGE] scene %d (%.1fs) '%s' → %s (score %s)",
+            sc.get("id"), durations[i], (sc.get("text") or "")[:60],
+            os.path.basename(clips[i]),
+            "reuse" if p is None else p["score"],
+        )
+    return clips, durations
+
+
 async def create_short_video(
     post: dict,
     script: str,
@@ -3286,9 +3402,22 @@ async def create_short_video(
 
         # 3. Media collection: article videos first, then YouTube gameplay clips
 
+        # ── Priority 0: local footage DB (scene-matched, per-language plan) ──
+        fdb_clips: list[str] | None = None
+        fdb_durations: list[float] | None = None
+        try:
+            _fdb_result = await _clips_via_footage_db(post, script, cues, audio_dur, lang)
+            if _fdb_result:
+                fdb_clips, fdb_durations = _fdb_result
+                logger.info("[FOOTAGE] using %d scene-matched clips from local DB", len(fdb_clips))
+        except Exception as exc:
+            logger.warning("[FOOTAGE] matching failed — falling back to YouTube: %s", exc)
+
         # ── Primary: article videos (Playground HLS) ─────────────────────────
         # ── Secondary: YouTube gameplay footage ──────────────────────────────
-        if prefetched_clips is not None:
+        if fdb_clips:
+            all_clips = fdb_clips
+        elif prefetched_clips is not None:
             # Reuse already-downloaded clips (shared between EN and RU renders).
             # prefetched_clips already contains article_videos + yt_clips —
             # do NOT add article_videos again from post.get("video_paths").
@@ -3326,6 +3455,7 @@ async def create_short_video(
         ok = await _assemble_video(
             all_images, all_clips, audio_path, cues, output_path, workdir,
             n_article_clips=n_article_clips,
+            clip_durations=fdb_durations,
         )
         return output_path if ok else None
 

@@ -359,6 +359,7 @@ for _logger_name in (
     "instagram_publisher", "instagram_carousel_publisher",
     "youtube_publisher", "github_uploader", "thumbnail_generator",
     "carousel_builder", "vk_publisher", "threads_publisher",
+    "footage_db", "planner",
 ):
     logging.getLogger(_logger_name).addHandler(_detail_handler)
 
@@ -834,10 +835,13 @@ def api_mark_done(post_id: int):
     post = db.get_scheduled_post(post_id)
     if not post:
         return jsonify({"error": "Post not found"}), 404
+    # Threads is intentionally excluded — it's auto-published via Instagram's
+    # Meta cross-post integration (same as Telegram), never through the
+    # manual/bulk publish flow, so it shouldn't be force-marked here either.
     all_platforms = json.dumps([
         "instagram", "instagram-ru", "youtube", "youtube-ru",
         "instagram-carousel", "instagram-carousel-ru",
-        "vk", "threads", "threads-ru",
+        "vk",
     ])
     with db.get_conn() as conn:
         conn.execute(
@@ -1585,8 +1589,20 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
         # mentioned in the generated script (projects.json → ai.entity_queries),
         # so fetched footage matches what's being said, not just the headline.
         # Skipped when the user pasted a custom query/link for this render.
+        # Local FOOTAGE DATABASE: when the project enables it (projects.json →
+        # video.footage_db) and the index has clips, footage is scene-matched
+        # per language INSIDE create_short_video (planner + footage_db) — the
+        # upfront YouTube prefetch and entity-query extraction are skipped.
+        use_footage_db = False
+        if (config.get_project(project).get("video") or {}).get("footage_db"):
+            try:
+                import footage_db as _fdb
+                use_footage_db = _fdb.index_size() > 0
+            except Exception:
+                use_footage_db = False
+
         entity_queries: list[str] | None = None
-        if not user_query:
+        if not user_query and not use_footage_db:
             entity_prompt = config.project_ai(project, "entity_queries")
             if entity_prompt:
                 source_script = ru_script if do_ru else en_script
@@ -1595,18 +1611,26 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
                 )
 
         # --- Step 3: Fetch gameplay clips ---
-        if entity_queries:
-            progress(f"Step 3/4: Searching YouTube footage for: {', '.join(entity_queries)}…")
+        if use_footage_db and not user_query:
+            progress("Step 3/4: Using local footage database (scene matching per language)…")
+            if check_cancel(): raise InterruptedError("Cancelled")
+            yt_skip = 0
+            article_videos, yt_clips = [], []
+            clips_workdir = tempfile.mkdtemp(dir=config.VIDEOS_DIR, prefix="clips_")
+            shared_clips: list[str] | None = None   # → scene matching inside create_short_video
         else:
-            progress(f"Step 3/4: Searching YouTube for '{search_query}'…")
-        if check_cancel(): raise InterruptedError("Cancelled")
-        yt_skip = db.increment_yt_skip(post_id, YT_SKIP_STEP) - YT_SKIP_STEP
-        article_videos, yt_clips, clips_workdir = await video_generator.fetch_gameplay_clips(
-            post=post, search_query=search_query, yt_skip=yt_skip, user_query=user_query,
-            search_queries=entity_queries,
-        )
-        shared_clips = article_videos + yt_clips
-        progress(f"Found {len(shared_clips)} video clips. Rendering…")
+            if entity_queries:
+                progress(f"Step 3/4: Searching YouTube footage for: {', '.join(entity_queries)}…")
+            else:
+                progress(f"Step 3/4: Searching YouTube for '{search_query}'…")
+            if check_cancel(): raise InterruptedError("Cancelled")
+            yt_skip = db.increment_yt_skip(post_id, YT_SKIP_STEP) - YT_SKIP_STEP
+            article_videos, yt_clips, clips_workdir = await video_generator.fetch_gameplay_clips(
+                post=post, search_query=search_query, yt_skip=yt_skip, user_query=user_query,
+                search_queries=entity_queries,
+            )
+            shared_clips = article_videos + yt_clips
+            progress(f"Found {len(shared_clips)} video clips. Rendering…")
 
         # --- Step 4: Render ---
         if check_cancel(): raise InterruptedError("Cancelled")

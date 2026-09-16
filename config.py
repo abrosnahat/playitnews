@@ -127,6 +127,9 @@ YT_CLIP_SKIP: int = int(os.getenv("YT_CLIP_SKIP", "5"))            # skip intro 
 YT_MAX_CLIPS: int = int(os.getenv("YT_MAX_CLIPS", "5"))             # max clips to download
 YT_MAX_FILESIZE: int = int(os.getenv("YT_MAX_FILESIZE", "1500"))      # MB per clip (yt-dlp limit)
 
+# FOOTAGE DATABASE — автоподкачка новых Shorts (часы между проверками; 0 = откл.)
+FOOTAGE_UPDATE_HOURS: int = int(os.getenv("FOOTAGE_UPDATE_HOURS", "24"))
+
 
 def setup_dirs() -> None:
     """Create required runtime directories. Call once at application startup."""

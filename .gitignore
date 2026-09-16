@@ -6,6 +6,7 @@ __pycache__/
 data.db
 images/
 videos/
+footage_db/
 playitnews.log
 client_secrets.json
 client_secret_*.json
