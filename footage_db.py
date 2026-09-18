@@ -71,6 +71,7 @@ CHANNELS: list[str] = [
 ] or [
     DEFAULT_CHANNEL,
     "https://www.youtube.com/@ufc/shorts",
+    "https://www.youtube.com/@PFLMMA/shorts",
 ]
 
 CATEGORY_DIRS = ("fighters", "events", "actions", "misc")
@@ -139,7 +140,11 @@ def load_index() -> list[dict]:
 
 def save_index(index: list[dict]) -> None:
     setup_dirs()
-    tmp = INDEX_PATH + ".tmp"
+    # Уникальное имя tmp-файла НА ПРОЦЕСС — без этого параллельный CLI-запуск
+    # и фоновая автоподкачка бота (main.py, отдельный процесс) писали в один
+    # и тот же index.json.tmp и могли удалить/перезаписать файл друг друга
+    # между open() и os.replace() (гонка → FileNotFoundError/WinError 2).
+    tmp = f"{INDEX_PATH}.{os.getpid()}.tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(index, fh, ensure_ascii=False)
     # Windows: os.replace падает с WinError 5, если index.json в этот момент
@@ -161,6 +166,75 @@ def index_size() -> int:
 
 def clip_abspath(record: dict) -> str:
     return os.path.join(FOOTAGE_DIR, record.get("file", ""))
+
+
+# ---------------------------------------------------------------------------
+# Межпроцессная блокировка index.json
+#
+# CLI-запуск (`footage_db.py index/update`) и фоновая автоподкачка бота
+# (main.py, ОТДЕЛЬНЫЙ процесс со своим event loop) могут оба вызвать
+# index_videos() одновременно. Внутрипроцессный asyncio.Lock тут НЕ помогает —
+# это две РАЗНЫХ программы, каждая со своим снимком `index` в памяти —
+# последний записавший os.replace() тихо затирает записи, добавленные
+# другим процессом в тот же промежуток. Файловый мьютекс (эксклюзивное
+# создание файла) сериализует доступ к индексации между ЛЮБЫМи процессами.
+# ---------------------------------------------------------------------------
+
+_LOCK_PATH = os.path.join(FOOTAGE_DIR, "_index.lock")
+# Если лок держится дольше этого времени — считаем владельца умершим
+# (crash без уборки за собой) и снимаем лок принудительно.
+_LOCK_STALE_SECONDS = 6 * 3600
+
+
+class _CrossProcessLock:
+    """Файловый мьютекс на index.json (между ПРОЦЕССАМи, не потоками)."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self._held = False
+
+    async def acquire(self) -> None:
+        setup_dirs()
+        warned = False
+        while True:
+            try:
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode())
+                os.close(fd)
+                self._held = True
+                return
+            except FileExistsError:
+                try:
+                    age = time.time() - os.path.getmtime(self.path)
+                except OSError:
+                    age = 0.0
+                if age > _LOCK_STALE_SECONDS:
+                    logger.warning("Footage DB lock is stale (%.0fs old) — removing", age)
+                    try:
+                        os.remove(self.path)
+                    except OSError:
+                        pass
+                    continue
+                if not warned:
+                    logger.info("Footage DB index is busy (another process is indexing) — waiting…")
+                    warned = True
+                await asyncio.sleep(2.0)
+
+    def release(self) -> None:
+        if not self._held:
+            return
+        self._held = False
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+    async def __aenter__(self) -> "_CrossProcessLock":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        self.release()
 
 
 # ---------------------------------------------------------------------------
@@ -281,9 +355,14 @@ def download_shorts(
     )
     if quiet:
         # Фоновый режим (периодическая подкачка из бота): вывод в лог,
-        # таймаут как страховка от зависшего yt-dlp.
+        # таймаут как страховка от зависшего yt-dlp. Явная utf-8 кодировка —
+        # yt-dlp пишет эмодзи/кириллицу, Windows иначе декодирует как cp1251
+        # и падает с UnicodeDecodeError.
         try:
-            r = subprocess.run(args, capture_output=True, text=True, timeout=3600)
+            r = subprocess.run(
+                args, capture_output=True, text=True, timeout=3600,
+                encoding="utf-8", errors="replace",
+            )
             if r.returncode not in (0, 101):
                 logger.warning("yt-dlp update rc=%d: %s", r.returncode, (r.stderr or "")[-400:])
         except subprocess.TimeoutExpired:
@@ -373,7 +452,7 @@ Using BOTH the frame and the title/description, return STRICT JSON only (no mark
 }}
 
 Rules:
-- "fighter": UFC fighters / persons shown or clearly referenced. Use canonical ENGLISH names in Latin script (e.g. "Islam Makhachev", not "Ислам Махачев"). Empty list if none identifiable.
+- "fighter": ONLY include a person you can actually SEE and visually recognize in THIS frame. The title/description often names fighters from a different fight, a reaction video, an interview about someone else, or a compilation — do NOT list a fighter just because their name appears in the title/description if they are not the person shown in the image. Use canonical ENGLISH names in Latin script (e.g. "Islam Makhachev", not "Ислам Махачев"). Empty list if no identifiable fighter is visible.
 - "action": 1-3 keywords, prefer these: {actions}. You may add one specific free-form tag (e.g. "left hook").
 - "event": the UFC event (e.g. "UFC 320") if identifiable from title/description, else "".
 """
@@ -448,9 +527,17 @@ async def index_videos(limit: int | None = None) -> int:
     """Проиндексировать все файлы из _raw/: теги → embedding → категория → index.json.
 
     Инкрементально: индекс сохраняется после каждого видео (прерывание безопасно).
+    Защищён межпроцессным локом (_CrossProcessLock) — когда бот в фоне делает
+    свою автоподкачку, ручной CLI-запуск просто ждёт очереди вместо того
+    чтобы оба одновременно перезаписывали index.json и теряли записи друг друга.
     Возвращает число добавленных записей.
     """
     setup_dirs()
+    async with _CrossProcessLock(_LOCK_PATH):
+        return await _index_videos_locked(limit)
+
+
+async def _index_videos_locked(limit: int | None = None) -> int:
     index = load_index()
     known_ids = {r.get("id") for r in index}
 
@@ -547,6 +634,18 @@ async def index_videos(limit: int | None = None) -> int:
 # Search / scene matching
 # ---------------------------------------------------------------------------
 
+# Penalty for a clip whose tagged fighter(s) are all UNRELATED to the current
+# story — without this, a scene with no per-scene subject (LLM missed it, or
+# a generic hype line like "this is where champions are made") is matched by
+# raw embedding similarity alone, which can hand-pick a real, correctly-tagged
+# clip of a totally different, semantically-similar-sounding fighter (e.g. a
+# Gaethje title celebration for an Adesanya/Tsarukyan/Ruffy story). Only
+# applies when we actually know who the story is about (``story_subjects``
+# non-empty) and the candidate has an explicit named fighter tag that matches
+# none of them — generic/untagged action footage is never penalized.
+_OFF_TOPIC_PENALTY = float(os.getenv("FOOTAGE_OFF_TOPIC_PENALTY", "0.35"))
+
+
 def _keyword_bonus(record: dict, subjects: list[str], actions: list[str]) -> float:
     bonus = 0.0
     rec_fighters = " ".join(record.get("fighter", [])).lower()
@@ -561,15 +660,29 @@ def _keyword_bonus(record: dict, subjects: list[str], actions: list[str]) -> flo
     return bonus
 
 
+def _off_topic_penalty(record: dict, story_subjects: frozenset[str]) -> float:
+    if not story_subjects:
+        return 0.0
+    rec_fighters = [f.strip().lower() for f in record.get("fighter", []) if f and f.strip()]
+    if not rec_fighters:
+        return 0.0
+    for rf in rec_fighters:
+        for s in story_subjects:
+            if s and (s in rf or rf in s):
+                return 0.0
+    return _OFF_TOPIC_PENALTY
+
+
 def _score_record(
     record: dict,
     q_emb: list[float],
     subjects: list[str],
     actions: list[str],
+    story_subjects: frozenset[str] = frozenset(),
 ) -> float:
     emb = record.get("embedding") or []
     sim = cosine(q_emb, emb) if emb else 0.0
-    return sim + _keyword_bonus(record, subjects, actions)
+    return sim + _keyword_bonus(record, subjects, actions) - _off_topic_penalty(record, story_subjects)
 
 
 async def search_clips(query: str, top_k: int = 5) -> list[dict]:
@@ -607,6 +720,17 @@ async def match_scenes(scenes: list[dict]) -> list[dict | None]:
 
     q_embs = await embed_texts(query_texts, task_type="RETRIEVAL_QUERY")
 
+    # Every fighter named ANYWHERE in the scene plan — used to penalize clips
+    # tagged with a named fighter who isn't part of this story at all (see
+    # _off_topic_penalty). Empty when the plan never named anyone (heuristic
+    # fallback) — penalty is a no-op in that case, same as before this change.
+    story_subjects = frozenset(
+        s.strip().lower()
+        for sc in scenes
+        for s in (sc.get("subject") or [])
+        if isinstance(s, str) and s.strip()
+    )
+
     used_files: set[str] = set()
     picks: list[dict | None] = []
     for sc, q_emb in zip(scenes, q_embs):
@@ -618,7 +742,7 @@ async def match_scenes(scenes: list[dict]) -> list[dict | None]:
             path = clip_abspath(r)
             if not os.path.exists(path):
                 continue
-            score = _score_record(r, q_emb, subjects, actions)
+            score = _score_record(r, q_emb, subjects, actions, story_subjects)
             if path in used_files:
                 score -= 0.15  # мягкий штраф за повтор — не жёсткий запрет
             if score > best_score:
@@ -630,6 +754,247 @@ async def match_scenes(scenes: list[dict]) -> list[dict | None]:
         else:
             picks.append(None)
     return picks
+
+
+# ---------------------------------------------------------------------------
+# Maintenance — fix a single mis-indexed clip (wrong fighter/action/event tag).
+#
+# Root cause of most mis-tags: indexing tags off ONE mid-frame + the video's
+# title/description, and title text can bias Gemini into naming a fighter who
+# isn't actually shown (reaction/compilation/interview videos, multi-fighter
+# previews, etc.). These helpers let a bad entry be corrected without having
+# to re-run the whole indexing pass.
+# ---------------------------------------------------------------------------
+
+def _locate(index: list[dict], video_id: str) -> dict | None:
+    """Find a record WITHIN an already-loaded index list, by its YouTube id
+    (exact) or by a filename fragment (e.g. pasted straight from a
+    "[FOOTAGE] scene N ... -> <file>" log line, with or without .mp4)."""
+    video_id = (video_id or "").strip()
+    stem = os.path.splitext(os.path.basename(video_id))[0]
+    for r in index:
+        if r.get("id") == stem or r.get("id") == video_id:
+            return r
+    for r in index:
+        fname = os.path.splitext(os.path.basename(r.get("file", "")))[0]
+        if stem and (fname == stem or stem in fname):
+            return r
+    return None
+
+
+def find_record(video_id: str) -> dict | None:
+    """Locate a record by its YouTube id or a filename fragment (loads a
+    fresh copy of the index — use this for a one-off lookup/CLI ``info``)."""
+    return _locate(load_index(), video_id)
+
+
+def remove_video(video_id: str) -> bool:
+    """Delete a mis-indexed clip entirely: removes the video file, its sidecar
+    .json, and its entry from index.json. Use for clips that are simply wrong
+    and not worth keeping."""
+    index = load_index()
+    match = _locate(index, video_id)
+    if match is None:
+        logger.warning("remove_video: no record found for %r", video_id)
+        return False
+    path = clip_abspath(match)
+    for p in (path, os.path.splitext(path)[0] + ".json"):
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except OSError as exc:
+            logger.warning("remove_video: could not delete %s: %s", p, exc)
+    index = [r for r in index if r is not match]
+    save_index(index)
+    logger.info("Removed clip %s (%s) from footage DB", match.get("id"), match.get("file"))
+    return True
+
+
+def _move_record_file(record: dict) -> None:
+    """Recompute the category path for *record* (after its tags changed) and
+    move the underlying file + sidecar .json there if it moved categories."""
+    old_path = clip_abspath(record)
+    new_rel = _target_relpath(record, record["id"])
+    new_path = os.path.join(FOOTAGE_DIR, new_rel)
+    if os.path.abspath(new_path) == os.path.abspath(old_path):
+        return
+    os.makedirs(os.path.dirname(new_path), exist_ok=True)
+    old_sidecar = os.path.splitext(old_path)[0] + ".json"
+    new_sidecar = os.path.splitext(new_path)[0] + ".json"
+    if os.path.exists(old_path):
+        shutil.move(old_path, new_path)
+    if os.path.exists(old_sidecar):
+        shutil.move(old_sidecar, new_sidecar)
+    record["file"] = new_rel
+
+
+async def relabel_video(
+    video_id: str,
+    fighter: list[str] | None = None,
+    action: list[str] | None = None,
+    event: str | None = None,
+    description: str | None = None,
+    clear_fighter: bool = False,
+    clear_action: bool = False,
+    clear_description: bool = False,
+) -> bool:
+    """Manually overwrite a clip's tags (when a human already knows the
+    correct fighter/action/event) — moves the file to the right category
+    folder and re-computes its embedding so search/scene-matching picks it up
+    correctly going forward."""
+    index = load_index()
+    record = _locate(index, video_id)
+    if record is None:
+        logger.warning("relabel_video: no record found for %r", video_id)
+        return False
+    if clear_fighter:
+        record["fighter"] = []
+    elif fighter is not None:
+        record["fighter"] = [f.strip() for f in fighter if f.strip()]
+    if clear_action:
+        record["action"] = []
+    elif action is not None:
+        record["action"] = [a.strip().lower() for a in action if a.strip()]
+    if event is not None:
+        record["event"] = event.strip()
+    # The (often AI-hallucinated) free-text description feeds the semantic
+    # embedding too — leaving a wrong name in there (e.g. "Arman Tsarukyan is
+    # lying on the canvas...") would keep biasing cosine-similarity search
+    # towards that fighter even after the structured fighter/action tags are
+    # fixed, so it must be clearable/settable just like the other fields.
+    if clear_description:
+        record["description"] = ""
+    elif description is not None:
+        record["description"] = description.strip()
+
+    embs = await embed_texts([_embed_text_for(record)], task_type="RETRIEVAL_DOCUMENT")
+    record["embedding"] = embs[0] if embs else record.get("embedding", [])
+    _move_record_file(record)
+    dest = clip_abspath(record)
+    if os.path.exists(dest):
+        with open(os.path.splitext(dest)[0] + ".json", "w", encoding="utf-8") as fh:
+            json.dump(record, fh, ensure_ascii=False, indent=2)
+    save_index(index)
+    logger.info(
+        "Relabeled %s → fighters=%s actions=%s event=%r (%s)",
+        record["id"], record.get("fighter"), record.get("action"), record.get("event"), record["file"],
+    )
+    return True
+
+
+async def _retag_record(record: dict) -> bool:
+    """Re-run Gemini Vision tagging on *record*'s CURRENT file and overwrite
+    its fighter/action/event/description/embedding in place, then move the
+    file to the (possibly new) category folder. Does NOT touch index.json —
+    callers own the load/save so this can be used both for a single clip
+    (``retag_video``) and a bulk pass (``reindex_all``) with one save per
+    clip or one save at the end, as appropriate."""
+    path = clip_abspath(record)
+    if not os.path.exists(path):
+        logger.warning("_retag_record: file missing on disk: %s", path)
+        return False
+
+    tags = await _tag_video(path, record.get("title", ""), record.get("description", ""))
+    if not tags:
+        logger.warning("_retag_record: Vision tagging returned nothing for %s", record["id"])
+        return False
+    record["fighter"] = [f.strip() for f in (tags.get("fighter") or []) if isinstance(f, str) and f.strip()]
+    record["action"] = [a.strip().lower() for a in (tags.get("action") or []) if isinstance(a, str) and a.strip()]
+    record["event"] = (tags.get("event") or "").strip() if isinstance(tags.get("event"), str) else record.get("event", "")
+    ai_desc = (tags.get("description") or "").strip() if isinstance(tags.get("description"), str) else ""
+    if ai_desc:
+        record["description"] = ai_desc
+
+    # A transient embedding-API error (e.g. 503) must NOT lose the freshly
+    # corrected tags above, and (critically for reindex_all's multi-hour
+    # unattended run) must not raise — same fallback-and-keep-going pattern
+    # already used by _index_videos_locked's own re-embedding pass.
+    try:
+        embs = await embed_texts([_embed_text_for(record)], task_type="RETRIEVAL_DOCUMENT")
+        record["embedding"] = embs[0] if embs else record.get("embedding", [])
+    except Exception as exc:
+        logger.warning("_retag_record: re-embedding failed for %s (tags still updated): %s", record["id"], exc)
+    _move_record_file(record)
+    dest = clip_abspath(record)
+    if os.path.exists(dest):
+        with open(os.path.splitext(dest)[0] + ".json", "w", encoding="utf-8") as fh:
+            json.dump(record, fh, ensure_ascii=False, indent=2)
+    return True
+
+
+async def retag_video(video_id: str) -> bool:
+    """Re-run Gemini Vision tagging on an ALREADY-indexed clip (fresh mid-frame
+    + the stricter anti-title-bias prompt) and overwrite its tags/embedding.
+    Useful when a clip was mis-tagged by an earlier indexing pass — a retry
+    with the current prompt often fixes it since Vision calls aren't fully
+    deterministic. For a clip you can already identify by eye, ``relabel_video``
+    (no extra API call, no guessing) is more reliable."""
+    index = load_index()
+    record = _locate(index, video_id)
+    if record is None:
+        logger.warning("retag_video: no record found for %r", video_id)
+        return False
+    ok = await _retag_record(record)
+    if not ok:
+        return False
+    save_index(index)
+    logger.info(
+        "Retagged %s → fighters=%s actions=%s event=%r (%s)",
+        record["id"], record.get("fighter"), record.get("action"), record.get("event"), record["file"],
+    )
+    return True
+
+
+async def reindex_all(limit: int | None = None, only_fighter: str | None = None) -> tuple[int, int]:
+    """Re-run Gemini Vision tagging on EVERY already-indexed clip (not just new
+    arrivals in _raw/) — use after tightening the tagging prompt, or when you
+    suspect widespread mis-tags and want a bulk pass instead of fixing clips
+    one at a time. Rate-limited via the same ``_pace()`` as normal indexing
+    (~1 clip every few seconds — a full pass over ~1000+ clips can take HOURS,
+    run it in the background). Safe to interrupt: index.json is saved after
+    EVERY clip, and re-running just continues (nothing is skipped based on
+    prior state, so re-running twice just re-tags everything again).
+
+    ``only_fighter``: optional case-insensitive substring filter — only
+    re-tag clips whose CURRENT fighter list contains a match (handy for a
+    narrower, cheaper pass instead of the whole DB).
+
+    Returns (attempted, changed) — ``changed`` counts clips whose fighter
+    list actually differs after the retag (worth eyeballing in the log).
+    """
+    async with _CrossProcessLock(_LOCK_PATH):
+        index = load_index()
+        candidates = index
+        if only_fighter:
+            needle = only_fighter.strip().lower()
+            candidates = [r for r in index if any(needle in f.lower() for f in r.get("fighter", []))]
+        if limit:
+            candidates = candidates[:limit]
+        total = len(candidates)
+        attempted = 0
+        changed = 0
+        for i, record in enumerate(candidates, 1):
+            old_fighters = list(record.get("fighter", []))
+            vid = record.get("id")
+            logger.info("Reindexing %d/%d: %s (was %s)", i, total, vid, old_fighters)
+            try:
+                ok = await _retag_record(record)
+            except Exception as exc:
+                # Must never abort the whole (potentially hours-long,
+                # unattended) bulk pass over one bad clip/transient API error
+                # — log it and move on, index already has the old tags intact.
+                logger.warning("Reindexing %s failed, keeping old tags: %s", vid, exc)
+                ok = False
+            attempted += 1
+            if not ok:
+                save_index(index)
+                continue
+            if record.get("fighter", []) != old_fighters:
+                changed += 1
+                logger.info("  → changed: %s → %s", old_fighters, record.get("fighter"))
+            save_index(index)
+        logger.info("Reindex-all done: %d attempted, %d changed fighter tags", attempted, changed)
+        return attempted, changed
 
 
 # ---------------------------------------------------------------------------
@@ -658,6 +1023,20 @@ def _cmd_stats() -> None:
     print("\nActions:")
     for name, n in sorted(by_action.items(), key=lambda x: -x[1]):
         print(f"  {n:4d}  {name}")
+
+
+def _cmd_info(video_id: str) -> None:
+    r = find_record(video_id)
+    if r is None:
+        print(f"No record found for {video_id!r}")
+        return
+    print(f"id:       {r.get('id')}")
+    print(f"file:     {r.get('file')}")
+    print(f"fighters: {r.get('fighter')}")
+    print(f"actions:  {r.get('action')}")
+    print(f"event:    {r.get('event')!r}")
+    print(f"title:    {r.get('title', '')[:120]}")
+    print(f"desc:     {r.get('description', '')[:200]}")
 
 
 def main() -> None:
@@ -690,6 +1069,32 @@ def main() -> None:
 
     sub.add_parser("stats", help="index statistics")
 
+    p_info = sub.add_parser("info", help="show a clip's current tags (id or filename fragment)")
+    p_info.add_argument("video_id")
+
+    p_relabel = sub.add_parser("relabel", help="manually overwrite a clip's tags (fixes a mis-indexed clip)")
+    p_relabel.add_argument("video_id")
+    p_relabel.add_argument("--fighter", help="comma-separated correct fighter name(s)")
+    p_relabel.add_argument("--action", help="comma-separated correct action tag(s)")
+    p_relabel.add_argument("--event", help="correct event name, e.g. 'UFC 320'")
+    p_relabel.add_argument("--description", help="correct free-text description (also feeds the embedding)")
+    p_relabel.add_argument("--clear-fighter", action="store_true", help="wipe the fighter list (no fighter shown)")
+    p_relabel.add_argument("--clear-action", action="store_true", help="wipe the action list")
+    p_relabel.add_argument("--clear-description", action="store_true", help="wipe the free-text description")
+
+    p_retag = sub.add_parser("retag", help="re-run Gemini Vision tagging on one already-indexed clip")
+    p_retag.add_argument("video_id")
+
+    p_remove = sub.add_parser("remove", help="delete a mis-indexed clip entirely (file + index entry)")
+    p_remove.add_argument("video_id")
+
+    p_reall = sub.add_parser(
+        "reindex-all",
+        help="re-run Vision tagging on EVERY already-indexed clip (slow, rate-limited — use --limit to test first)",
+    )
+    p_reall.add_argument("--limit", type=int, default=None, help="only re-tag the first N clips")
+    p_reall.add_argument("--fighter", default=None, help="only re-tag clips currently tagged with this fighter (substring match)")
+
     args = ap.parse_args()
     if args.cmd == "download":
         for ch in (args.channel or CHANNELS):
@@ -708,6 +1113,29 @@ def main() -> None:
             print(f"       {r.get('title', '')[:100]}")
     elif args.cmd == "stats":
         _cmd_stats()
+    elif args.cmd == "info":
+        _cmd_info(args.video_id)
+    elif args.cmd == "relabel":
+        ok = asyncio.run(relabel_video(
+            args.video_id,
+            fighter=args.fighter.split(",") if args.fighter else None,
+            action=args.action.split(",") if args.action else None,
+            event=args.event,
+            description=args.description,
+            clear_fighter=args.clear_fighter,
+            clear_action=args.clear_action,
+            clear_description=args.clear_description,
+        ))
+        print("OK" if ok else "FAILED — see log above")
+    elif args.cmd == "retag":
+        ok = asyncio.run(retag_video(args.video_id))
+        print("OK" if ok else "FAILED — see log above")
+    elif args.cmd == "remove":
+        ok = remove_video(args.video_id)
+        print("OK" if ok else "FAILED — see log above")
+    elif args.cmd == "reindex-all":
+        attempted, changed = asyncio.run(reindex_all(args.limit, args.fighter))
+        print(f"Attempted: {attempted}, changed fighter tags: {changed}")
 
 
 if __name__ == "__main__":

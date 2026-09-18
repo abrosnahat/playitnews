@@ -95,6 +95,32 @@ def _heuristic_scenes(script: str, lang: str) -> dict:
     return {"scenes": scenes}
 
 
+def _repair_json_escapes(s: str) -> str:
+    r"""Fix invalid backslash escapes the LLM sometimes emits inside JSON
+    strings (e.g. a literal backslash-u not followed by 4 hex digits, or a
+    backslash-d/backslash-s copy-pasted from a regex-flavoured thought).
+    ``json.loads`` rejects any backslash that isn't part of a valid JSON
+    escape sequence — double up any such stray backslash so it's parsed as
+    a literal backslash instead of erroring out the whole scene plan.
+    """
+    return re.sub(
+        r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})',
+        r"\\\\",
+        s,
+    )
+
+
+def _parse_scene_json(raw_text: str) -> dict:
+    m = re.search(r"\{.*\}", raw_text or "", re.DOTALL)
+    if not m:
+        raise ValueError("no JSON object in LLM response")
+    blob = m.group(0)
+    try:
+        return json.loads(blob)
+    except json.JSONDecodeError:
+        return json.loads(_repair_json_escapes(blob))
+
+
 def _validate_scenes(raw: dict, script: str, lang: str) -> dict | None:
     """Нормализует ответ LLM; None → использовать fallback."""
     scenes_in = raw.get("scenes") if isinstance(raw, dict) else None
@@ -132,31 +158,60 @@ def _validate_scenes(raw: dict, script: str, lang: str) -> dict | None:
             scene_words, script_words,
         )
         return None
+    _carry_forward_subjects(scenes)
     return {"scenes": scenes}
 
 
-async def plan_scenes(script: str, lang: str = "ru") -> dict:
-    """Сценарий → структурированный план сцен. Никогда не бросает исключение."""
+def _carry_forward_subjects(scenes: list[dict]) -> None:
+    """Generic wrap-up/transition sentences ("Watch closely because this is
+    where champions are truly made.") often name no fighter at all — left
+    as-is, footage matching falls back to purely generic semantic search and
+    can surface a completely unrelated fighter's clip just because it scores
+    well for "celebration"/"crowd". Carrying forward the most recently
+    mentioned subject(s) onto an empty-subject scene keeps footage anchored
+    to the people the story is actually about. Mutates *scenes* in place.
+    """
+    last_subject: list[str] = []
+    for sc in scenes:
+        if sc["subject"]:
+            last_subject = sc["subject"]
+        elif last_subject:
+            sc["subject"] = last_subject
+
+
+async def plan_scenes(script: str, lang: str = "ru", attempts: int = 2) -> dict:
+    """Сценарий → структурированный план сцен. Никогда не бросает исключение.
+
+    Retries the LLM call up to ``attempts`` times before falling back to the
+    heuristic sentence-split plan — a single malformed JSON response (invalid
+    escape, transient "server disconnected", etc.) shouldn't throw away the
+    LLM's per-scene subject/action tagging, since the heuristic fallback has
+    NO subject info at all and can cause footage matching to pick the wrong
+    fighter's clips (subject-blind, embedding-similarity-only matching).
+    """
     script = (script or "").strip()
     if not script:
         return {"scenes": []}
-    try:
-        user = _USER_TEMPLATE.format(actions=", ".join(STANDARD_ACTIONS), script=script)
-        raw_text = await ai_adapter._call_llm_chat(
-            [
-                {"role": "system", "content": _SYSTEM},
-                {"role": "user", "content": user},
-            ],
-            num_predict=4000, num_ctx=8192, timeout=180,
-        )
-        m = re.search(r"\{.*\}", raw_text or "", re.DOTALL)
-        if not m:
-            raise ValueError("no JSON object in LLM response")
-        plan = _validate_scenes(json.loads(m.group(0)), script, lang)
-        if plan is None:
-            raise ValueError("scene plan failed validation")
-        logger.info("Scene plan: %d scenes for %d-word script", len(plan["scenes"]), len(script.split()))
-        return plan
-    except Exception as exc:
-        logger.warning("plan_scenes LLM failed (%s) — heuristic sentence fallback", exc)
-        return _heuristic_scenes(script, lang)
+    user = _USER_TEMPLATE.format(actions=", ".join(STANDARD_ACTIONS), script=script)
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            raw_text = await ai_adapter._call_llm_chat(
+                [
+                    {"role": "system", "content": _SYSTEM},
+                    {"role": "user", "content": user},
+                ],
+                num_predict=4000, num_ctx=8192, timeout=180,
+            )
+            plan = _validate_scenes(_parse_scene_json(raw_text), script, lang)
+            if plan is None:
+                raise ValueError("scene plan failed validation")
+            logger.info("Scene plan: %d scenes for %d-word script", len(plan["scenes"]), len(script.split()))
+            return plan
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "plan_scenes LLM failed on attempt %d/%d (%s)", attempt, attempts, exc,
+            )
+    logger.warning("plan_scenes: all %d attempt(s) failed (%s) — heuristic sentence fallback", attempts, last_exc)
+    return _heuristic_scenes(script, lang)

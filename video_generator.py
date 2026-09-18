@@ -1982,7 +1982,7 @@ async def _download_yt_segment(
 # never breaks video generation.
 # ---------------------------------------------------------------------------
 
-GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-3.1-flash-lite")
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-3.5-flash-lite")
 _FRAME_MATCH_VERIFY = (
     os.getenv("FRAME_MATCH_VERIFY", "1").strip().lower() not in ("0", "false", "no", "off", "")
 )
