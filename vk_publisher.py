@@ -60,26 +60,53 @@ def _make_session() -> aiohttp.ClientSession:
     return aiohttp.ClientSession(connector=connector)
 
 
+# Ошибка 9 = "Слишком много однотипных действий" (flood control, см.
+# dev.vk.com/reference/errors) — недокументированный количественный лимит на
+# вызовы ОДНОГО И ТОГО ЖЕ метода. Обычно снимается сам через некоторое время,
+# поэтому повторяем запрос с нарастающей паузой вместо немедленного отказа.
+_FLOOD_RETRY_DELAYS = (60, 180, 420, 900)  # секунды; итого до ~26 мин ожидания
+
+
 async def _vk_call(session: aiohttp.ClientSession, method: str, params: dict) -> dict:
     """
     Вызвать метод VK API. Возвращает содержимое поля `response`.
     Бросает RuntimeError при ошибке VK (error) или HTTP-ошибке.
+
+    При ошибке 9 (flood control) делает несколько повторов с нарастающей
+    паузой (см. _FLOOD_RETRY_DELAYS) прежде чем сдаться — этот вызов уже
+    выполняется в фоновом потоке публикации, поэтому долгое ожидание допустимо.
     """
     payload = {**params, "v": VK_API_VERSION}
     url = f"{VK_API_BASE}/{method}"
-    async with session.post(url, data=payload) as resp:
-        text = await resp.text()
-        if resp.status != 200:
-            raise RuntimeError(f"VK {method} HTTP {resp.status}: {text[:300]}")
-        try:
-            data = await resp.json(content_type=None)
-        except Exception as exc:
-            raise RuntimeError(f"VK {method}: invalid JSON: {text[:300]}") from exc
 
-    if "error" in data:
+    attempt = 0
+    while True:
+        async with session.post(url, data=payload) as resp:
+            text = await resp.text()
+            if resp.status != 200:
+                raise RuntimeError(f"VK {method} HTTP {resp.status}: {text[:300]}")
+            try:
+                data = await resp.json(content_type=None)
+            except Exception as exc:
+                raise RuntimeError(f"VK {method}: invalid JSON: {text[:300]}") from exc
+
+        if "error" not in data:
+            return data.get("response", {})
+
         err = data["error"]
         code = err.get("error_code")
         msg = err.get("error_msg", "unknown error")
+
+        if code == 9 and attempt < len(_FLOOD_RETRY_DELAYS):
+            delay = _FLOOD_RETRY_DELAYS[attempt]
+            attempt += 1
+            logger.warning(
+                "VK %s error 9: Flood control — повтор %d/%d через %ds…",
+                method, attempt, len(_FLOOD_RETRY_DELAYS), delay,
+            )
+            await asyncio.sleep(delay)
+            continue
+
         hint = ""
         if code == 5:
             hint = (" — токен недействителен/просрочен. Обновите VK_ACCESS_TOKEN "
@@ -87,8 +114,9 @@ async def _vk_call(session: aiohttp.ClientSession, method: str, params: dict) ->
         elif code == 1051:
             hint = (" — video.save недоступен для этого профиля. Используйте токен "
                     "СООБЩЕСТВА и задайте VK_GROUP_ID (грузим видео в группу, а не в профиль).")
+        elif code == 9:
+            hint = " — лимит однотипных вызовов этого метода превышен, все повторы исчерпаны."
         raise RuntimeError(f"VK {method} error {code}: {msg}{hint}")
-    return data.get("response", {})
 
 
 def _build_video_url(owner_id: int, video_id: int) -> str:
