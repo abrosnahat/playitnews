@@ -1649,6 +1649,7 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
                     n_article_clips=len(article_videos),
                     include_article_images=include_images,
                     add_cta=add_cta,
+                    skip_footage_db=user_query,
                 )
                 if en_path:
                     db.set_generated_video_path(post_id, en_path)
@@ -1668,6 +1669,7 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
                     n_article_clips=len(article_videos),
                     include_article_images=include_images,
                     add_cta=add_cta,
+                    skip_footage_db=user_query,
                 )
                 if ru_path:
                     db.set_generated_video_path_ru(post_id, ru_path)

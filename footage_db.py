@@ -945,7 +945,11 @@ async def retag_video(video_id: str) -> bool:
     return True
 
 
-async def reindex_all(limit: int | None = None, only_fighter: str | None = None) -> tuple[int, int]:
+async def reindex_all(
+    limit: int | None = None,
+    only_fighter: str | None = None,
+    offset: int = 0,
+) -> tuple[int, int]:
     """Re-run Gemini Vision tagging on EVERY already-indexed clip (not just new
     arrivals in _raw/) — use after tightening the tagging prompt, or when you
     suspect widespread mis-tags and want a bulk pass instead of fixing clips
@@ -959,6 +963,11 @@ async def reindex_all(limit: int | None = None, only_fighter: str | None = None)
     re-tag clips whose CURRENT fighter list contains a match (handy for a
     narrower, cheaper pass instead of the whole DB).
 
+    ``offset``: skip this many candidates before starting — lets a huge index
+    be worked through in batches (e.g. ``offset=1000, limit=1000`` to reindex
+    the NEXT 1000 clips after an earlier ``limit=1000`` pass) instead of
+    always re-doing the same clips from the start.
+
     Returns (attempted, changed) — ``changed`` counts clips whose fighter
     list actually differs after the retag (worth eyeballing in the log).
     """
@@ -968,6 +977,8 @@ async def reindex_all(limit: int | None = None, only_fighter: str | None = None)
         if only_fighter:
             needle = only_fighter.strip().lower()
             candidates = [r for r in index if any(needle in f.lower() for f in r.get("fighter", []))]
+        if offset:
+            candidates = candidates[offset:]
         if limit:
             candidates = candidates[:limit]
         total = len(candidates)
@@ -976,7 +987,7 @@ async def reindex_all(limit: int | None = None, only_fighter: str | None = None)
         for i, record in enumerate(candidates, 1):
             old_fighters = list(record.get("fighter", []))
             vid = record.get("id")
-            logger.info("Reindexing %d/%d: %s (was %s)", i, total, vid, old_fighters)
+            logger.info("Reindexing %d/%d (offset %d): %s (was %s)", i, total, offset, vid, old_fighters)
             try:
                 ok = await _retag_record(record)
             except Exception as exc:
@@ -1092,7 +1103,8 @@ def main() -> None:
         "reindex-all",
         help="re-run Vision tagging on EVERY already-indexed clip (slow, rate-limited — use --limit to test first)",
     )
-    p_reall.add_argument("--limit", type=int, default=None, help="only re-tag the first N clips")
+    p_reall.add_argument("--limit", type=int, default=None, help="only re-tag N clips")
+    p_reall.add_argument("--offset", type=int, default=0, help="skip this many clips before starting (batch through a huge index, e.g. --offset 1000 --limit 1000 for the next 1000)")
     p_reall.add_argument("--fighter", default=None, help="only re-tag clips currently tagged with this fighter (substring match)")
 
     args = ap.parse_args()
@@ -1134,7 +1146,7 @@ def main() -> None:
         ok = remove_video(args.video_id)
         print("OK" if ok else "FAILED — see log above")
     elif args.cmd == "reindex-all":
-        attempted, changed = asyncio.run(reindex_all(args.limit, args.fighter))
+        attempted, changed = asyncio.run(reindex_all(args.limit, args.fighter, args.offset))
         print(f"Attempted: {attempted}, changed fighter tags: {changed}")
 
 

@@ -3329,6 +3329,7 @@ async def create_short_video(
     n_article_clips: int = 0,
     include_article_images: bool = False,
     add_cta: bool = False,
+    skip_footage_db: bool = False,
 ) -> Optional[str]:
     """
     Generate a TikTok/Reels/Shorts video for an approved post.
@@ -3341,6 +3342,10 @@ async def create_short_video(
         prefetched_clips:  Already-downloaded clip paths to reuse (skip download).
         include_article_images: If True, append article still images after the
             video clips. Defaults to False (clips/footage only).
+        skip_footage_db:   If True, never pull scene-matched clips from the local
+            footage database — used when the user pasted a custom search query
+            or a direct video link, so their explicit choice of source footage
+            (``prefetched_clips``) is honored instead of being overridden.
 
     Returns:
         Absolute path to the generated .mp4 file, or None on failure.
@@ -3405,13 +3410,16 @@ async def create_short_video(
         # ── Priority 0: local footage DB (scene-matched, per-language plan) ──
         fdb_clips: list[str] | None = None
         fdb_durations: list[float] | None = None
-        try:
-            _fdb_result = await _clips_via_footage_db(post, script, cues, audio_dur, lang)
-            if _fdb_result:
-                fdb_clips, fdb_durations = _fdb_result
-                logger.info("[FOOTAGE] using %d scene-matched clips from local DB", len(fdb_clips))
-        except Exception as exc:
-            logger.warning("[FOOTAGE] matching failed — falling back to YouTube: %s", exc)
+        if skip_footage_db:
+            logger.info("[FOOTAGE] skipping local DB — user supplied a custom query/link")
+        else:
+            try:
+                _fdb_result = await _clips_via_footage_db(post, script, cues, audio_dur, lang)
+                if _fdb_result:
+                    fdb_clips, fdb_durations = _fdb_result
+                    logger.info("[FOOTAGE] using %d scene-matched clips from local DB", len(fdb_clips))
+            except Exception as exc:
+                logger.warning("[FOOTAGE] matching failed — falling back to YouTube: %s", exc)
 
         # ── Primary: article videos (Playground HLS) ─────────────────────────
         # ── Secondary: YouTube gameplay footage ──────────────────────────────
