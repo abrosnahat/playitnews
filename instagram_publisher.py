@@ -232,6 +232,30 @@ _IG_MAX_W = 720
 _IG_MAX_H = 1280
 
 
+# Target output size, kept safely under _RAW_GITHUB_OCTET_LIMIT (10 MB) so
+# essentially every Reel takes the fast/reliable raw.github path instead of
+# falling back to jsDelivr — which has proven to fail ~100% of the time for
+# freshly-pushed >10MB files (constant 404/500/503 from Meta's Fwdproxy,
+# see repo memory notes). Longer/high-motion UFC fight clips previously blew
+# past 10MB under a plain unconstrained CRF 23 encode.
+_IG_TARGET_BYTES = int(9.3 * 1024 * 1024)
+_IG_AUDIO_KBPS = 128
+
+
+def _probe_duration(path: str) -> float | None:
+    """Return media duration in seconds via ffprobe, or None on failure."""
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        val = proc.stdout.strip()
+        return float(val) if val else None
+    except Exception:
+        return None
+
+
 def _optimize_for_instagram(src_path: str) -> str:
     """
     Re-encode *src_path* with IG-friendly settings:
@@ -240,6 +264,8 @@ def _optimize_for_instagram(src_path: str) -> str:
       • AAC stereo 44.1 kHz, 128 kbps
       • +faststart (moov before mdat)
       • random metadata (unique content hash to bypass any prior bad-cache)
+      • video bitrate capped (-maxrate/-bufsize) so the output stays close to
+        _IG_TARGET_BYTES regardless of motion complexity (see module docstring)
     Returns the path of a temp file the caller must delete. On any error
     (e.g. ffmpeg missing) returns *src_path* unchanged.
     """
@@ -251,12 +277,24 @@ def _optimize_for_instagram(src_path: str) -> str:
     # `min(iw,720)` + `-2` keeps even dimensions and never upscales.
     vf = (f"scale='min({_IG_MAX_W},iw)':'-2',"
           f"scale='-2':'min({_IG_MAX_H},ih)'")
+
+    rate_args: list[str] = []
+    duration = _probe_duration(src_path)
+    if duration and duration > 0:
+        target_bits = _IG_TARGET_BYTES * 8
+        audio_bits = _IG_AUDIO_KBPS * 1000 * duration
+        video_kbps = max(400, int((target_bits - audio_bits) / duration / 1000))
+        maxrate_kbps = int(video_kbps * 1.3)
+        bufsize_kbps = video_kbps * 2
+        rate_args = ["-maxrate", f"{maxrate_kbps}k", "-bufsize", f"{bufsize_kbps}k"]
+
     try:
         proc = subprocess.run(
             ["ffmpeg", "-y", "-loglevel", "error", "-i", src_path,
              "-vf", vf,
              "-c:v", "libx264", "-profile:v", "high", "-level", "4.0",
              "-pix_fmt", "yuv420p", "-preset", "fast", "-crf", "23",
+             *rate_args,
              "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "44100",
              "-movflags", "+faststart",
              "-metadata", f"comment=playitnews-{nonce}",
