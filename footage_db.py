@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import difflib
 import json
 import logging
 import math
@@ -443,11 +444,219 @@ def _load_info_json(video_path: str) -> dict:
     return {}
 
 
-_TAG_PROMPT = """This frame is from a UFC/MMA YouTube Short.
+# ---------------------------------------------------------------------------
+# Защита от ошибочной индексации: текстовые факты (событие, имена из названия)
+# важнее догадок Vision-модели; имена приводятся к каноническим; подозрительные
+# записи помечаются needs_review (см. audit).
+# ---------------------------------------------------------------------------
+
+_UFC_EVENT_RE = re.compile(r"\bUFC\s*[-#:]?\s*(\d{2,3})\b", re.IGNORECASE)
+_MONTAGE_FRACTIONS = (0.2, 0.5, 0.8)
+_FUZZY_NAME_CUTOFF = 0.88
+
+
+def _event_from_text(*texts: str) -> str:
+    """'UFC 333' из названия/описания (в т.ч. хэштег #ufc333). Берёт первый текст,
+    где назван РОВНО один номер; если номеров несколько (анонс нескольких турниров) —
+    текст пропускается как неоднозначный."""
+    for t in texts:
+        nums: list[str] = []
+        for m in _UFC_EVENT_RE.finditer(t or ""):
+            if m.group(1) not in nums:
+                nums.append(m.group(1))
+        if len(nums) == 1:
+            return f"UFC {nums[0]}"
+    return ""
+
+
+def _event_in_text(event: str, text: str) -> bool:
+    """Подтверждено ли событие текстом (номер турнира или название целиком)."""
+    event = (event or "").strip()
+    if not event:
+        return False
+    nums = re.findall(r"\d{2,3}", event)
+    if nums:
+        return all(re.search(rf"(?<!\d){n}(?!\d)", text or "") for n in nums)
+    # Без пробелов: "UFC London" должно находиться в хэштеге #UFCLondon
+    compact = lambda s: re.sub(r"[\s#_-]+", "", s.lower())  # noqa: E731
+    return compact(event) in compact(text or "")
+
+
+class _Roster:
+    """Известные имена бойцов из индекса: канонизация написаний и поиск имён в тексте."""
+
+    def __init__(self, index: list[dict] | None = None) -> None:
+        self.counts: dict[str, int] = {}
+        self._by_lower: dict[str, str] = {}
+        self._last: dict[str, set[str]] = {}
+        for r in index or []:
+            self.add(r.get("fighter", []))
+
+    def add(self, names: list[str]) -> None:
+        for n in names or []:
+            n = (n or "").strip()
+            if not n:
+                continue
+            self.counts[n] = self.counts.get(n, 0) + 1
+            self._by_lower.setdefault(n.lower(), n)
+            parts = n.split()
+            if len(parts) >= 2 and len(parts[-1]) >= 4:
+                self._last.setdefault(parts[-1].lower(), set()).add(n)
+
+    def canonicalize(self, name: str) -> str:
+        """Привести имя к уже известному написанию (точное совпадение без регистра,
+        иначе близкое по написанию к достаточно частому имени)."""
+        name = (name or "").strip()
+        hit = self._by_lower.get(name.lower())
+        if hit:
+            return hit
+        pool = [n for n, c in self.counts.items() if c >= 2]
+        m = difflib.get_close_matches(name, pool, n=1, cutoff=_FUZZY_NAME_CUTOFF)
+        return m[0] if m else name
+
+    def _resolve_last(self, last: str) -> str | None:
+        names = self._last.get(last)
+        if not names:
+            return None
+        if len(names) == 1:
+            return next(iter(names))
+        # Несколько написаний одной фамилии: берём доминирующее (≥2× частоты второго)
+        ranked = sorted(names, key=lambda n: -self.counts.get(n, 0))
+        if self.counts[ranked[0]] >= 2 * self.counts[ranked[1]]:
+            return ranked[0]
+        return None
+
+    def find_in_text(self, text: str) -> list[str]:
+        """Известные бойцы, названные в тексте (полное имя или однозначная фамилия)."""
+        t = (text or "").lower()
+        if not t.strip():
+            return []
+        found: list[str] = []
+        for lower, canon in self._by_lower.items():
+            if " " in lower and len(lower) >= 6 and lower in t and canon not in found:
+                found.append(canon)
+        words = set(re.findall(r"[\w'’-]+", t))
+        for last in self._last:
+            if last in words:
+                canon = self._resolve_last(last)
+                if canon and canon not in found:
+                    found.append(canon)
+        return found
+
+
+def _postprocess_tags(tags: dict, title: str, description: str, roster: _Roster) -> dict:
+    """Привести ответ Vision к проверенному виду: каноничные имена бойцов и
+    событие ТОЛЬКО из текста (модель выдумывает его по лицам/контексту)."""
+    out = dict(tags)
+    fighters: list[str] = []
+    for f in tags.get("fighter") or []:
+        if isinstance(f, str) and f.strip():
+            c = roster.canonicalize(f)
+            if c not in fighters:
+                fighters.append(c)
+    out["fighter"] = fighters
+
+    model_event = tags.get("event") if isinstance(tags.get("event"), str) else ""
+    model_event = model_event.strip()
+    text = f"{title} {description}"
+    text_event = _event_from_text(title, description)
+    if text_event:
+        event = text_event
+    elif model_event and _event_in_text(model_event, text):
+        event = model_event
+    else:
+        event = ""
+    if model_event and model_event != event:
+        logger.info("Event from Vision %r not backed by text → using %r", model_event, event)
+    out["event"] = event
+    return out
+
+
+def _review_reasons(record: dict, roster: _Roster, text: str | None = None) -> list[str]:
+    """Почему запись выглядит подозрительной (пусто = всё сходится).
+    ``text`` — название (+описание YouTube, если доступно при индексации)."""
+    title = record.get("title", "") or ""
+    text = text if text is not None else title
+    reasons: list[str] = []
+
+    ev = (record.get("event") or "").strip()
+    text_event = _event_from_text(title) or _event_from_text(text)
+    if text_event and ev != text_event:
+        reasons.append(f"event {ev or '-'} != text {text_event}")
+    elif ev and not _event_in_text(ev, text):
+        reasons.append(f"event {ev!r} not stated in text")
+
+    named = roster.find_in_text(title)
+    have = {f.lower() for f in record.get("fighter", [])}
+    if named and not any(n.lower() in have for n in named):
+        reasons.append(f"title names {named} but fighters={record.get('fighter', [])}")
+    return reasons
+
+
+def _apply_review(record: dict, roster: _Roster, text: str | None = None) -> list[str]:
+    reasons = _review_reasons(record, roster, text)
+    if reasons:
+        record["needs_review"] = reasons
+        logger.warning("Needs review %s: %s", record.get("id"), "; ".join(reasons))
+    else:
+        record.pop("needs_review", None)
+    return reasons
+
+
+def _write_sidecar(record: dict) -> None:
+    dest = clip_abspath(record)
+    if os.path.exists(dest):
+        with open(os.path.splitext(dest)[0] + ".json", "w", encoding="utf-8") as fh:
+            json.dump(record, fh, ensure_ascii=False, indent=2)
+
+
+def _extract_montage(video_path: str, out_path: str) -> int:
+    """Кадры на 20/50/80% длительности → один JPEG (горизонтальная склейка).
+    Один вызов Vision вместо трёх. Возвращает число панелей (0 = неудача);
+    для очень коротких/проблемных клипов откатывается на один средний кадр."""
+    import video_generator as vg
+
+    duration = vg._get_audio_duration(video_path)
+    if duration >= 1.5:
+        frames: list[str] = []
+        try:
+            for i, frac in enumerate(_MONTAGE_FRACTIONS):
+                fp = f"{out_path}.{i}.jpg"
+                proc = subprocess.run(
+                    ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                     "-ss", f"{duration * frac:.2f}", "-i", video_path,
+                     "-frames:v", "1", "-vf", "scale=360:-2", fp],
+                    capture_output=True, text=True, timeout=20,
+                )
+                if proc.returncode == 0 and os.path.exists(fp) and os.path.getsize(fp) > 0:
+                    frames.append(fp)
+            if len(frames) >= 2:
+                cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+                for fp in frames:
+                    cmd += ["-i", fp]
+                cmd += ["-filter_complex", f"hstack=inputs={len(frames)}", out_path]
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                if proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                    return len(frames)
+        except Exception as exc:
+            logger.debug("Montage extraction failed for %s: %s", video_path, exc)
+        finally:
+            for fp in frames:
+                try:
+                    os.remove(fp)
+                except OSError:
+                    pass
+    return 1 if vg._extract_mid_frame(video_path, out_path) else 0
+
+
+_TAG_PROMPT = """This image is {panels} from one UFC/MMA YouTube Short{order}.
 Video title: "{title}"
 Video description: "{description}"
+Upload date: {upload_date}
+Candidate fighters named in the text: {candidates}
+Event stated in the text: {event_hint}
 
-Using BOTH the frame and the title/description, return STRICT JSON only (no markdown, no extra text):
+Using the image AND the title/description, return STRICT JSON only (no markdown, no extra text):
 {{
   "fighter": ["Full Name"],
   "action": ["knockout"],
@@ -456,27 +665,44 @@ Using BOTH the frame and the title/description, return STRICT JSON only (no mark
 }}
 
 Rules:
-- "fighter": ONLY include a person you can actually SEE and visually recognize in THIS frame. The title/description often names fighters from a different fight, a reaction video, an interview about someone else, or a compilation — do NOT list a fighter just because their name appears in the title/description if they are not the person shown in the image. Use canonical ENGLISH names in Latin script (e.g. "Islam Makhachev", not "Ислам Махачев"). Empty list if no identifiable fighter is visible.
+- "fighter": ONLY people you can actually SEE and visually recognize. Prefer names from the candidate list when they match what is shown; add any other name only if you are confident about it. The title/description often names fighters from a different fight, a reaction video, an interview about someone else, or a compilation — do NOT list a fighter just because a name appears in the text if that person is not the one shown. Use canonical ENGLISH names in Latin script (e.g. "Islam Makhachev", not "Ислам Махачев"). Empty list if no identifiable fighter is visible.
 - "action": 1-3 keywords, prefer these: {actions}. You may add one specific free-form tag (e.g. "left hook").
-- "event": the UFC event (e.g. "UFC 320") if identifiable from title/description, else "".
+- "event": the UFC event ONLY if the title/description explicitly state it (e.g. "UFC 320" or a hashtag like #ufc333). NEVER infer it from the faces or from who is fighting; if the text does not state it, return "". Clips are usually uploaded within days of their event, so use the upload date only to sanity-check, not to guess a number.
 """
 
 
-async def _tag_video(video_path: str, title: str, description: str) -> dict:
-    """Gemini Vision по среднему кадру + заголовку/описанию → dict тегов."""
+async def _tag_video(
+    video_path: str,
+    title: str,
+    description: str,
+    upload_date: str = "",
+    roster: _Roster | None = None,
+) -> dict:
+    """Gemini Vision по кадрам (монтаж 20/50/80%) + заголовку/описанию → dict тегов.
+    Событие берётся из текста, имена канонизируются по ростеру индекса."""
     import video_generator as vg  # lazy: тяжёлый импорт нужен только при индексации
 
+    roster = roster if roster is not None else _Roster()
     frame_path = video_path + ".frame.jpg"
     tags: dict = {}
     try:
-        ok = await asyncio.to_thread(vg._extract_mid_frame, video_path, frame_path)
-        if not ok:
+        panels = await asyncio.to_thread(_extract_montage, video_path, frame_path)
+        if not panels:
             return {}
         with open(frame_path, "rb") as fh:
             image_bytes = fh.read()
+
+        title_names = roster.find_in_text(title)
+        desc_names = [n for n in roster.find_in_text(description) if n not in title_names]
+        candidates = (title_names + desc_names)[:6]
         prompt = _TAG_PROMPT.format(
+            panels=f"a montage of {panels} frames" if panels > 1 else "a single frame",
+            order=" (left to right = time order)" if panels > 1 else "",
             title=(title or "")[:300],
             description=(description or "")[:500],
+            upload_date=upload_date or "unknown",
+            candidates=", ".join(candidates) or "none",
+            event_hint=_event_from_text(title, description) or "none",
             actions=", ".join(STANDARD_ACTIONS),
         )
         await _pace()   # держимся под лимитом 15 RPM бесплатного тира
@@ -491,9 +717,9 @@ async def _tag_video(video_path: str, title: str, description: str) -> dict:
             os.remove(frame_path)
         except OSError:
             pass
-    if not isinstance(tags, dict):
+    if not isinstance(tags, dict) or not tags:
         return {}
-    return tags
+    return _postprocess_tags(tags, title, description, roster)
 
 
 def _target_relpath(tags: dict, vid: str) -> str:
@@ -544,6 +770,7 @@ async def index_videos(limit: int | None = None) -> int:
 async def _index_videos_locked(limit: int | None = None) -> int:
     index = load_index()
     known_ids = {r.get("id") for r in index}
+    roster = _Roster(index)
 
     # Дозаполнить embeddings у уже проиндексированных записей, где они
     # не посчитались из-за 429 (без embedding запись невидима для поиска).
@@ -582,10 +809,16 @@ async def _index_videos_locked(limit: int | None = None) -> int:
             continue
 
         logger.info("Indexing %s — '%s' (%.0fs)", vid, title[:60], duration)
-        tags = await _tag_video(path, title, description)
+        tags = await _tag_video(
+            path, title, description,
+            upload_date=info.get("upload_date", ""), roster=roster,
+        )
         fighters = [f.strip() for f in (tags.get("fighter") or []) if isinstance(f, str) and f.strip()]
         actions = [a.strip().lower() for a in (tags.get("action") or []) if isinstance(a, str) and a.strip()]
         event = (tags.get("event") or "").strip() if isinstance(tags.get("event"), str) else ""
+        if not tags:
+            # Vision не ответил — событие всё равно можно взять из текста
+            event = _event_from_text(title, description)
         ai_desc = (tags.get("description") or "").strip() if isinstance(tags.get("description"), str) else ""
 
         record = {
@@ -601,6 +834,7 @@ async def _index_videos_locked(limit: int | None = None) -> int:
             "upload_date": info.get("upload_date", ""),
             "embedding": [],
         }
+        _apply_review(record, roster, text=f"{title} {description}")
         try:
             embs = await embed_texts([_embed_text_for(record)], task_type="RETRIEVAL_DOCUMENT")
             record["embedding"] = embs[0] if embs else []
@@ -623,6 +857,7 @@ async def _index_videos_locked(limit: int | None = None) -> int:
             json.dump(record, fh, ensure_ascii=False, indent=2)
 
         index.append(record)
+        roster.add(fighters)
         known_ids.add(vid)
         save_index(index)
         added += 1
@@ -896,6 +1131,8 @@ async def relabel_video(
         record["description"] = ""
     elif description is not None:
         record["description"] = description.strip()
+    # Ручная правка = запись проверена человеком
+    record.pop("needs_review", None)
 
     embs = await embed_texts([_embed_text_for(record)], task_type="RETRIEVAL_DOCUMENT")
     record["embedding"] = embs[0] if embs else record.get("embedding", [])
@@ -912,7 +1149,7 @@ async def relabel_video(
     return True
 
 
-async def _retag_record(record: dict) -> bool:
+async def _retag_record(record: dict, roster: _Roster | None = None) -> bool:
     """Re-run Gemini Vision tagging on *record*'s CURRENT file and overwrite
     its fighter/action/event/description/embedding in place, then move the
     file to the (possibly new) category folder. Does NOT touch index.json —
@@ -924,7 +1161,13 @@ async def _retag_record(record: dict) -> bool:
         logger.warning("_retag_record: file missing on disk: %s", path)
         return False
 
-    tags = await _tag_video(path, record.get("title", ""), record.get("description", ""))
+    # Описание записи — это уже вывод модели (может содержать галлюцинации), поэтому как
+    # текстовый источник используется только название ролика.
+    roster = roster if roster is not None else _Roster(load_index())
+    tags = await _tag_video(
+        path, record.get("title", ""), "",
+        upload_date=record.get("upload_date", ""), roster=roster,
+    )
     if not tags:
         logger.warning("_retag_record: Vision tagging returned nothing for %s", record["id"])
         return False
@@ -934,6 +1177,7 @@ async def _retag_record(record: dict) -> bool:
     ai_desc = (tags.get("description") or "").strip() if isinstance(tags.get("description"), str) else ""
     if ai_desc:
         record["description"] = ai_desc
+    _apply_review(record, roster)
 
     # A transient embedding-API error (e.g. 503) must NOT lose the freshly
     # corrected tags above, and (critically for reindex_all's multi-hour
@@ -1003,6 +1247,7 @@ async def reindex_all(
     """
     async with _CrossProcessLock(_LOCK_PATH):
         index = load_index()
+        roster = _Roster(index)
         candidates = index
         if only_fighter:
             needle = only_fighter.strip().lower()
@@ -1019,7 +1264,7 @@ async def reindex_all(
             vid = record.get("id")
             logger.info("Reindexing %d/%d (offset %d): %s (was %s)", i, total, offset, vid, old_fighters)
             try:
-                ok = await _retag_record(record)
+                ok = await _retag_record(record, roster)
             except Exception as exc:
                 # Must never abort the whole (potentially hours-long,
                 # unattended) bulk pass over one bad clip/transient API error
@@ -1036,6 +1281,58 @@ async def reindex_all(
             save_index(index)
         logger.info("Reindex-all done: %d attempted, %d changed fighter tags", attempted, changed)
         return attempted, changed
+
+
+async def audit_index(
+    fix_events: bool = False,
+    mark: bool = False,
+) -> tuple[list[tuple[dict, list[str]]], int]:
+    """Найти подозрительно размеченные клипы без обращения к Vision (только текст
+    названия против тегов): событие не совпадает с названием / не подтверждено
+    текстом, боец из названия отсутствует в тегах.
+
+    ``fix_events``: исправить событие там, где название однозначно называет
+    турнир (#ufc333 → "UFC 333"); пересчитывает embedding этих записей.
+    ``mark``: записать причины в ``needs_review`` каждой записи (и убрать флаг
+    у тех, что стали корректными).
+    Возвращает ([(запись, причины)], число_исправленных_событий).
+    """
+    async with _CrossProcessLock(_LOCK_PATH):
+        index = load_index()
+        roster = _Roster(index)
+        fixed = 0
+        if fix_events:
+            for r in index:
+                text_event = _event_from_text(r.get("title", ""))
+                if not text_event or (r.get("event") or "").strip() == text_event:
+                    continue
+                logger.info("Fix event %s: %r → %r", r.get("id"), r.get("event"), text_event)
+                r["event"] = text_event
+                try:
+                    embs = await embed_texts([_embed_text_for(r)], task_type="RETRIEVAL_DOCUMENT")
+                    r["embedding"] = embs[0] if embs else r.get("embedding", [])
+                except Exception as exc:
+                    logger.warning("Re-embedding failed for %s (event still fixed): %s", r.get("id"), exc)
+                _move_record_file(r)
+                _write_sidecar(r)
+                fixed += 1
+                if fixed % 25 == 0:
+                    save_index(index)
+        flagged: list[tuple[dict, list[str]]] = []
+        for r in index:
+            reasons = _review_reasons(r, roster)
+            if reasons:
+                flagged.append((r, reasons))
+                if mark:
+                    r["needs_review"] = reasons
+            elif mark:
+                r.pop("needs_review", None)
+        if mark or fixed:
+            save_index(index)
+            if mark:
+                for r, _ in flagged:
+                    _write_sidecar(r)
+        return flagged, fixed
 
 
 # ---------------------------------------------------------------------------
@@ -1078,6 +1375,8 @@ def _cmd_info(video_id: str) -> None:
     print(f"event:    {r.get('event')!r}")
     print(f"title:    {r.get('title', '')[:120]}")
     print(f"desc:     {r.get('description', '')[:200]}")
+    if r.get("needs_review"):
+        print(f"REVIEW:   {'; '.join(r['needs_review'])}")
 
 
 def main() -> None:
@@ -1137,6 +1436,16 @@ def main() -> None:
     p_reall.add_argument("--offset", type=int, default=0, help="skip this many clips before starting (batch through a huge index, e.g. --offset 1000 --limit 1000 for the next 1000)")
     p_reall.add_argument("--fighter", default=None, help="only re-tag clips currently tagged with this fighter (substring match)")
 
+    p_audit = sub.add_parser(
+        "audit",
+        help="find suspicious tags by comparing titles with tags (no API calls unless --fix-events)",
+    )
+    p_audit.add_argument("--fix-events", action="store_true",
+                         help="set event from the title where it names exactly one UFC number (re-embeds those clips)")
+    p_audit.add_argument("--mark", action="store_true",
+                         help="write reasons to needs_review in index.json / sidecars")
+    p_audit.add_argument("--show", type=int, default=100, help="max flagged clips to print (default 100)")
+
     args = ap.parse_args()
     if args.cmd == "download":
         for ch in (args.channel or CHANNELS):
@@ -1178,6 +1487,14 @@ def main() -> None:
     elif args.cmd == "reindex-all":
         attempted, changed = asyncio.run(reindex_all(args.limit, args.fighter, args.offset))
         print(f"Attempted: {attempted}, changed fighter tags: {changed}")
+    elif args.cmd == "audit":
+        flagged, fixed = asyncio.run(audit_index(args.fix_events, args.mark))
+        print(f"Events fixed: {fixed}")
+        print(f"Flagged: {len(flagged)} of {index_size()}")
+        for r, reasons in flagged[: args.show]:
+            print(f"  {r.get('id')}  {r.get('title', '')[:60]!r}")
+            for reason in reasons:
+                print(f"      - {reason}")
 
 
 if __name__ == "__main__":
