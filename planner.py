@@ -47,7 +47,7 @@ _USER_TEMPLATE = """Split the following narration script into visual scenes for 
 Rules:
 - Scenes must cover the ENTIRE script in order. Each scene "text" = one or more consecutive VERBATIM sentences from the script — do NOT paraphrase, do NOT skip words.
 - One scene per sentence; merge a sentence shorter than 4 words into the neighboring scene.
-- "subject": canonical ENGLISH names (Latin script) of the fighters/persons this scene is about (empty list if none).
+- "subject": canonical ENGLISH names (Latin script) of the fighters/persons this scene is about (empty list if none). If a scene describes the fight/bout itself (rounds, strikes, who won or lost, the decision) between two fighters, list BOTH opponents, even if the sentence names only one of them (e.g. "Yan's body kick turned the fight" in a Yan vs Dvalishvili story -> ["Petr Yan", "Merab Dvalishvili"]).
 - "action": 1-3 visual action keywords, prefer these: {actions}.
 - "concept": short English phrase capturing the idea of the scene.
 - "queries": 2-3 short ENGLISH search queries for finding matching UFC footage (e.g. "Islam Makhachev UFC walkout", "Alex Pereira knockout").

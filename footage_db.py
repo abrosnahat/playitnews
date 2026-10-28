@@ -342,8 +342,10 @@ def download_shorts(
         "--match-filters", "live_status=not_live",
         "--ignore-errors", "--no-warnings",
         "--sleep-requests", "1",
-        *vg._YT_COOKIE_ARGS,
-        *vg._YT_EXTRACTOR_ARGS,
+        # Cookies и player_client (tv_downgraded) НЕ передаём: публичные Shorts в
+        # них не нуждаются, а они дают "The page needs to be reloaded" и молча
+        # блокируют скачивание новых роликов (--ignore-errors). Дефолтный клиент
+        # yt-dlp (android vr) работает стабильно.
     ]
     if new_only:
         args += ["--lazy-playlist", "--break-on-existing"]
@@ -365,6 +367,8 @@ def download_shorts(
             )
             if r.returncode not in (0, 101):
                 logger.warning("yt-dlp update rc=%d: %s", r.returncode, (r.stderr or "")[-400:])
+            elif "ERROR:" in (r.stderr or ""):
+                logger.warning("yt-dlp update errors: %s", (r.stderr or "")[-400:])
         except subprocess.TimeoutExpired:
             logger.error("yt-dlp update timed out after 1h")
     else:
@@ -644,33 +648,52 @@ async def _index_videos_locked(limit: int | None = None) -> int:
 # non-empty) and the candidate has an explicit named fighter tag that matches
 # none of them — generic/untagged action footage is never penalized.
 _OFF_TOPIC_PENALTY = float(os.getenv("FOOTAGE_OFF_TOPIC_PENALTY", "0.35"))
+# Смягчённый штраф: клип с нужным бойцом, но ещё и с ПОСТОРОННИМ именным бойцом из другой
+# истории (напр. Ян vs Фейбер 2018 в сюжете про Ян — Двалишвили). Применяется только
+# когда в сюжете названо ≥2 бойцов (матчап), и не трогает клипы, где все теги — из сюжета.
+_FOREIGN_COFIGHTER_PENALTY = float(os.getenv("FOOTAGE_FOREIGN_COFIGHTER_PENALTY", "0.3"))
+# Бонус клипу, где есть ≥2 бойцов из сцены вместе (сам матчап: Ян + Двалишвили), а не
+# один боец из старого боя с кем-то другим.
+_MATCHUP_BONUS = float(os.getenv("FOOTAGE_MATCHUP_BONUS", "0.2"))
 
 
 def _keyword_bonus(record: dict, subjects: list[str], actions: list[str]) -> float:
     bonus = 0.0
     rec_fighters = " ".join(record.get("fighter", [])).lower()
-    for s in subjects:
-        s = (s or "").strip().lower()
-        if s and s in rec_fighters:
-            bonus += 0.25
-            break
+    subj = [(s or "").strip().lower() for s in subjects]
+    matched = [s for s in subj if s and s in rec_fighters]
+    if matched:
+        bonus += 0.25
+    if len(matched) >= 2:
+        bonus += _MATCHUP_BONUS
     rec_actions = {a.lower() for a in record.get("action", [])}
     overlap = rec_actions & {a.strip().lower() for a in actions if a}
     bonus += min(0.16, 0.08 * len(overlap))
     return bonus
 
 
-def _off_topic_penalty(record: dict, story_subjects: frozenset[str]) -> float:
+def _off_topic_penalty(
+    record: dict,
+    story_subjects: frozenset[str],
+    scene_subjects: frozenset[str] = frozenset(),
+) -> float:
     if not story_subjects:
         return 0.0
     rec_fighters = [f.strip().lower() for f in record.get("fighter", []) if f and f.strip()]
     if not rec_fighters:
         return 0.0
-    for rf in rec_fighters:
-        for s in story_subjects:
-            if s and (s in rf or rf in s):
-                return 0.0
-    return _OFF_TOPIC_PENALTY
+
+    def _in(rf: str, subs: frozenset[str]) -> bool:
+        return any(s and (s in rf or rf in s) for s in subs)
+
+    if not any(_in(rf, story_subjects) for rf in rec_fighters):
+        return _OFF_TOPIC_PENALTY
+    # Для «постороннего» со-бойца смотрим на бойцов СЦЕНЫ (если их ≥2), иначе — всего сюжета:
+    # иначе боец из другой сцены того же сюжета (О'Мэлли в финале) проходит в сцену про бой Ян — Мераб.
+    ref = scene_subjects if len(scene_subjects) >= 2 else story_subjects
+    if len(ref) >= 2 and not all(_in(rf, ref) for rf in rec_fighters):
+        return _FOREIGN_COFIGHTER_PENALTY
+    return 0.0
 
 
 def _score_record(
@@ -682,7 +705,14 @@ def _score_record(
 ) -> float:
     emb = record.get("embedding") or []
     sim = cosine(q_emb, emb) if emb else 0.0
-    return sim + _keyword_bonus(record, subjects, actions) - _off_topic_penalty(record, story_subjects)
+    scene_subjects = frozenset(
+        s.strip().lower() for s in subjects if isinstance(s, str) and s.strip()
+    )
+    return (
+        sim
+        + _keyword_bonus(record, subjects, actions)
+        - _off_topic_penalty(record, story_subjects, scene_subjects)
+    )
 
 
 async def search_clips(query: str, top_k: int = 5) -> list[dict]:
