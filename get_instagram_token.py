@@ -21,8 +21,8 @@ import webbrowser
 import json
 
 # ── Edit these ──────────────────────────────────────────────────────────────
-APP_ID     = os.getenv("INSTAGRAM_APP_ID", "")
-APP_SECRET = os.getenv("INSTAGRAM_APP_SECRET", "")
+APP_ID     = os.getenv("INSTAGRAM_APP_ID", "37747916241474060")
+APP_SECRET = os.getenv("INSTAGRAM_APP_SECRET", "0d69d344586e86fa17912a3c0ec43af9")
 # ────────────────────────────────────────────────────────────────────────────
 
 REDIRECT_URI = "http://localhost:8080/callback"

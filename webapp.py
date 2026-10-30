@@ -48,6 +48,8 @@ from config import (
     VIDEOS_DIR,
     IMAGES_DIR,
     required_platforms as project_required_platforms,
+    project_names,
+    DEFAULT_PROJECT,
     platform_credentials,
 )
 
@@ -96,6 +98,33 @@ try:
             _conn.execute("INSERT INTO app_migrations (name) VALUES ('vk_backfill_v1')")
 except Exception:
     logging.getLogger(__name__).exception("VK backfill migration failed")
+
+# One-time migration: the active feed now checks that EVERY required platform
+# is published (not just a count). Posts that were complete under the old rule
+# but only lack 'threads-ru' (added as required later) get it backfilled so the
+# old backlog doesn't flood the feed.
+try:
+    with db.get_conn() as _conn:
+        _done = _conn.execute(
+            "SELECT 1 FROM app_migrations WHERE name = 'threads_ru_backfill_v1'"
+        ).fetchone()
+        if not _done:
+            for _r in _conn.execute(
+                "SELECT id, project, published_platforms FROM scheduled_posts "
+                "WHERE status = 'sent' AND id <= 12347"
+            ).fetchall():
+                _plats = json.loads(_r[2] or "[]")
+                _missing = (project_required_platforms(_r[1] or DEFAULT_PROJECT)
+                            or {"instagram", "instagram-ru", "youtube", "youtube-ru", "vk"}) - set(_plats)
+                if _missing == {"threads-ru"}:
+                    _plats.append("threads-ru")
+                    _conn.execute(
+                        "UPDATE scheduled_posts SET published_platforms = ? WHERE id = ?",
+                        (json.dumps(_plats), _r[0]),
+                    )
+            _conn.execute("INSERT INTO app_migrations (name) VALUES ('threads_ru_backfill_v1')")
+except Exception:
+    logging.getLogger(__name__).exception("threads-ru backfill migration failed")
 
 @app.after_request
 def _ngrok_headers(response):
@@ -389,11 +418,36 @@ def api_posts():
     # threshold for the active feed (gaming = 5, ufc = 3, …).
     proj_clause = ""
     proj_params: list = []
-    threshold = 5
     if project and project != "all":
         proj_clause = " AND project = ?"
         proj_params = [project]
-        threshold = len(project_required_platforms(project)) or 5
+
+    # A post is "complete" only when EVERY platform required by its project is
+    # in published_platforms (a count check would hide posts that have e.g.
+    # threads-ru but are missing a failed instagram-ru).
+    complete_parts: list[str] = []
+    complete_params: list = []
+    _known = project_names()
+    for _name in ([project] if project and project != "all" else _known):
+        _req = sorted(project_required_platforms(_name) or _REQUIRED_VIDEO_PLATFORMS)
+        _conds = " AND ".join(
+            "EXISTS (SELECT 1 FROM json_each(COALESCE(published_platforms, '[]')) WHERE value = ?)"
+            for _ in _req
+        )
+        if _name == DEFAULT_PROJECT and project == "all":
+            # Posts with an empty / legacy project (e.g. old 'gaming') use the
+            # default project's requirements.
+            _match = (
+                "(project = ? OR project IS NULL OR project = '' OR project NOT IN ("
+                + ",".join("?" for _ in _known) + "))"
+            )
+            complete_params += [_name, *_known]
+        else:
+            _match = "project = ?"
+            complete_params.append(_name)
+        complete_parts.append(f"({_match} AND {_conds})")
+        complete_params += _req
+    complete_sql = "(" + " OR ".join(complete_parts) + ")" if complete_parts else "0"
 
     with db.get_conn() as conn:
         if status == "all":
@@ -407,22 +461,19 @@ def api_posts():
                 (*proj_params, per_page, offset),
             ).fetchall()
         elif status == "active":
-            # pending always shown; sent only if published to fewer than
-            # `threshold` platforms
+            # pending always shown; sent only until all required platforms are published
             active_where = (
-                f"""(status = 'pending'
-                     OR (status = 'sent'
-                         AND json_array_length(COALESCE(published_platforms, '[]')) < ?))"""
+                f"(status = 'pending' OR (status = 'sent' AND NOT {complete_sql}))"
                 f"{proj_clause}"
             )
             total = conn.execute(
                 f"SELECT COUNT(*) FROM scheduled_posts WHERE {active_where}",
-                (threshold, *proj_params),
+                (*complete_params, *proj_params),
             ).fetchone()[0]
             rows  = conn.execute(
                 f"SELECT * FROM scheduled_posts WHERE {active_where} "
                 "ORDER BY id ASC LIMIT ? OFFSET ?",
-                (threshold, *proj_params, per_page, offset),
+                (*complete_params, *proj_params, per_page, offset),
             ).fetchall()
         else:
             total = conn.execute(
@@ -835,14 +886,14 @@ def api_mark_done(post_id: int):
     post = db.get_scheduled_post(post_id)
     if not post:
         return jsonify({"error": "Post not found"}), 404
-    # Threads is intentionally excluded — it's auto-published via Instagram's
-    # Meta cross-post integration (same as Telegram), never through the
-    # manual/bulk publish flow, so it shouldn't be force-marked here either.
-    all_platforms = json.dumps([
-        "instagram", "instagram-ru", "youtube", "youtube-ru",
-        "instagram-carousel", "instagram-carousel-ru",
-        "vk",
-    ])
+    # Mark every platform required by the post's project (plus the carousels)
+    # as published, so the post is complete under the set-based feed filter.
+    # Threads is excluded only if the project doesn't require it.
+    all_platforms = json.dumps(sorted(
+        (project_required_platforms(post.get("project")) or _REQUIRED_VIDEO_PLATFORMS)
+        | {"instagram-carousel", "instagram-carousel-ru"}
+        | set(_published_platforms(post))
+    ))
     with db.get_conn() as conn:
         conn.execute(
             "UPDATE scheduled_posts SET published_platforms = ? WHERE id = ?",

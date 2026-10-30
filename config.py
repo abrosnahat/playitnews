@@ -169,11 +169,39 @@ def _load_projects() -> tuple[dict, str]:
 PROJECTS, DEFAULT_PROJECT = _load_projects()
 
 
+def _projects_mtime() -> float:
+    try:
+        return os.path.getmtime(PROJECTS_FILE)
+    except OSError:
+        return 0.0
+
+
+_projects_loaded_mtime = _projects_mtime()
+
+
+def _refresh_projects() -> None:
+    """Reload projects.json in place if it changed on disk (e.g. a new token),
+    so long-running processes pick up edits without a restart."""
+    global DEFAULT_PROJECT, _projects_loaded_mtime
+    mtime = _projects_mtime()
+    if mtime == _projects_loaded_mtime:
+        return
+    try:
+        projects, default = _load_projects()
+    except Exception:
+        return
+    PROJECTS.clear()
+    PROJECTS.update(projects)
+    DEFAULT_PROJECT = default
+    _projects_loaded_mtime = mtime
+
+
 def get_project(name: str | None) -> dict:
     """Return a project's config dict (with its name injected as ``name``).
 
     Unknown / missing names fall back to the default project.
     """
+    _refresh_projects()
     if name and name in PROJECTS:
         return {"name": name, **PROJECTS[name]}
     return {"name": DEFAULT_PROJECT, **PROJECTS.get(DEFAULT_PROJECT, {})}

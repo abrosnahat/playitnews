@@ -96,12 +96,13 @@ TTS_PITCH    = "-3Hz"   # Slightly lower pitch → warmer tone
 # free tier at aistudio.google.com is sufficient for this pipeline (≤10 shorts
 # / day, ~25 s each — well under 50 RPD and 10 RPM limits).
 #
-# Recommended model: gemini-2.5-flash-preview-tts (more stable). 3.1 Flash TTS
-# is preview-quality with better prosody but ~3-5% "text-token-returned" 500
-# errors — retry is built in.
+# Model: gemini-3.8-flash-tts (stable; Interactions API, google-genai >= 2.25).
+# The text is a verbatim transcript — delivery directions go into
+# `speech_metadata.style`, never into the text itself. Unary responses are
+# complete WAV files (24 kHz mono 16-bit) with a RIFF header.
 #
-# All 30 voices are language-agnostic; `languageCode` in the prompt steers
-# pronunciation. Recommended picks for gaming-news shorts:
+# All 30 voices are language-agnostic; the model detects the transcript
+# language automatically. Recommended picks for gaming-news shorts:
 #   EN — Schedar (even/dj), Kore (firm), Puck (upbeat)
 #   RU — Kore (neutral), Schedar (even), Sulafat (warm)
 # ---------------------------------------------------------------------------
@@ -112,24 +113,30 @@ try:
 except Exception:                                          # noqa: BLE001
     _GENAI_OK = False
 
+# Max seconds to wait for one Gemini TTS request before treating it as hung
+# and retrying (a stuck HTTP call would otherwise block the pipeline forever).
+_GEMINI_TTS_TIMEOUT_S = float(os.getenv("GEMINI_TTS_TIMEOUT_S", "90"))
 
-async def _gemini_tts_generate(prompt: str, chosen_voice: str, language_code: str, max_retries: int):
-    """Call Gemini TTS ``generate_content``, retrying transient errors and
+async def _gemini_tts_generate(text: str, chosen_voice: str, style: str, max_retries: int) -> bytes:
+    """Call Gemini 3.8 TTS (Interactions API), retrying transient errors and
     rotating to the next configured GEMINI_API_KEY_N on quota exhaustion
-    (HTTP 429 / RESOURCE_EXHAUSTED). Returns the raw SDK response.
+    (HTTP 429 / RESOURCE_EXHAUSTED). Returns complete WAV bytes
+    (24 kHz mono 16-bit PCM with RIFF header).
+
+    ``text`` is the verbatim transcript; ``style`` is the turn-level delivery
+    direction (pace, tone) passed via ``speech_metadata``.
 
     Raises RuntimeError if no API key is configured or all keys/retries fail.
     """
-    speech_cfg = _gtypes.SpeechConfig(
-        voice_config=_gtypes.VoiceConfig(
-            prebuilt_voice_config=_gtypes.PrebuiltVoiceConfig(voice_name=chosen_voice)
-        ),
-        language_code=language_code,
-    )
-    gen_config = _gtypes.GenerateContentConfig(
-        response_modalities=["AUDIO"],
-        speech_config=speech_cfg,
-    )
+    import base64 as _b64
+
+    annotation: dict = {"type": "speech_metadata"}
+    if style:
+        annotation["style"] = style
+    tts_input = [{
+        "type": "user_input",
+        "content": [{"type": "text", "text": text, "annotations": [annotation]}],
+    }]
 
     max_key_attempts = max(gemini_keys.key_count(), 1)
     last_err: Exception | None = None
@@ -140,15 +147,27 @@ async def _gemini_tts_generate(prompt: str, chosen_voice: str, language_code: st
                 "GEMINI_API_KEY (or GOOGLE_API_KEY) not set in .env — "
                 "get one at https://aistudio.google.com/apikey"
             )
-        client = _genai.Client(api_key=api_key)
+        client = _genai.Client(
+            api_key=api_key,
+            http_options=_gtypes.HttpOptions(timeout=int(_GEMINI_TTS_TIMEOUT_S * 1000)),
+        )
         quota_hit = False
         for attempt in range(1, max_retries + 1):
             try:
-                return client.models.generate_content(
-                    model=GEMINI_TTS_MODEL,
-                    contents=prompt,
-                    config=gen_config,
+                interaction = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        client.interactions.create,
+                        model=GEMINI_TTS_MODEL,
+                        input=tts_input,
+                        response_format={"type": "audio", "mime_type": "audio/wav"},
+                        generation_config={"speech_config": [{"voice": chosen_voice}]},
+                    ),
+                    timeout=_GEMINI_TTS_TIMEOUT_S + 10,
                 )
+                audio = interaction.output_audio
+                if audio is None or not audio.data:
+                    raise RuntimeError("Gemini TTS returned no audio")
+                return _b64.b64decode(audio.data) if isinstance(audio.data, str) else audio.data
             except Exception as exc:                      # noqa: BLE001
                 last_err = exc
                 if gemini_keys.is_quota_error(exc):
@@ -176,33 +195,53 @@ async def _gemini_tts_generate(prompt: str, chosen_voice: str, language_code: st
 # "gemini" = route through Gemini TTS.
 TTS_BACKEND = os.getenv("TTS_BACKEND", "edge").strip().lower()
 GEMINI_TTS_MODEL     = os.getenv(
-    "GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts",
+    "GEMINI_TTS_MODEL", "gemini-3.8-flash-tts",
 )
-# 3.1 Flash TTS is also valid: "gemini-3.1-flash-tts-preview"
+# Cheaper alternative with the same API: "gemini-3.8-flash-lite-tts"
 GEMINI_TTS_VOICE_EN  = os.getenv("GEMINI_TTS_VOICE_EN",  "Schedar")
 GEMINI_TTS_VOICE_RU  = os.getenv("GEMINI_TTS_VOICE_RU",  "Kore")
-# Director's-note prelude — Gemini TTS is LLM-based; the prompt structure
-# (instructions → transcript) materially changes prosody. Prepending this
-# preamble gives reliable "gaming-news anchor" delivery and avoids the model
-# reading its own style notes aloud (a known safety-classifier false positive).
-# TUNED: energetic pace (≈165 wpm) without vocal emotion — gives a fast
-# "professional newscast" feel, lands ~70-word scripts in ~22 s. Tested
-# against the previous "flat" version: ~30% shorter audio, no detectable
-# pitch variation increase.
+# Delivery direction for the narration (lively "reels/TikTok blogger" feel).
+# Passed as `speech_metadata.style`.
+# Gemini 3.8 TTS: the text is a verbatim transcript, so these are passed as
+# `speech_metadata.style` (turn-level delivery), not prepended to the text.
 _GEMINI_DIR_EN = (
-    "Read at a brisk, newscast pace — about 115 words per minute. "
-    "Professional, measured, and confident, but with no vocal smile, "
-    "no exclamations, and no pitch variation. Keep your energy high and "
-    "your delivery quick; The result should sound like an experienced blogger "
-    "on a tight deadline, not a storyteller. Speak ONLY the transcript below:\n\n"
+    "lively, energetic and conversational, like a gaming blogger recording a "
+    "TikTok or Reels video for friends, quick punchy pace of about 150 words "
+    "per minute, genuine excitement and curiosity, natural pitch variation, "
+    "emphasis on key words, casual and spontaneous, clean crisp delivery "
+    "with no breathing sounds, no audible inhales, no long pauses between "
+    "sentences, continuous tight flow"
 )
 _GEMINI_DIR_RU = (
-    "Читай в быстром темпе диктора новостей — около 95 слов в минуту. "
-    "Профессионально, собранно, уверенно, но без улыбки в голосе, без "
-    "восклицаний и без перепадов тона. Держи высокую энергию и быструю "
-    "подачу; Звучать должно как опытный блоггер на сжатых "
-    "сроках, а не как рассказчик. Произнеси ТОЛЬКО текст ниже:\n\n"
+    "lively, energetic and conversational, like a gaming blogger recording a "
+    "TikTok or Reels video for friends, quick punchy pace of about 130 words "
+    "per minute, genuine excitement and curiosity, natural pitch variation, "
+    "emphasis on key words, casual and spontaneous, clean crisp delivery "
+    "with no breathing sounds, no audible inhales, no long pauses between "
+    "sentences, continuous tight flow"
 )
+
+
+def _compress_silences(wav_path: str, max_pause: float = 0.2) -> None:
+    """Shorten every pause in `wav_path` to ~`max_pause` seconds (in place).
+
+    Removes long gaps and low-level breath noise between phrases. Silent
+    stretches longer than 0.25 s are cut down to `max_pause`; on any ffmpeg
+    failure the original file is left untouched.
+    """
+    tmp_path = wav_path + ".tight.wav"
+    ok = _run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", wav_path,
+        "-af",
+        "silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.05:"
+        f"stop_periods=-1:stop_duration=0.25:stop_threshold=-38dB:stop_silence={max_pause}",
+        "-ar", "24000", "-ac", "1", tmp_path,
+    ])
+    if ok and os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 1024:
+        os.replace(tmp_path, wav_path)
+    elif os.path.exists(tmp_path):
+        os.remove(tmp_path)
 
 # Optional call-to-action appended to the narration (opt-in via UI checkbox).
 # Drives viewers from Shorts/Reels to the Telegram channels. The hook is the
@@ -1354,57 +1393,23 @@ async def _synthesize_voice_gemini(
         )
 
     director = _GEMINI_DIR_RU if whisper_lang == "ru" else _GEMINI_DIR_EN
-    prompt = f"{director}{text.strip()}\n"
 
-    response = await _gemini_tts_generate(
-        prompt, chosen_voice,
-        "ru-RU" if whisper_lang == "ru" else "en-US",
-        max_retries,
+    wav_bytes = await _gemini_tts_generate(
+        text.strip(), chosen_voice, director, max_retries,
     )
 
-    # ---- Decode inline audio (WAV L16 24 kHz mono per Google docs) ----
-    try:
-        part = response.candidates[0].content.parts[0]
-        pcm_bytes = part.inline_data.data
-    except (AttributeError, IndexError) as exc:
-        raise RuntimeError(f"Gemini TTS returned no audio: {exc}") from exc
-
     audio_path = os.path.join(workdir, "voice.wav")
-    # Gemini returns raw PCM (L16, 24 kHz, mono, little-endian). Wrap in a
-    # real WAV container so downstream ffmpeg and Whisper read it cleanly.
-    import base64 as _b64
-    import wave as _wave
-    try:
-        pcm = _b64.b64decode(pcm_bytes) if isinstance(pcm_bytes, str) else pcm_bytes
-    except Exception as exc:
-        raise RuntimeError(f"Gemini TTS audio decode failed: {exc}") from exc
-    with _wave.open(audio_path, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)         # 16-bit
-        wf.setframerate(24_000)
-        wf.writeframes(pcm)
-
-    # ---- Log token/audio usage from response.usage_metadata ----
-    # Tracks daily Gemini TTS quota in the bot's own logs alongside the
-    # dashboard at https://aistudio.google.com/usage.
-    try:
-        um = getattr(response, "usage_metadata", None)
-        if um:
-            prompt_tok     = int(getattr(um, "prompt_token_count",     0) or 0)
-            audio_tok      = int(getattr(um, "candidates_token_count", 0) or 0)  # audio
-            thoughts_tok   = int(getattr(um, "thoughts_token_count",   0) or 0)
-            audio_seconds  = audio_tok / 25.0        # 25 tokens / sec per docs
-            logger.info(
-                "Gemini TTS usage: model=%s prompt=%d tok, audio=%d tok (%.1f s), "
-                "thoughts=%d tok, voice=%s",
-                GEMINI_TTS_MODEL, prompt_tok, audio_tok, audio_seconds,
-                thoughts_tok, chosen_voice,
-            )
-    except Exception as exc:                                # noqa: BLE001
-        logger.debug("Gemini usage_metadata read failed: %s", exc)
+    # Gemini 3.8 TTS returns a complete WAV (RIFF header, 24 kHz mono 16-bit).
+    with open(audio_path, "wb") as fh:
+        fh.write(wav_bytes)
+    await asyncio.to_thread(_compress_silences, audio_path)
 
     # ---- Recover word timing via existing Whisper pipeline ----
     audio_dur = _get_audio_duration(audio_path)
+    logger.info(
+        "Gemini TTS: model=%s voice=%s audio=%.1f s",
+        GEMINI_TTS_MODEL, chosen_voice, audio_dur,
+    )
 
     # Synthesise a single-cue VTT covering [0, audio_dur] — same trick the
     # docs recommend so _run_whisper_sync has a sentence anchor to bind to.
@@ -1457,26 +1462,17 @@ GEMINI_VOICE_NAMES = sorted(_GEMINI_VOICE_NAMES)
 
 def _gemini_speed_prompt(speed: float, lang: str) -> str:
     """
-    Build a pace instruction for the Gemini TTS prompt.
+    Build a pace direction for the Gemini TTS `speech_metadata.style` field.
 
-    Gemini TTS has NO numeric speaking-rate parameter in the API (verified —
-    `SpeechConfig`/`VoiceConfig`/`PrebuiltVoiceConfig` only expose voice name
-    + language code). Speed is steered purely through natural-language
-    instructions in the prompt text, so `speed` (0.5–2.0, 1.0 = natural) is
-    translated into a target words-per-minute figure the model reads back.
+    Gemini TTS has NO numeric speaking-rate parameter in the API. Speed is
+    steered purely through a natural-language style string, so `speed`
+    (0.5–2.0, 1.0 = natural) is translated into a target words-per-minute
+    figure.
     """
     speed = max(0.5, min(2.0, speed or 1.0))
     base_wpm = 130 if lang == "ru" else 150   # natural conversational pace
     wpm = round(base_wpm * speed)
-    if lang == "ru":
-        return (
-            f"Читай текст в естественном темпе, примерно {wpm} слов в минуту. "
-            "Произнеси ТОЛЬКО текст ниже:\n\n"
-        )
-    return (
-        f"Read the text at a natural pace, approximately {wpm} words per minute. "
-        "Speak ONLY the transcript below:\n\n"
-    )
+    return f"natural pace, approximately {wpm} words per minute"
 
 
 async def synthesize_gemini_tts_standalone(
@@ -1515,44 +1511,19 @@ async def synthesize_gemini_tts_standalone(
         chosen_voice = GEMINI_TTS_VOICE_RU if lang == "ru" else GEMINI_TTS_VOICE_EN
 
     director = _gemini_speed_prompt(speed, lang)
-    prompt = f"{director}{text}\n"
 
-    response = await _gemini_tts_generate(
-        prompt, chosen_voice, "ru-RU" if lang == "ru" else "en-US", max_retries,
-    )
-
-    try:
-        part = response.candidates[0].content.parts[0]
-        pcm_bytes = part.inline_data.data
-    except (AttributeError, IndexError) as exc:
-        raise RuntimeError(f"Gemini TTS returned no audio: {exc}") from exc
-
-    import base64 as _b64
-    import wave as _wave
-    try:
-        pcm = _b64.b64decode(pcm_bytes) if isinstance(pcm_bytes, str) else pcm_bytes
-    except Exception as exc:
-        raise RuntimeError(f"Gemini TTS audio decode failed: {exc}") from exc
+    wav_bytes = await _gemini_tts_generate(text, chosen_voice, director, max_retries)
 
     out_dir = os.path.join(VIDEOS_DIR, "tts_manual")
     os.makedirs(out_dir, exist_ok=True)
     audio_path = os.path.join(out_dir, f"tts_{uuid.uuid4().hex[:10]}.wav")
-    with _wave.open(audio_path, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)         # 16-bit
-        wf.setframerate(24_000)
-        wf.writeframes(pcm)
+    with open(audio_path, "wb") as fh:
+        fh.write(wav_bytes)
 
-    try:
-        um = getattr(response, "usage_metadata", None)
-        if um:
-            audio_tok = int(getattr(um, "candidates_token_count", 0) or 0)
-            logger.info(
-                "Gemini TTS (standalone) usage: model=%s voice=%s audio=%d tok (%.1f s)",
-                GEMINI_TTS_MODEL, chosen_voice, audio_tok, audio_tok / 25.0,
-            )
-    except Exception as exc:                                # noqa: BLE001
-        logger.debug("Gemini usage_metadata read failed: %s", exc)
+    logger.info(
+        "Gemini TTS (standalone): model=%s voice=%s audio=%.1f s",
+        GEMINI_TTS_MODEL, chosen_voice, _get_audio_duration(audio_path),
+    )
 
     return audio_path
 
@@ -1567,7 +1538,7 @@ async def _synthesize_voice(
     Returns (audio_path, [(start_sec, end_sec, word), ...]).
     """
     # Backend selector. "edge" = original edge-tts; "gemini" = route through
-    # Gemini TTS (Flash TTS Preview models). Switch is .env-controlled.
+    # Gemini TTS (gemini-3.8-flash-tts). Switch is .env-controlled.
     if TTS_BACKEND == "gemini":
         return await _synthesize_voice_gemini(text, workdir, voice=voice)
 
