@@ -249,6 +249,27 @@ def _extract_pg_embeds(scope) -> list[dict]:
     return embeds
 
 
+def extract_vk_iframe_embeds(scope) -> list[dict]:
+    """Find VK <iframe> players (video_ext.php / clip_ext.php) and return pg-embed-like dicts.
+
+    Result format matches ``download_videos``: {"type": "vk", "id": "oid=..&id=..", "clip": bool}.
+    """
+    embeds: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for tag in scope.find_all("iframe"):
+        src = (tag.get("src") or tag.get("data-src") or "").strip()
+        m = re.search(r"(?:vk\.com|vk\.ru|vkvideo\.ru)/(video|clip)_ext\.php\?([^\"'#\s]+)", src)
+        if not m:
+            continue
+        params = dict(p.split("=", 1) for p in m.group(2).replace("&amp;", "&").split("&") if "=" in p)
+        oid, vid = params.get("oid", ""), params.get("id", "")
+        if not (oid and vid) or (oid, vid) in seen:
+            continue
+        seen.add((oid, vid))
+        embeds.append({"type": "vk", "id": f"oid={oid}&id={vid}", "clip": m.group(1) == "clip"})
+    return embeds
+
+
 async def _fetch_playground_m3u8(session: aiohttp.ClientSession, video_id: str) -> Optional[str]:
     """Fetch the iframe page for a playground video and return the best m3u8 URL ≤1080p."""
     iframe_url = f"https://www.playground.ru/video/iframe/{video_id}/"
@@ -342,8 +363,9 @@ async def download_videos(
             oid = params.get("oid", "")
             vid = params.get("id", "")
             if oid and vid:
-                vk_url = f"https://vk.com/video{oid}_{vid}"
-                path = await _download_vk_video(oid, vid)
+                is_clip = bool(embed.get("clip"))
+                vk_url = f"https://vk.com/{'clip' if is_clip else 'video'}{oid}_{vid}"
+                path = await _download_vk_video(oid, vid, clip=is_clip)
                 if path:
                     video_paths.append(path)
                 else:
@@ -490,13 +512,13 @@ async def _download_youtube_video(video_id: str) -> Optional[str]:
     return None
 
 
-async def _download_vk_video(oid: str, vid: str) -> Optional[str]:
-    """Download a VK video using yt-dlp. Returns local .mp4 path or None."""
+async def _download_vk_video(oid: str, vid: str, clip: bool = False) -> Optional[str]:
+    """Download a VK video/clip using yt-dlp. Returns local .mp4 path or None."""
     file_id = f"vk_{oid}_{vid}".replace("-", "m")
     output_path = os.path.join(VIDEOS_DIR, f"{file_id}.mp4")
     if os.path.exists(output_path) and os.path.getsize(output_path) > 10240:
         return output_path  # already downloaded
-    url = f"https://vk.com/video{oid}_{vid}"
+    url = f"https://vk.com/{'clip' if clip else 'video'}{oid}_{vid}"
     env = os.environ.copy()
     if os.name != "nt":
         extra_paths = [

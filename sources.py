@@ -126,8 +126,9 @@ class FightTimeSource:
                 if _is_valid_image_url(hero):
                     image_urls.append(hero)
 
-        # fighttime.ru doesn't embed playground/championat video widgets.
-        return Article(url=url, title=title, text=text, image_urls=image_urls, pg_embeds=[])
+        # VK video/clip players embedded as <iframe> in the article body.
+        pg_embeds = scraper.extract_vk_iframe_embeds(body) if body else []
+        return Article(url=url, title=title, text=text, image_urls=image_urls, pg_embeds=pg_embeds)
 
 
 _SOURCES: dict[str, NewsSource] = {

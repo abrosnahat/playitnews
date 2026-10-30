@@ -1645,7 +1645,11 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
         # per language INSIDE create_short_video (planner + footage_db) — the
         # upfront YouTube prefetch and entity-query extraction are skipped.
         use_footage_db = False
-        if (config.get_project(project).get("video") or {}).get("footage_db"):
+        # The article's own video (e.g. embedded VK clip) takes priority over the DB.
+        has_article_video = any(os.path.exists(p) for p in (post.get("video_paths") or []))
+        if has_article_video:
+            progress("Article contains its own video — using it as the footage source.")
+        if not has_article_video and (config.get_project(project).get("video") or {}).get("footage_db"):
             try:
                 import footage_db as _fdb
                 use_footage_db = _fdb.index_size() > 0
@@ -1700,7 +1704,7 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
                     n_article_clips=len(article_videos),
                     include_article_images=include_images,
                     add_cta=add_cta,
-                    skip_footage_db=user_query,
+                    skip_footage_db=user_query or has_article_video,
                 )
                 if en_path:
                     db.set_generated_video_path(post_id, en_path)
@@ -1720,7 +1724,7 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
                     n_article_clips=len(article_videos),
                     include_article_images=include_images,
                     add_cta=add_cta,
-                    skip_footage_db=user_query,
+                    skip_footage_db=user_query or has_article_video,
                 )
                 if ru_path:
                     db.set_generated_video_path_ru(post_id, ru_path)
