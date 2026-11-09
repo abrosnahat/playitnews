@@ -113,11 +113,44 @@ try:
 except Exception:                                          # noqa: BLE001
     _GENAI_OK = False
 
-# Max seconds to wait for one Gemini TTS request before treating it as hung
-# and retrying (a stuck HTTP call would otherwise block the pipeline forever).
-_GEMINI_TTS_TIMEOUT_S = float(os.getenv("GEMINI_TTS_TIMEOUT_S", "90"))
+# Max seconds to wait for one Gemini TTS request (normally ~10 s). The
+# Interactions API does NOT return HTTP 429 when a key's free-tier daily quota
+# is exhausted — it just hangs — so a timeout is treated like a quota error
+# and the next GEMINI_API_KEY_N is tried.
+_GEMINI_TTS_TIMEOUT_S = float(os.getenv("GEMINI_TTS_TIMEOUT_S", "45"))
+
+# Free tier allows only ~10 requests/day per key for gemini-3.8-flash-tts. When
+# every key is exhausted, fall back to the lite model (separate, larger quota)
+# and skip the primary model for a while so videos don't wait ~45 s per key.
+_GEMINI_TTS_FALLBACK_MODEL = os.getenv("GEMINI_TTS_FALLBACK_MODEL", "gemini-3.8-flash-lite-tts")
+_GEMINI_TTS_COOLDOWN_S = 3600.0
+_gemini_tts_primary_dead_until = 0.0
+
 
 async def _gemini_tts_generate(text: str, chosen_voice: str, style: str, max_retries: int) -> bytes:
+    """Synthesize via GEMINI_TTS_MODEL; if all keys are quota-exhausted/hung,
+    fall back to GEMINI_TTS_FALLBACK_MODEL. Returns WAV bytes."""
+    global _gemini_tts_primary_dead_until
+    import time as _time
+
+    fallback = _GEMINI_TTS_FALLBACK_MODEL.strip()
+    can_fallback = bool(fallback) and fallback != GEMINI_TTS_MODEL
+    if can_fallback and _time.time() < _gemini_tts_primary_dead_until:
+        return await _gemini_tts_try_model(fallback, text, chosen_voice, style, max_retries)
+    try:
+        return await _gemini_tts_try_model(GEMINI_TTS_MODEL, text, chosen_voice, style, max_retries)
+    except RuntimeError as exc:
+        if not can_fallback or "GEMINI_API_KEY" in str(exc):
+            raise
+        _gemini_tts_primary_dead_until = _time.time() + _GEMINI_TTS_COOLDOWN_S
+        logger.warning(
+            "Gemini TTS: %s unavailable on all keys — falling back to %s for %d min",
+            GEMINI_TTS_MODEL, fallback, int(_GEMINI_TTS_COOLDOWN_S // 60),
+        )
+        return await _gemini_tts_try_model(fallback, text, chosen_voice, style, max_retries)
+
+
+async def _gemini_tts_try_model(model: str, text: str, chosen_voice: str, style: str, max_retries: int) -> bytes:
     """Call Gemini 3.8 TTS (Interactions API), retrying transient errors and
     rotating to the next configured GEMINI_API_KEY_N on quota exhaustion
     (HTTP 429 / RESOURCE_EXHAUSTED). Returns complete WAV bytes
@@ -157,7 +190,7 @@ async def _gemini_tts_generate(text: str, chosen_voice: str, style: str, max_ret
                 interaction = await asyncio.wait_for(
                     asyncio.to_thread(
                         client.interactions.create,
-                        model=GEMINI_TTS_MODEL,
+                        model=model,
                         input=tts_input,
                         response_format={"type": "audio", "mime_type": "audio/wav"},
                         generation_config={"speech_config": [{"voice": chosen_voice}]},
@@ -170,11 +203,14 @@ async def _gemini_tts_generate(text: str, chosen_voice: str, style: str, max_ret
                 return _b64.b64decode(audio.data) if isinstance(audio.data, str) else audio.data
             except Exception as exc:                      # noqa: BLE001
                 last_err = exc
-                if gemini_keys.is_quota_error(exc):
+                is_timeout = isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+                if is_timeout or gemini_keys.is_quota_error(exc):
                     quota_hit = True
                     logger.warning(
-                        "Gemini TTS quota exceeded on key #%d/%d: %s",
-                        key_attempt, max_key_attempts, exc.__class__.__name__,
+                        "Gemini TTS %s on key #%d/%d — rotating key",
+                        "timed out (likely daily quota exhausted)" if is_timeout
+                        else "quota exceeded",
+                        key_attempt, max_key_attempts,
                     )
                     break   # don't burn retries on an exhausted key — rotate instead
                 logger.warning(
@@ -188,7 +224,7 @@ async def _gemini_tts_generate(text: str, chosen_voice: str, style: str, max_ret
             continue
         break   # either quota exhausted on all keys, or a non-quota failure
 
-    raise RuntimeError(f"Gemini TTS failed after retries: {last_err}")
+    raise RuntimeError(f"Gemini TTS failed after retries: {last_err!r}")
 
 
 # Active backend selector. "edge" = original edge-tts (default),
