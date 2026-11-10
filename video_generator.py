@@ -22,7 +22,6 @@ import re
 import shutil
 import subprocess
 import sys
-import sysconfig
 import tempfile
 import uuid
 from typing import Optional
@@ -32,31 +31,6 @@ import ssl
 import aiohttp
 import certifi
 from dotenv import load_dotenv
-
-# ---------------------------------------------------------------------------
-# Windows: ensure ctranslate2 (used by faster-whisper) can find the CUDA
-# runtime DLLs (cuBLAS, cuDNN, NVRTC) shipped via the nvidia-* pip wheels.
-# Without this, faster-whisper on CUDA fails at first transcribe() with
-# "Library cublas64_12.dll is not found or cannot be loaded".
-# Harmless if the packages aren't installed.
-# ---------------------------------------------------------------------------
-if os.name == "nt":
-    _site_packages = sysconfig.get_paths().get("purelib", "")
-    _cuda_dll_dirs: list[str] = []
-    for _sub in ("nvidia/cublas/bin", "nvidia/cudnn/bin", "nvidia/cuda_nvrtc/bin"):
-        _p = os.path.normpath(os.path.join(_site_packages, *_sub.split("/")))
-        if os.path.isdir(_p):
-            _cuda_dll_dirs.append(_p)
-            if hasattr(os, "add_dll_directory"):
-                try:
-                    os.add_dll_directory(_p)
-                except OSError:
-                    pass
-    if _cuda_dll_dirs:
-        # Also prepend to PATH — ctranslate2's internal LoadLibrary calls in
-        # some build configs ignore the per-thread DLL search dirs and only
-        # consult PATH.
-        os.environ["PATH"] = os.pathsep.join(_cuda_dll_dirs) + os.pathsep + os.environ.get("PATH", "")
 
 # Load .env BEFORE the module-level os.getenv() calls below.
 # Required because this module is imported in webapp.py before `config`
@@ -285,6 +259,16 @@ def _compress_silences(wav_path: str, max_pause: float = 0.2) -> None:
 CTA_PHRASE    = "Full trailer is in our Telegram, link in bio!"
 CTA_PHRASE_RU = "Полный трейлер в нашем Telegram канале, ссылка в профиле!"
 
+# Opening hook card: a big headline (2–4 words, from the thumbnail-hook prompt)
+# burned over the first HOOK_CARD_SEC seconds of the video. Gives the viewer a
+# reason to stay before the narration even gets going. 0 disables.
+HOOK_CARD_SEC = float(os.getenv("HOOK_CARD_SEC", "1.8"))
+_HOOK_FADE_SEC = 0.3
+
+# Max length of a single shot when footage comes from the local footage DB.
+# Scenes longer than this are split across the scene's alternate clips.
+_FOOTAGE_MAX_SHOT = float(os.getenv("FOOTAGE_MAX_SHOT_SEC", "3.0"))
+
 
 # yt-dlp cookie arguments — passes browser cookies to bypass YouTube bot check.
 #
@@ -470,64 +454,6 @@ def _video_encoder_args(crf: int = 23, preset: str = "fast") -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# faster-whisper device selection + model cache
-#
-# RTX-class NVIDIA GPUs give a 5-10× speed-up over CPU for the 'small' model.
-# Override device with WHISPER_DEVICE env var:
-#   WHISPER_DEVICE=cuda|cpu|auto
-# Override compute type with WHISPER_COMPUTE_TYPE (e.g. float16/int8_float16/int8).
-# ---------------------------------------------------------------------------
-
-_WHISPER_DEVICE: str | None = None
-_WHISPER_COMPUTE_TYPE: str | None = None
-_WHISPER_MODELS: dict[str, object] = {}
-
-
-def _detect_whisper_device() -> tuple[str, str]:
-    """Return (device, compute_type). Probes CUDA via a tiny WhisperModel load."""
-    override = (os.getenv("WHISPER_DEVICE") or "").strip().lower()
-    ct_override = (os.getenv("WHISPER_COMPUTE_TYPE") or "").strip()
-    if override and override != "auto":
-        return override, (ct_override or ("float16" if override == "cuda" else "int8"))
-    # Probe CUDA by trying to load the smallest model on cuda; cheap (~1-2 s).
-    try:
-        from faster_whisper import WhisperModel
-        _probe = WhisperModel("tiny", device="cuda", compute_type="float16")
-        del _probe
-        return "cuda", (ct_override or "float16")
-    except Exception as exc:
-        logger.info("CUDA not available for faster-whisper (%s) — falling back to CPU.", exc.__class__.__name__)
-        return "cpu", (ct_override or "int8")
-
-
-def _get_whisper_model(model_name: str):
-    """Return a cached WhisperModel for the given size."""
-    global _WHISPER_DEVICE, _WHISPER_COMPUTE_TYPE
-    if _WHISPER_DEVICE is None:
-        _WHISPER_DEVICE, _WHISPER_COMPUTE_TYPE = _detect_whisper_device()
-        logger.info("Whisper device: %s (%s)", _WHISPER_DEVICE, _WHISPER_COMPUTE_TYPE)
-    cached = _WHISPER_MODELS.get(model_name)
-    if cached is not None:
-        return cached
-    try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(model_name, device=_WHISPER_DEVICE, compute_type=_WHISPER_COMPUTE_TYPE)
-    except Exception as exc:
-        # Last-ditch fallback to CPU if a previously-OK CUDA setup just broke
-        # (driver reload, OOM, etc.).
-        logger.warning("Whisper load %s on %s failed (%s); retrying on CPU.", model_name, _WHISPER_DEVICE, exc)
-        try:
-            from faster_whisper import WhisperModel
-            _WHISPER_DEVICE, _WHISPER_COMPUTE_TYPE = "cpu", "int8"
-            model = WhisperModel(model_name, device="cpu", compute_type="int8")
-        except Exception as exc2:
-            logger.error("Whisper load %s on CPU also failed: %s", model_name, exc2)
-            return None
-    _WHISPER_MODELS[model_name] = model
-    return model
-
-
-# ---------------------------------------------------------------------------
 # Audio helpers
 # ---------------------------------------------------------------------------
 
@@ -646,6 +572,7 @@ async def _burn_subtitles_pillow(
     cues: list[tuple[float, float, str]],
     output_mp4: str,
     workdir: str,
+    hook_text: str | None = None,
 ) -> bool:
     """
     Burn subtitles using frame extraction + Pillow composite + single re-encode.
@@ -653,6 +580,8 @@ async def _burn_subtitles_pillow(
 
     cues: word-level [(start_sec, end_sec, word)] from edge-tts WordBoundary
     events — exact TTS timing, no estimation or splitting needed.
+    hook_text: optional headline rendered as a card over the first
+    HOOK_CARD_SEC seconds (on top of the word subtitles).
 
     Pipeline:
       1. Extract video frames at VID_FPS
@@ -665,6 +594,11 @@ async def _burn_subtitles_pillow(
         logger.warning("No subtitle cues — skipping subtitle burn")
         return False
     logger.info("Burning %d word-level subtitle cues", len(cues))
+    hook_text = (hook_text or "").strip()
+    if hook_text and HOOK_CARD_SEC > 0:
+        logger.info("Hook card for %.1fs: '%s'", HOOK_CARD_SEC, hook_text)
+    else:
+        hook_text = ""
 
     frames_dir = os.path.join(workdir, "frames")
     os.makedirs(frames_dir, exist_ok=True)
@@ -710,15 +644,19 @@ async def _burn_subtitles_pillow(
                 cue_start = t_start
                 break
 
-        if not text:
+        show_hook = bool(hook_text) and t < HOOK_CARD_SEC
+        if not text and not show_hook:
             return
 
-        scale = _bounce_scale(t - cue_start)
         fpath = os.path.join(frames_dir, fname)
         try:
             base    = Image.open(fpath).convert("RGBA")
             overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-            _render_subtitle_onto(text, overlay, scale=scale)
+            if show_hook:
+                _render_hook_card_onto(hook_text, overlay, t)
+            if text:
+                scale = _bounce_scale(t - cue_start)
+                _render_subtitle_onto(text, overlay, scale=scale)
             combined = Image.alpha_composite(base, overlay).convert("RGB")
             combined.save(fpath, "PNG")
         except Exception as exc:
@@ -756,8 +694,8 @@ async def _burn_subtitles_pillow(
     return ok
 
 
-_SUB_GRAD_TOP    = (255, 255, 255)       # white
-_SUB_GRAD_BOTTOM = (0xC7, 0xF8, 0xFD)   # #C7F8FD light cyan
+_SUB_GRAD_TOP    = (0xDC, 0x0A, 0x0A)   # #DC0A0A logo red  (logo "UFC")
+_SUB_GRAD_BOTTOM = (255, 255, 255)       # white  (logo "NEWS")
 
 # Duration of the bounce-in animation per word (seconds)
 _BOUNCE_DUR = 0.18
@@ -771,14 +709,18 @@ def _bounce_scale(elapsed: float) -> float:
     return 1.0 + c3 * (p - 1.0) ** 3 + c1 * (p - 1.0) ** 2
 
 
-def _render_subtitle_onto(text: str, img, scale: float = 1.0) -> None:
+def _render_subtitle_onto(
+    text: str, img, scale: float = 1.0,
+    font_size: int = 112, center_y: int | None = None,
+) -> None:
     """Composite subtitle text onto an RGBA PIL image in-place.
-    Uses Impact font, white→cyan gradient fill and italic shear (top leans right).
+    Uses Impact font, red→white gradient fill and italic shear (top leans right).
     scale: bounce-in scale factor (easeOutBack, 0→1.3→1.0).
+    font_size / center_y: override size and vertical centre of the text block
+    (defaults = regular subtitle position; the hook card reuses this renderer).
     """
     from PIL import Image, ImageDraw
 
-    font_size = 112
     font      = _find_system_font(font_size)
 
     # Measure lines using a temporary draw on a throwaway image
@@ -800,7 +742,7 @@ def _render_subtitle_onto(text: str, img, scale: float = 1.0) -> None:
 
     line_h  = font_size + 18
     total_h = len(lines) * line_h
-    y_start = (VID_H - 330) - total_h // 2
+    y_start = (center_y if center_y is not None else VID_H - 330) - total_h // 2
 
     # --- Render text to a separate RGBA layer ---
     text_layer = Image.new("RGBA", (VID_W, VID_H), (0, 0, 0, 0))
@@ -860,6 +802,49 @@ def _render_subtitle_onto(text: str, img, scale: float = 1.0) -> None:
 
     # --- Composite onto caller's image ---
     img.alpha_composite(text_layer)
+
+
+_HOOK_FONT_SIZE = 128
+_HOOK_CENTER_Y  = int(VID_H * 0.30)
+
+
+def _render_hook_card_onto(text: str, img, t: float) -> None:
+    """Composite the opening hook card onto an RGBA PIL image in-place.
+
+    Same look as the word subtitles (Impact, gradient, black outline, italic
+    shear) via ``_render_subtitle_onto``, but larger, upper-cased and placed in
+    the upper third of the frame, over a full-width dark translucent band sized
+    to the text block. The text pops in with the same easeOutBack bounce; the
+    whole card fades out over the last ``_HOOK_FADE_SEC`` of ``HOOK_CARD_SEC``.
+    """
+    from PIL import Image, ImageDraw
+
+    # Measure the text block at scale 1.0 so the band has a stable size.
+    probe = Image.new("RGBA", (VID_W, VID_H), (0, 0, 0, 0))
+    _render_subtitle_onto(
+        text.upper(), probe, scale=1.0,
+        font_size=_HOOK_FONT_SIZE, center_y=_HOOK_CENTER_Y,
+    )
+    bbox = probe.getchannel("A").getbbox()
+
+    layer = Image.new("RGBA", (VID_W, VID_H), (0, 0, 0, 0))
+    if bbox:
+        pad = 40
+        ImageDraw.Draw(layer).rectangle(
+            [(0, max(0, bbox[1] - pad)), (VID_W, min(VID_H, bbox[3] + pad))],
+            fill=(0, 0, 0, 150),
+        )
+    _render_subtitle_onto(
+        text.upper(), layer, scale=_bounce_scale(t),
+        font_size=_HOOK_FONT_SIZE, center_y=_HOOK_CENTER_Y,
+    )
+
+    remaining = HOOK_CARD_SEC - t
+    if remaining < _HOOK_FADE_SEC:
+        alpha = max(0.0, remaining / _HOOK_FADE_SEC)
+        layer.putalpha(layer.getchannel("A").point(lambda v: int(v * alpha)))
+
+    img.alpha_composite(layer)
 
 
 # ---------------------------------------------------------------------------
@@ -1014,6 +999,48 @@ def _detect_word_boundaries_from_audio(
     return word_cues
 
 
+# Cloud Whisper (word timestamps): Cloudflare Workers AI (free tier 10k neurons/day).
+#   CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN, CF_WHISPER_MODEL (default @cf/openai/whisper-large-v3-turbo)
+# Without credentials (or on failure) word timing falls back to silence detection.
+
+
+def _cf_word_timings(audio_path: str, language: str) -> list[tuple[float, float]]:
+    """Word (start, end) timings from Cloudflare Workers AI Whisper. [] on any failure."""
+    account = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    token = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+    if not account or not token:
+        return []
+    import base64
+    import time
+    import httpx
+    model = os.getenv("CF_WHISPER_MODEL", "@cf/openai/whisper-large-v3-turbo").strip()
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/{model}"
+    with open(audio_path, "rb") as fp:
+        audio_b64 = base64.b64encode(fp.read()).decode()
+    for attempt in range(3):
+        try:
+            resp = httpx.post(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                json={"audio": audio_b64, "language": language},
+                timeout=180,
+            )
+            if resp.status_code == 429 or resp.status_code >= 500:
+                time.sleep(2 * (attempt + 1))
+                continue
+            resp.raise_for_status()
+            result = resp.json().get("result") or {}
+            return [
+                (float(w["start"]), float(w["end"]))
+                for seg in (result.get("segments") or [])
+                for w in (seg.get("words") or [])
+            ]
+        except Exception as exc:
+            logger.warning("Cloudflare Whisper failed (attempt %d): %s", attempt + 1, exc)
+            time.sleep(1.5 * (attempt + 1))
+    return []
+
+
 def _run_whisper_sync(
     audio_path: str,
     sentence_cues: list[tuple[float, float, str]],
@@ -1029,48 +1056,18 @@ def _run_whisper_sync(
       timings by position ratio **within the window only**.  This bounds any
       drift to a single sentence (~1-2 s) instead of accumulating globally.
 
-    Model: 'small' for Russian (better Cyrillic recognition), 'tiny' for EN.
+    Model: Cloudflare Workers AI whisper-large-v3-turbo.
     Returns [] if Whisper is unavailable or produces no word segments.
     """
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError:
-        return []
-
     def _clean(word: str) -> str:
         return word.strip(".,!?;:\"'()-\u2013\u2014")
 
     if not sentence_cues:
         return []
 
-    model_name = "small"
-    model = _get_whisper_model(model_name)
-    if model is None:
-        return []
-
-    import warnings
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        try:
-            segments, _info = model.transcribe(
-                audio_path,
-                language=language,
-                word_timestamps=True,
-                condition_on_previous_text=False,
-                vad_filter=False,
-            )
-            # faster-whisper returns a generator — materialise it.
-            seg_list = list(segments)
-        except Exception as exc:
-            logger.warning("Whisper transcribe failed: %s", exc)
-            return []
-
-    # Collect all Whisper word timings globally
-    wh_timings: list[tuple[float, float]] = [
-        (float(w.start), float(w.end))
-        for seg in seg_list
-        for w in (seg.words or [])
-    ]
+    wh_timings = _cf_word_timings(audio_path, language)
+    if wh_timings:
+        logger.info("Whisper (Cloudflare cloud): %d words", len(wh_timings))
 
     if not wh_timings:
         return []
@@ -1395,8 +1392,8 @@ async def _synthesize_voice_gemini(
     existing Whisper pipeline (`_run_whisper_sync`).
 
     The Gemini API returns inline audio (WAV L16 24 kHz mono) but no
-    word-level timestamps, so we feed the WAV through faster-whisper — already
-    a dependency — the same way the edge-tts path does. Output files:
+    word-level timestamps, so we feed the WAV through cloud Whisper
+    (Cloudflare Workers AI) the same way the edge-tts path does. Output files:
       voice.wav  — PCM audio, 24 kHz mono, 16-bit
       subs.vtt   — single cue [0..audio_dur] used as a Whisper anchor
 
@@ -2905,6 +2902,7 @@ async def _assemble_video(
     workdir: str,
     n_article_clips: int = 0,
     clip_durations: list[float] | None = None,
+    hook_text: str | None = None,
 ) -> bool:
     """
     Assemble portrait video:
@@ -3059,7 +3057,7 @@ async def _assemble_video(
     # Uses only the always-available `overlay` filter — no libass/libfreetype.
     final_mp4 = os.path.join(workdir, "final.mp4")
     subs_ok = await _burn_subtitles_pillow(
-        mixed_mp4, cues, final_mp4, workdir,
+        mixed_mp4, cues, final_mp4, workdir, hook_text=hook_text,
     )
     if not subs_ok:
         logger.warning("Subtitle burn failed — sending video without subtitles")
@@ -3279,8 +3277,10 @@ async def _clips_via_footage_db(
 ) -> tuple[list[str], list[float]] | None:
     """Scene-matched clips from the local footage DB, or None → legacy path.
 
-    Returns (ordered_clip_paths, per_scene_durations). Clips are referenced
+    Returns (ordered_clip_paths, per_shot_durations). Clips are referenced
     in place from footage_db/ (read-only — segment building only reads them).
+    Long scenes are split into several shots (see ``_FOOTAGE_MAX_SHOT``), so
+    the returned lists can be longer than the scene plan.
     """
     project = post.get("project")
     vcfg = (_config.get_project(project).get("video") or {}) if project else {}
@@ -3323,6 +3323,41 @@ async def _clips_via_footage_db(
             os.path.basename(clips[i]),
             "reuse" if p is None else p["score"],
         )
+
+    # Retention: a single shot longer than FOOTAGE_MAX_SHOT_SEC reads as a
+    # "frozen" video in the Shorts feed. Split such scenes into N equal
+    # sub-shots and rotate through the scene's alternate candidates, so the
+    # cut rate stays high even when one sentence runs 5–7 s.
+    if _FOOTAGE_MAX_SHOT > 0:
+        used = set(clips)
+        out_clips: list[str] = []
+        out_durs: list[float] = []
+        for i, (clip, dur) in enumerate(zip(clips, durations)):
+            n_parts = math.ceil(dur / _FOOTAGE_MAX_SHOT)
+            pool = [clip]
+            if n_parts > 1 and picks[i]:
+                for alt in picks[i].get("alternates") or []:
+                    ap = alt["path"]
+                    if ap not in used and ap not in pool and os.path.exists(ap):
+                        pool.append(ap)
+                    if len(pool) >= n_parts:
+                        break
+            if n_parts > 1 and len(pool) > 1:
+                part = dur / n_parts
+                for k in range(n_parts):
+                    pick_path = pool[k % len(pool)]
+                    used.add(pick_path)
+                    out_clips.append(pick_path)
+                    out_durs.append(part)
+                logger.info(
+                    "[FOOTAGE] scene %d split into %d shots (%.1fs each): %s",
+                    scenes[i].get("id"), n_parts, part,
+                    [os.path.basename(p) for p in out_clips[-n_parts:]],
+                )
+            else:
+                out_clips.append(clip)
+                out_durs.append(dur)
+        clips, durations = out_clips, out_durs
     return clips, durations
 
 
@@ -3337,13 +3372,14 @@ async def create_short_video(
     include_article_images: bool = False,
     add_cta: bool = False,
     skip_footage_db: bool = False,
+    hook_text: str | None = None,
 ) -> Optional[str]:
     """
     Generate a TikTok/Reels/Shorts video for an approved post.
 
     Args:
         post:              DB post dict (needs id, image_paths, article_title).
-        script:            Pre-generated narration (~70–90 words, plain text).
+        script:            Pre-generated narration (~60–70 words, plain text).
         search_query:      Keywords for YouTube gameplay clip search.
         lang:              'en' for English TTS, 'ru' for Russian TTS.
         prefetched_clips:  Already-downloaded clip paths to reuse (skip download).
@@ -3353,6 +3389,8 @@ async def create_short_video(
             footage database — used when the user pasted a custom search query
             or a direct video link, so their explicit choice of source footage
             (``prefetched_clips``) is honored instead of being overridden.
+        hook_text:         Short headline burned as an opening card over the
+            first ``HOOK_CARD_SEC`` seconds (None/empty → no card).
 
     Returns:
         Absolute path to the generated .mp4 file, or None on failure.
@@ -3471,6 +3509,7 @@ async def create_short_video(
             all_images, all_clips, audio_path, cues, output_path, workdir,
             n_article_clips=n_article_clips,
             clip_durations=fdb_durations,
+            hook_text=hook_text,
         )
         return output_path if ok else None
 

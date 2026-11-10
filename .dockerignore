@@ -1,0 +1,3 @@
+# В build context нужен только requirements.txt (весь код монтируется томом)
+*
+!requirements.txt

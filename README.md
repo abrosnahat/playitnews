@@ -30,7 +30,7 @@ declared in [projects.json](projects.json).
    Telegram buttons — the bot is notification-only.
 5. **Video generation** ([video_generator.py](video_generator.py)) — builds a
    1080×1920 vertical video per post: TTS narration (`edge-tts` or Gemini
-   TTS), `faster-whisper` word-level subtitle timing, YouTube/Pixabay
+   TTS), Cloudflare Workers AI Whisper word-level subtitle timing, YouTube/Pixabay
    b-roll clips selected and ordered to match the script (via Gemini Vision
    frame tagging), optional per-project overlays (e.g. UFC mid-roll ad / banner), burned-in subtitles.
 6. **Publish** — pushes the finished post/video to whichever platforms the

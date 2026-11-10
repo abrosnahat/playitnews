@@ -2335,7 +2335,7 @@
         [/clip selection/i, ICON.film, "Выбор лучших моментов…"],
         [/cut\s+(\d+)\s+[^\n]*clips|prepared\s+(\d+)\s+[^\n]*clips/i, ICON.check, (x) => "Подготовлено клипов: " + (x[1] || x[2]), "done"],
         [/synthesizing voice with edge-tts/i, ICON.mic, "Синтез голоса (edge-tts)…"],
-        [/whisper device/i, ICON.mic, "Тайминг субтитров (Whisper)…"],
+        [/whisper \(cloudflare/i, ICON.mic, "Тайминг субтитров (Whisper)…"],
         [/processing audio with duration/i, ICON.mic, "Распознавание аудио…"],
         [/TTS:\s*(\d+) word cues[^\n]*?([\d.]+)\s*s/i, ICON.check, (x) => "Голос готов (" + x[1] + " слов, " + x[2] + " с)", "done"],
         [/assembling video/i, ICON.film, "Сборка видео…"],

@@ -20,12 +20,17 @@ logger = logging.getLogger(__name__)
 
 DASHBOARD_LOCAL = "http://localhost:5003"
 
-_CLOUDFLARED_LOG = os.path.join(tempfile.gettempdir(), "cloudflared_playitnews.log")
+_CLOUDFLARED_LOG = os.getenv("CLOUDFLARED_LOG") or os.path.join(
+    tempfile.gettempdir(), "cloudflared_playitnews.log"
+)
 _CLOUDFLARED_RE = re.compile(rb"https://[a-z0-9-]+\.trycloudflare\.com")
 
 
 def _get_cloudflare_url() -> Optional[str]:
     """Read the current cloudflared tunnel URL from the log file."""
+    public_url = os.getenv("DASHBOARD_PUBLIC_URL", "").strip().rstrip("/")
+    if public_url:
+        return public_url
     try:
         with open(_CLOUDFLARED_LOG, "rb") as fp:
             data = fp.read()

@@ -10,7 +10,7 @@ Guidance for Claude Code when working in this repository.
 - Instagram (Reels, EN + RU accounts)
 - YouTube (Shorts, EN + RU channels)
 
-The pipeline scrapes articles, downloads images and video clips (HLS / YouTube embeds via `yt-dlp`), generates short videos with TTS narration (`edge-tts`) and subtitles (`faster-whisper`), and routes everything through an admin approval flow on Telegram.
+The pipeline scrapes articles, downloads images and video clips (HLS / YouTube embeds via `yt-dlp`), generates short videos with TTS narration (`edge-tts`) and subtitles (Cloudflare Workers AI Whisper), and routes everything through an admin approval flow on Telegram.
 
 ## Architecture
 

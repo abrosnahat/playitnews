@@ -126,6 +126,21 @@ class FightTimeSource:
                 if _is_valid_image_url(hero):
                     image_urls.append(hero)
 
+        # Inline images inside the article body (e.g. /images/news/2026/x.jpg).
+        if body:
+            for img in body.select("img"):
+                src = (
+                    img.get("src")
+                    or img.get("data-src")
+                    or img.get("data-lazy-src")
+                    or ""
+                ).strip()
+                if not src:
+                    continue
+                full = urljoin(self.BASE, src)
+                if full not in image_urls and _is_valid_image_url(full):
+                    image_urls.append(full)
+
         # VK video/clip players embedded as <iframe> in the article body.
         pg_embeds = scraper.extract_vk_iframe_embeds(body) if body else []
         return Article(url=url, title=title, text=text, image_urls=image_urls, pg_embeds=pg_embeds)

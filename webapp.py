@@ -384,7 +384,7 @@ class _SSEDetailLogHandler(logging.Handler):
 _detail_handler = _SSEDetailLogHandler()
 _detail_handler.setLevel(logging.INFO)
 for _logger_name in (
-    "video_generator", "faster_whisper",
+    "video_generator",
     "instagram_publisher", "instagram_carousel_publisher",
     "youtube_publisher", "github_uploader", "thumbnail_generator",
     "carousel_builder", "vk_publisher", "threads_publisher",
@@ -1689,6 +1689,31 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
 
         # --- Step 4: Render ---
         if check_cancel(): raise InterruptedError("Cancelled")
+
+        # Opening hook card text (same prompt as the thumbnail hook). Best-effort:
+        # any failure just means the video renders without the card.
+        async def _hook_for(lang_: str, title_: str) -> Optional[str]:
+            if video_generator.HOOK_CARD_SEC <= 0 or not title_:
+                return None
+            try:
+                hook = await ai_adapter.generate_thumbnail_hook(
+                    title_, lang=lang_, prompt=config.project_ai(project, "thumbnail_hook")
+                )
+            except Exception as exc:
+                logger.warning("hook card text failed (%s): %s", lang_, exc)
+                return None
+            hook = (hook or "").strip()
+            # generate_thumbnail_hook falls back to the raw title — too long for a card.
+            if not hook or len(hook) > 40 or len(hook.split()) > 5:
+                return None
+            if lang_ == "en" and re.search(r"[а-яёА-ЯЁ]", hook):
+                return None
+            progress(f"Hook card ({lang_.upper()}): {hook}")
+            return hook
+
+        hook_en = await _hook_for("en", en_title) if do_en else None
+        hook_ru = await _hook_for("ru", title) if do_ru else None
+
         en_path: Optional[str] = None
         ru_path: Optional[str] = None
         try:
@@ -1705,6 +1730,7 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
                     include_article_images=include_images,
                     add_cta=add_cta,
                     skip_footage_db=user_query or has_article_video,
+                    hook_text=hook_en,
                 )
                 if en_path:
                     db.set_generated_video_path(post_id, en_path)
@@ -1725,6 +1751,7 @@ async def _generate_video(post_id: int, lang: str, include_images: bool = False,
                     include_article_images=include_images,
                     add_cta=add_cta,
                     skip_footage_db=user_query or has_article_video,
+                    hook_text=hook_ru,
                 )
                 if ru_path:
                     db.set_generated_video_path_ru(post_id, ru_path)

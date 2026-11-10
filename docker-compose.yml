@@ -1,0 +1,41 @@
+x-app: &app
+  build: .
+  image: playitnews:latest
+  restart: unless-stopped
+  working_dir: /app
+  volumes:
+    - .:/app
+    - hf-cache:/root/.cache   # yt-dlp cache
+  environment: &app-env
+    WEBAPP_LOCAL_URL: http://web:5003
+    CLOUDFLARED_LOG: /app/tunnel/cloudflared_playitnews.log
+    # На сервере нет браузера; для YouTube задайте YT_COOKIES_FILE=/app/youtube_cookies.txt в .env
+    YT_COOKIES_BROWSER: "none"
+    VIDEO_ENCODER: libx264
+
+services:
+  web:
+    <<: *app
+    command: python webapp.py
+    ports:
+      - "127.0.0.1:5003:5003"   # дашборд без авторизации — наружу не открываем
+
+  bot:
+    <<: *app
+    command: python main.py
+    depends_on:
+      - web
+
+  # Необязательно: публичная ссылка на дашборд (trycloudflare). Бот читает URL из лога.
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    user: root
+    command: tunnel --no-autoupdate --logfile /tunnel/cloudflared_playitnews.log --url http://web:5003
+    volumes:
+      - ./tunnel:/tunnel
+    depends_on:
+      - web
+
+volumes:
+  hf-cache:

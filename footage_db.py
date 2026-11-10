@@ -890,6 +890,16 @@ _FOREIGN_COFIGHTER_PENALTY = float(os.getenv("FOOTAGE_FOREIGN_COFIGHTER_PENALTY"
 # Бонус клипу, где есть ≥2 бойцов из сцены вместе (сам матчап: Ян + Двалишвили), а не
 # один боец из старого боя с кем-то другим.
 _MATCHUP_BONUS = float(os.getenv("FOOTAGE_MATCHUP_BONUS", "0.2"))
+# Открывающая сцена (hook) — первые 1.5–2 с решают, свайпнут ролик или нет.
+# Для сцены 0 даём бонус «ударным» клипам (нокаут, удар, тейкдаун, стердаун,
+# празднование), чтобы ролик не начинался с интервью/пресс-конференции.
+_HOOK_ACTIONS = frozenset({
+    "knockout", "punch", "kick", "takedown", "submission", "staredown",
+    "faceoff", "celebration", "highlight", "walkout",
+})
+_HOOK_ACTION_BONUS = float(os.getenv("FOOTAGE_HOOK_BONUS", "0.3"))
+# Сколько запасных кандидатов возвращать на сцену (для дробления длинных планов)
+_ALTERNATES_PER_SCENE = int(os.getenv("FOOTAGE_ALTERNATES", "4"))
 
 
 def _keyword_bonus(record: dict, subjects: list[str], actions: list[str]) -> float:
@@ -968,9 +978,12 @@ async def match_scenes(scenes: list[dict]) -> list[dict | None]:
     """Подбор клипа под каждую сцену planner'а.
 
     Каждая сцена: {"text", "subject": [...], "action": [...], "queries": [...]}.
-    Возвращает список той же длины: {"path", "score", "record"} | None (если
-    ничего не набрало MIN_MATCH_SCORE). Один клип не используется дважды,
-    пока есть неиспользованные кандидаты.
+    Возвращает список той же длины: {"path", "score", "record", "alternates"}
+    | None (если ничего не набрало MIN_MATCH_SCORE). ``alternates`` — до
+    ``_ALTERNATES_PER_SCENE`` следующих по score клипов (другие файлы, тоже
+    ≥ MIN_MATCH_SCORE) — используются, чтобы разбить длинную сцену на несколько
+    планов. Один клип не используется дважды, пока есть неиспользованные кандидаты.
+    Сцена 0 получает бонус за «ударные» экшены (см. _HOOK_ACTIONS).
     """
     index = [r for r in load_index() if r.get("embedding")]
     if not index or not scenes:
@@ -998,24 +1011,39 @@ async def match_scenes(scenes: list[dict]) -> list[dict | None]:
 
     used_files: set[str] = set()
     picks: list[dict | None] = []
-    for sc, q_emb in zip(scenes, q_embs):
+    for si, (sc, q_emb) in enumerate(zip(scenes, q_embs)):
         subjects = sc.get("subject") or []
         actions = sc.get("action") or []
-        best: dict | None = None
-        best_score = -1.0
+        scored: list[tuple[float, str, dict]] = []
         for r in index:
             path = clip_abspath(r)
             if not os.path.exists(path):
                 continue
             score = _score_record(r, q_emb, subjects, actions, story_subjects)
+            if si == 0 and _HOOK_ACTION_BONUS > 0:
+                rec_actions = {a.lower() for a in (r.get("action") or []) if isinstance(a, str)}
+                if rec_actions & _HOOK_ACTIONS:
+                    score += _HOOK_ACTION_BONUS
             if path in used_files:
                 score -= 0.15  # мягкий штраф за повтор — не жёсткий запрет
-            if score > best_score:
-                best_score = score
-                best = {"path": path, "score": round(score, 3), "record": r}
-        if best is not None and best_score >= MIN_MATCH_SCORE:
-            used_files.add(best["path"])
-            picks.append(best)
+            scored.append((score, path, r))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        if scored and scored[0][0] >= MIN_MATCH_SCORE:
+            best_score, best_path, best_rec = scored[0]
+            alternates: list[dict] = []
+            seen = {best_path}
+            for score, path, r in scored[1:]:
+                if len(alternates) >= _ALTERNATES_PER_SCENE or score < MIN_MATCH_SCORE:
+                    break
+                if path in seen:
+                    continue
+                seen.add(path)
+                alternates.append({"path": path, "score": round(score, 3), "record": r})
+            used_files.add(best_path)
+            picks.append({
+                "path": best_path, "score": round(best_score, 3),
+                "record": best_rec, "alternates": alternates,
+            })
         else:
             picks.append(None)
     return picks
@@ -1223,6 +1251,7 @@ async def reindex_all(
     limit: int | None = None,
     only_fighter: str | None = None,
     offset: int = 0,
+    only_review: bool = False,
 ) -> tuple[int, int]:
     """Re-run Gemini Vision tagging on EVERY already-indexed clip (not just new
     arrivals in _raw/) — use after tightening the tagging prompt, or when you
@@ -1237,6 +1266,10 @@ async def reindex_all(
     re-tag clips whose CURRENT fighter list contains a match (handy for a
     narrower, cheaper pass instead of the whole DB).
 
+    ``only_review``: re-tag only records flagged ``needs_review`` (see
+    ``audit``). The flag is recomputed per clip, so fixed clips drop out of
+    the next run automatically.
+
     ``offset``: skip this many candidates before starting — lets a huge index
     be worked through in batches (e.g. ``offset=1000, limit=1000`` to reindex
     the NEXT 1000 clips after an earlier ``limit=1000`` pass) instead of
@@ -1249,9 +1282,11 @@ async def reindex_all(
         index = load_index()
         roster = _Roster(index)
         candidates = index
+        if only_review:
+            candidates = [r for r in candidates if r.get("needs_review")]
         if only_fighter:
             needle = only_fighter.strip().lower()
-            candidates = [r for r in index if any(needle in f.lower() for f in r.get("fighter", []))]
+            candidates = [r for r in candidates if any(needle in f.lower() for f in r.get("fighter", []))]
         if offset:
             candidates = candidates[offset:]
         if limit:
@@ -1435,6 +1470,7 @@ def main() -> None:
     p_reall.add_argument("--limit", type=int, default=None, help="only re-tag N clips")
     p_reall.add_argument("--offset", type=int, default=0, help="skip this many clips before starting (batch through a huge index, e.g. --offset 1000 --limit 1000 for the next 1000)")
     p_reall.add_argument("--fighter", default=None, help="only re-tag clips currently tagged with this fighter (substring match)")
+    p_reall.add_argument("--needs-review", action="store_true", help="only re-tag clips flagged needs_review by audit")
 
     p_audit = sub.add_parser(
         "audit",
@@ -1485,7 +1521,7 @@ def main() -> None:
         ok = remove_video(args.video_id)
         print("OK" if ok else "FAILED — see log above")
     elif args.cmd == "reindex-all":
-        attempted, changed = asyncio.run(reindex_all(args.limit, args.fighter, args.offset))
+        attempted, changed = asyncio.run(reindex_all(args.limit, args.fighter, args.offset, args.needs_review))
         print(f"Attempted: {attempted}, changed fighter tags: {changed}")
     elif args.cmd == "audit":
         flagged, fixed = asyncio.run(audit_index(args.fix_events, args.mark))
