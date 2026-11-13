@@ -1951,6 +1951,7 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
                 return out_path
             image_paths: list[str] = [p for p in post.get("image_paths", []) if os.path.exists(p)]
             if not image_paths:
+                logger.warning("_make_thumb(%s): no article images for post %s — no thumbnail", lang, post_id)
                 return None
             source = image_paths[0]
             raw_title = title or post.get("article_title", "")
@@ -1966,8 +1967,11 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
                 logger.warning("_make_thumb EN: hook is empty or contains Cyrillic ('%s') — skipping thumbnail", hook[:60])
                 return None
             ok = thumbnail_generator.generate_instagram_thumbnail(source, hook, out_path)
+            if not ok:
+                logger.warning("_make_thumb(%s): render failed for post %s", lang, post_id)
             return out_path if ok else None
         except Exception:
+            logger.exception("_make_thumb(%s) failed for post %s", lang, post_id)
             return None
 
     if platform == "instagram":

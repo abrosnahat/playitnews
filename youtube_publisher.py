@@ -77,17 +77,40 @@ def _build_youtube_client(token_file: str = YOUTUBE_TOKEN_FILE):
     return build("youtube", "v3", credentials=creds, cache_discovery=False)
 
 
+def _wait_until_processed(youtube, video_id: str, timeout: int = 180, interval: int = 10) -> bool:
+    """
+    Poll videos.list until processingDetails.processingStatus == 'succeeded'.
+
+    Per the thumbnails.set docs, for Shorts the method must be called only after
+    processing finished, otherwise the thumbnail may not be applied. Blocking.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while True:
+        items = youtube.videos().list(part="processingDetails", id=video_id).execute().get("items", [])
+        status = (items[0].get("processingDetails", {}) if items else {}).get("processingStatus")
+        if status == "succeeded":
+            return True
+        if status in ("failed", "terminated") or time.monotonic() >= deadline:
+            logger.warning("YouTube %s processing status: %s", video_id, status)
+            return False
+        time.sleep(interval)
+
+
 def _set_thumbnail_blocking(youtube, video_id: str, thumbnail_path: str) -> None:
     """
     Set a custom thumbnail on *video_id* using thumbnails.set.
 
-    Works for Shorts too (Google rolled out full Shorts custom-thumbnail support
-    across 2025). Requires the youtube.force-ssl scope and a channel that has
-    custom thumbnails enabled (verified account); otherwise YouTube returns 403.
-    Recommended image: 1080×1920 (9:16), < 2 MB, JPG/PNG. Blocking — run in thread.
+    NOTE: for Shorts the API returns HTTP 200 but Google confirms the custom
+    cover is ignored/overwritten ("Won't Fix (Intended Behavior)", issue tracker
+    561284868 / 494845784) — Studio uses a private endpoint. The image may still
+    show on some surfaces (search/API thumbnails). Requires youtube.force-ssl and
+    a verified channel (else 403). Blocking — run in thread.
     """
     from googleapiclient.http import MediaFileUpload
 
+    _wait_until_processed(youtube, video_id)
     mimetype = "image/png" if thumbnail_path.lower().endswith(".png") else "image/jpeg"
     youtube.thumbnails().set(
         videoId=video_id,
