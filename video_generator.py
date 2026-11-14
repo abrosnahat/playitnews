@@ -265,6 +265,19 @@ CTA_PHRASE_RU = "Полный трейлер в нашем Telegram канале
 HOOK_CARD_SEC = float(os.getenv("HOOK_CARD_SEC", "1.8"))
 _HOOK_FADE_SEC = 0.3
 
+# Looped promo banner (ProRes 4444 with alpha) for Russian-language videos.
+# Placed in the upper part of the frame (below the platform status/search bar),
+# small and centred so it stays clear of the social-network button column on
+# the right edge. RU_BANNER_ENABLED=0 disables.
+RU_BANNER_ENABLED = os.getenv("RU_BANNER_ENABLED", "1") != "0"
+RU_BANNER_PATH = os.getenv(
+    "RU_BANNER_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "Плашка.mov"),
+)
+RU_BANNER_WIDTH = int(os.getenv("RU_BANNER_WIDTH", "460"))
+# Gap between the frame top and the banner's top edge (platform status/search zone).
+RU_BANNER_TOP_MARGIN = int(os.getenv("RU_BANNER_TOP_MARGIN", "150"))
+
 # Max length of a single shot when footage comes from the local footage DB.
 # Scenes longer than this are split across the scene's alternate clips.
 _FOOTAGE_MAX_SHOT = float(os.getenv("FOOTAGE_MAX_SHOT_SEC", "3.0"))
@@ -573,6 +586,7 @@ async def _burn_subtitles_pillow(
     output_mp4: str,
     workdir: str,
     hook_text: str | None = None,
+    sub_center_y: int | None = None,
 ) -> bool:
     """
     Burn subtitles using frame extraction + Pillow composite + single re-encode.
@@ -656,7 +670,9 @@ async def _burn_subtitles_pillow(
                 _render_hook_card_onto(hook_text, overlay, t)
             if text:
                 scale = _bounce_scale(t - cue_start)
-                _render_subtitle_onto(text, overlay, scale=scale)
+                _render_subtitle_onto(
+                    text, overlay, scale=scale, center_y=sub_center_y,
+                )
             combined = Image.alpha_composite(base, overlay).convert("RGB")
             combined.save(fpath, "PNG")
         except Exception as exc:
@@ -2893,6 +2909,50 @@ def _find_music_track() -> str | None:
     return random.choice(tracks) if tracks else None
 
 
+async def _overlay_looped_banner(
+    input_mp4: str, output_mp4: str, duration: float,
+) -> bool:
+    """Overlay the alpha banner (looped for the whole video) at the top.
+
+    The banner is scaled to RU_BANNER_WIDTH and centred horizontally, so its
+    right edge stays left of the social-network button column.
+    """
+    scaled_h = None
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0",
+             RU_BANNER_PATH],
+            capture_output=True, text=True, timeout=30,
+        )
+        bw, bh = (int(x) for x in probe.stdout.strip().split(",")[:2])
+        scaled_h = int(round(RU_BANNER_WIDTH * bh / bw / 2)) * 2
+    except Exception as exc:
+        logger.warning("Banner probe failed (%s) — using fallback height", exc)
+        scaled_h = int(round(RU_BANNER_WIDTH * 552 / 1068 / 2)) * 2
+
+    x = (VID_W - RU_BANNER_WIDTH) // 2
+    y = RU_BANNER_TOP_MARGIN
+    return await _run_async(
+        [
+            "ffmpeg", "-y",
+            "-i", input_mp4,
+            "-stream_loop", "-1", "-i", RU_BANNER_PATH,
+            "-filter_complex",
+            f"[1:v]scale={RU_BANNER_WIDTH}:{scaled_h},format=yuva420p[bn];"
+            f"[0:v][bn]overlay=x={x}:y={y}:format=auto:shortest=1,format=yuv420p[v]",
+            "-map", "[v]", "-map", "0:a?",
+            *_video_encoder_args(crf=20),
+            "-pix_fmt", "yuv420p",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            "-t", f"{duration:.3f}",
+            output_mp4,
+        ],
+        timeout=300,
+    )
+
+
 async def _assemble_video(
     image_paths: list[str],
     video_clip_paths: list[str],
@@ -2903,6 +2963,7 @@ async def _assemble_video(
     n_article_clips: int = 0,
     clip_durations: list[float] | None = None,
     hook_text: str | None = None,
+    lang: str = "en",
 ) -> bool:
     """
     Assemble portrait video:
@@ -3056,12 +3117,24 @@ async def _assemble_video(
     # ── Step 4: burn subtitles (Pillow PNG → ffmpeg overlay) ───────────────
     # Uses only the always-available `overlay` filter — no libass/libfreetype.
     final_mp4 = os.path.join(workdir, "final.mp4")
+    use_banner = (
+        lang == "ru" and RU_BANNER_ENABLED and os.path.exists(RU_BANNER_PATH)
+    )
     subs_ok = await _burn_subtitles_pillow(
         mixed_mp4, cues, final_mp4, workdir, hook_text=hook_text,
     )
     if not subs_ok:
         logger.warning("Subtitle burn failed — sending video without subtitles")
         shutil.copy2(mixed_mp4, final_mp4)
+
+    # ── Step 5: looped promo banner (RU videos only) ──────────────────────
+    if use_banner:
+        banner_mp4 = os.path.join(workdir, "final_banner.mp4")
+        if await _overlay_looped_banner(final_mp4, banner_mp4, audio_dur):
+            final_mp4 = banner_mp4
+            logger.info("RU banner overlaid for the whole video")
+        else:
+            logger.warning("RU banner overlay failed — keeping video without it")
 
     shutil.copy2(final_mp4, output_path)
     return os.path.exists(output_path)
@@ -3510,6 +3583,7 @@ async def create_short_video(
             n_article_clips=n_article_clips,
             clip_durations=fdb_durations,
             hook_text=hook_text,
+            lang=lang,
         )
         return output_path if ok else None
 

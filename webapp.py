@@ -1904,6 +1904,16 @@ def api_publish_status(post_id: int):
     return jsonify({"running": running, "logs": logs})
 
 
+_RU_PROMO_LINE = "Создавай музыку с AI, ищи нас в поисковике: #сонгхит #songhit или songhit.ru"
+_RU_MANDATORY_TAGS = ["клипни", "сонгхит", "songhit"]
+
+
+def _ru_with_promo(text: str) -> str:
+    """Prepend the promo line and mandatory hashtags to a RU description."""
+    tags = " ".join(f"#{t}" for t in _RU_MANDATORY_TAGS)
+    return f"{_RU_PROMO_LINE}\n\n{tags}\n\n{text.lstrip()}"
+
+
 async def _do_publish_social(post_id: int, platform: str, post: dict, progress_cb=None) -> str:
     def progress(msg: str, type_: str = "progress"):
         if progress_cb:
@@ -1929,11 +1939,15 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         ht = " ".join(re.findall(r'#\w+', re.sub(r'<[^>]+>', '', src)))
         if ht and ht not in raw:
             raw = raw.rstrip() + "\n\n" + ht
-        return raw.rstrip() + "\n\nБольше новостей в telegram-канале, ссылка в био"
+        return _ru_with_promo(raw.rstrip() + "\n\nБольше новостей в telegram-канале, ссылка в био")
 
     def _tags(key: str = "post_text") -> list[str]:
         src = re.sub(r'<[^>]+>', '', post.get(key) or post.get("post_text", ""))
-        return [h.lstrip("#") for h in re.findall(r'#\w+', src)]
+        found = [h.lstrip("#") for h in re.findall(r'#\w+', src)]
+        if key == "ru_post_text":
+            low = {t.lower() for t in found}
+            found += [t for t in _RU_MANDATORY_TAGS if t.lower() not in low]
+        return found
 
     def _first_image() -> Optional[str]:
         """First still-existing article image, used e.g. as the Threads image post."""
@@ -2061,9 +2075,9 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         progress("Generating thumbnail…")
         yt_thumb = await _make_thumb(ru_path, lang="ru")
         progress("Uploading Short to YouTube RU…")
-        desc = _clean_text(
+        desc = _ru_with_promo(_clean_text(
             post.get("ru_post_text") or post.get("post_text", "")
-        ).rstrip() + "\n\nБольше новостей в telegram-канале, ссылка в био"
+        ).rstrip() + "\n\nБольше новостей в telegram-канале, ссылка в био")
         _cr = _creds("youtube-ru")
         video_id = await youtube_publisher.upload_short(
             video_path=ru_path, title=yt_title, description=desc, tags=_tags("ru_post_text"),
@@ -2079,9 +2093,9 @@ async def _do_publish_social(post_id: int, platform: str, post: dict, progress_c
         progress("Generating thumbnail…")
         vk_thumb = await _make_thumb(ru_path, lang="ru")
         progress("Uploading video to VK…")
-        vk_desc = _clean_text(
+        vk_desc = _ru_with_promo(_clean_text(
             post.get("ru_post_text") or post.get("post_text", "")
-        ).rstrip() + "\n\nБольше новостей в telegram-канале, ссылка в био"
+        ).rstrip() + "\n\nБольше новостей в telegram-канале, ссылка в био")
         _cr = _creds("vk")
         vk_url = await vk_publisher.upload_video(
             video_path=ru_path, title=vk_title, description=vk_desc,
