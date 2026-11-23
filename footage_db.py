@@ -343,10 +343,12 @@ def download_shorts(
         "--match-filters", "live_status=not_live",
         "--ignore-errors", "--no-warnings",
         "--sleep-requests", "1",
-        # Cookies и player_client (tv_downgraded) НЕ передаём: публичные Shorts в
-        # них не нуждаются, а они дают "The page needs to be reloaded" и молча
-        # блокируют скачивание новых роликов (--ignore-errors). Дефолтный клиент
-        # yt-dlp (android vr) работает стабильно.
+        # YouTube сейчас требует "not a bot" подтверждение даже для публичных
+        # Shorts (без cookies падают все клиенты, включая android_vr), поэтому
+        # передаём cookies (YT_COOKIES_FILE / YT_COOKIES_BROWSER, на Windows —
+        # firefox, т.к. chrome/edge блокируют/шифруют cookie DB). player_client
+        # не задаём: android_vr с cookies отдаёт пустой список форматов.
+        *vg._YT_COOKIE_ARGS,
     ]
     if new_only:
         args += ["--lazy-playlist", "--break-on-existing"]
@@ -361,17 +363,28 @@ def download_shorts(
         # таймаут как страховка от зависшего yt-dlp. Явная utf-8 кодировка —
         # yt-dlp пишет эмодзи/кириллицу, Windows иначе декодирует как cp1251
         # и падает с UnicodeDecodeError.
-        try:
-            r = subprocess.run(
-                args, capture_output=True, text=True, timeout=3600,
-                encoding="utf-8", errors="replace",
-            )
+        # YouTube периодически отдаёт "The page needs to be reloaded" (с cookies) —
+        # ошибка разовая; упавшие ролики не попадают в archive, поэтому повторный
+        # запуск докачивает именно их.
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                r = subprocess.run(
+                    args, capture_output=True, text=True, timeout=3600,
+                    encoding="utf-8", errors="replace",
+                )
+            except subprocess.TimeoutExpired:
+                logger.error("yt-dlp update timed out after 1h")
+                break
+            stderr = r.stderr or ""
             if r.returncode not in (0, 101):
-                logger.warning("yt-dlp update rc=%d: %s", r.returncode, (r.stderr or "")[-400:])
-            elif "ERROR:" in (r.stderr or ""):
-                logger.warning("yt-dlp update errors: %s", (r.stderr or "")[-400:])
-        except subprocess.TimeoutExpired:
-            logger.error("yt-dlp update timed out after 1h")
+                logger.warning("yt-dlp update rc=%d: %s", r.returncode, stderr[-400:])
+            elif "ERROR:" in stderr:
+                logger.warning("yt-dlp update errors: %s", stderr[-400:])
+            if "needs to be reloaded" not in stderr or attempt == max_attempts:
+                break
+            logger.info("yt-dlp: 'page needs to be reloaded', повтор %d/%d", attempt + 1, max_attempts)
+            time.sleep(15)
     else:
         # CLI-режим: без capture/timeout — прогресс виден в консоли,
         # полное скачивание канала может идти часами.

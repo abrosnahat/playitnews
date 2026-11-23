@@ -40,6 +40,7 @@ import tempfile
 
 import aiohttp
 import certifi
+import yarl
 
 import github_uploader
 from config import (
@@ -52,6 +53,13 @@ from config import (
 logger = logging.getLogger(__name__)
 
 GRAPH_API_BASE = "https://graph.instagram.com/v21.0"
+
+# Некоторые сети/VPN сбрасывают TLS-handshake по SNI "graph.instagram.com",
+# хотя другие поддомены Instagram (i.instagram.com) открываются. Для запросов
+# к graph.instagram.com подставляем другой SNI (сертификат *.instagram.com
+# общий, Host-заголовок остаётся прежним). Пустое значение в .env отключает.
+_IG_API_HOST = "graph.instagram.com"
+_IG_API_SNI = os.getenv("INSTAGRAM_API_SNI", "i.instagram.com").strip()
 _CONTAINER_POLL_INTERVAL = 5    # seconds between status checks
 _CONTAINER_POLL_TIMEOUT  = 300  # give up after 5 minutes
 
@@ -98,11 +106,20 @@ async def _aiohttp_session() -> aiohttp.ClientSession:  # type: ignore[override]
     return _make_session()
 
 
+class _IGClientSession(aiohttp.ClientSession):
+    """ClientSession, подменяющая SNI для graph.instagram.com (см. _IG_API_SNI)."""
+
+    async def _request(self, method, str_or_url, **kwargs):
+        if _IG_API_SNI and yarl.URL(str(str_or_url)).host == _IG_API_HOST:
+            kwargs.setdefault("server_hostname", _IG_API_SNI)
+        return await super()._request(method, str_or_url, **kwargs)
+
+
 def _make_session() -> aiohttp.ClientSession:
     """aiohttp session with certifi SSL context (required on macOS)."""
     ctx = ssl.create_default_context(cafile=certifi.where())
     connector = aiohttp.TCPConnector(ssl=ctx)
-    return aiohttp.ClientSession(connector=connector)
+    return _IGClientSession(connector=connector)
 
 
 async def _wait_for_url_ready(
