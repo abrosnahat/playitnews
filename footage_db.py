@@ -73,6 +73,7 @@ CHANNELS: list[str] = [
     DEFAULT_CHANNEL,
     "https://www.youtube.com/@ufc/shorts",
     "https://www.youtube.com/@PFLMMA/shorts",
+    "https://www.youtube.com/@RAFwrestling/shorts",
 ]
 
 CATEGORY_DIRS = ("fighters", "events", "actions", "misc")

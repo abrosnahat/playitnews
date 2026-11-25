@@ -26,15 +26,15 @@ _FONT_CANDIDATES = [
     "/System/Library/Fonts/Supplemental/Arial.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
     # Linux
-    "/usr/share/fonts/truetype/msttcorefonts/Impact.ttf",
+    "/usr/share/fonts/truetype/msttcorefonts/Impact.ttf",UFCEurasia
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 ]
 
 # Outline / stroke colour (black)
 _OUTLINE_COLOR = (0x00, 0x00, 0x00)  # #000000
 # Gradient fill: top colour → bottom colour
-_GRAD_TOP    = (255, 255, 255)        # white
-_GRAD_BOTTOM = (0xC7, 0xF8, 0xFD)    # #C7F8FD (light cyan)
+_GRAD_TOP    = (0xDC, 0x0A, 0x0A)    # #DC0A0A logo red (same as subtitles)
+_GRAD_BOTTOM = (255, 255, 255)        # white (same as subtitles)
 
 
 def _find_font(size: int):
@@ -135,7 +135,7 @@ def _render_thumbnail(
             outline_fill = Image.new("RGBA", (width, height), (*_OUTLINE_COLOR, 255))
             text_layer.paste(outline_fill, mask=outline_mask)
 
-            # 5b. Gradient fill (white top → cyan bottom)
+            # 5b. Gradient fill (red top → white bottom, same as subtitles)
             bbox = draw_t.textbbox((x, cur_y), line, font=font)
             ly0, ly1 = bbox[1], bbox[3]
             lh = max(1, ly1 - ly0)
