@@ -26,7 +26,7 @@ _FONT_CANDIDATES = [
     "/System/Library/Fonts/Supplemental/Arial.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
     # Linux
-    "/usr/share/fonts/truetype/msttcorefonts/Impact.ttf",UFCEurasia
+    "/usr/share/fonts/truetype/msttcorefonts/Impact.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 ]
 

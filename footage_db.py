@@ -848,6 +848,9 @@ async def _index_videos_locked(limit: int | None = None) -> int:
             "upload_date": info.get("upload_date", ""),
             "embedding": [],
         }
+        org_tag = org_from_channel(info.get("channel", ""), info.get("uploader_id", ""))
+        if org_tag:
+            record["org"] = org_tag
         _apply_review(record, roster, text=f"{title} {description}")
         try:
             embs = await embed_texts([_embed_text_for(record)], task_type="RETRIEVAL_DOCUMENT")
@@ -916,6 +919,98 @@ _HOOK_ACTION_BONUS = float(os.getenv("FOOTAGE_HOOK_BONUS", "0.3"))
 _ALTERNATES_PER_SCENE = int(os.getenv("FOOTAGE_ALTERNATES", "4"))
 
 
+# Сюжет про НЕ-UFC организацию (RAF и т.п.): база в основном состоит из клипов UFC,
+# поэтому без этого блока новость про RAF получает ролик из октагона. Для таких сюжетов
+# клипы с меткой UFC штрафуются, клипы из этой организации — поощряются, а для RAF ещё
+# и ударная техника (не борцовские действия) считается не по теме.
+_ORG_PROFILES: tuple[dict, ...] = (
+    {
+        "name": "raf",
+        "story": re.compile(r"\bRAF\b|Real American Freestyle", re.I),
+        "clip": re.compile(r"real american freestyle|\braf\b|freestyle wrestling|wrestling", re.I),
+        "off_actions": frozenset({"knockout", "punch", "kick", "submission"}),
+    },
+    {
+        "name": "pfl",
+        "story": re.compile(r"\bPFL\b", re.I),
+        "clip": re.compile(r"\bPFL\b|professional fighters league", re.I),
+        "off_actions": frozenset(),
+    },
+    {
+        "name": "bellator",
+        "story": re.compile(r"\bBellator\b|Беллатор", re.I),
+        "clip": re.compile(r"bellator", re.I),
+        "off_actions": frozenset(),
+    },
+    {
+        "name": "one",
+        "story": re.compile(r"ONE Championship", re.I),
+        "clip": re.compile(r"ONE Championship", re.I),
+        "off_actions": frozenset(),
+    },
+)
+_UFC_RE = re.compile(r"\bUFC\b|\bUFN\b|octagon|\bЮФС\b|\bUFS\b", re.I)
+_ORG_MATCH_BONUS = float(os.getenv("FOOTAGE_ORG_MATCH_BONUS", "0.5"))
+_ORG_UFC_PENALTY = float(os.getenv("FOOTAGE_ORG_UFC_PENALTY", "0.6"))
+_ORG_OFF_ACTION_PENALTY = float(os.getenv("FOOTAGE_ORG_OFF_ACTION_PENALTY", "0.3"))
+
+
+def detect_story_org(scenes: list[dict]) -> dict | None:
+    """Профиль не-UFC организации, о которой сюжет, либо None (обычный UFC-сюжет)."""
+    text = " ".join(
+        " ".join([sc.get("text") or ""] + [q for q in (sc.get("queries") or []) if isinstance(q, str)])
+        for sc in scenes
+    )
+    if _UFC_RE.search(text):
+        return None
+    for prof in _ORG_PROFILES:
+        if prof["story"].search(text):
+            return prof
+    return None
+
+
+def org_from_channel(*names: str) -> str:
+    """Организация-источник по названию/URL канала ('' если неизвестно)."""
+    text = " ".join(n for n in names if n).lower()
+    if "rafwrestling" in text or "real american freestyle" in text:
+        return "raf"
+    if "pflmma" in text or "professional fighters league" in text:
+        return "pfl"
+    if "bellator" in text:
+        return "bellator"
+    if "onechampionship" in text or "one championship" in text:
+        return "one"
+    if "ufc" in text:
+        return "ufc"
+    return ""
+
+
+def _org_adjustment(record: dict, org: dict | None) -> float:
+    if not org:
+        return 0.0
+    rec_org = record.get("org") or ""
+    matched = False
+    adj = 0.0
+    if rec_org:
+        # Явная метка организации (из канала-источника) надёжнее текстовых эвристик
+        if rec_org == org["name"]:
+            matched = True
+            adj += _ORG_MATCH_BONUS
+        else:
+            adj -= _ORG_UFC_PENALTY
+    else:
+        blob = f"{record.get('title') or ''} {record.get('event') or ''} {record.get('description') or ''}"
+        if org["clip"].search(blob):
+            matched = True
+            adj += _ORG_MATCH_BONUS
+        elif _UFC_RE.search(blob):
+            adj -= _ORG_UFC_PENALTY
+    rec_actions = {a.lower() for a in (record.get("action") or []) if isinstance(a, str)}
+    if not matched and rec_actions & org["off_actions"]:
+        adj -= _ORG_OFF_ACTION_PENALTY
+    return adj
+
+
 def _keyword_bonus(record: dict, subjects: list[str], actions: list[str]) -> float:
     bonus = 0.0
     rec_fighters = " ".join(record.get("fighter", [])).lower()
@@ -961,6 +1056,7 @@ def _score_record(
     subjects: list[str],
     actions: list[str],
     story_subjects: frozenset[str] = frozenset(),
+    story_org: dict | None = None,
 ) -> float:
     emb = record.get("embedding") or []
     sim = cosine(q_emb, emb) if emb else 0.0
@@ -971,6 +1067,7 @@ def _score_record(
         sim
         + _keyword_bonus(record, subjects, actions)
         - _off_topic_penalty(record, story_subjects, scene_subjects)
+        + _org_adjustment(record, story_org)
     )
 
 
@@ -1023,6 +1120,10 @@ async def match_scenes(scenes: list[dict]) -> list[dict | None]:
         if isinstance(s, str) and s.strip()
     )
 
+    story_org = detect_story_org(scenes)
+    if story_org:
+        logger.info("[FOOTAGE] story is about non-UFC org '%s' — penalizing UFC clips", story_org["name"])
+
     used_files: set[str] = set()
     picks: list[dict | None] = []
     for si, (sc, q_emb) in enumerate(zip(scenes, q_embs)):
@@ -1033,7 +1134,7 @@ async def match_scenes(scenes: list[dict]) -> list[dict | None]:
             path = clip_abspath(r)
             if not os.path.exists(path):
                 continue
-            score = _score_record(r, q_emb, subjects, actions, story_subjects)
+            score = _score_record(r, q_emb, subjects, actions, story_subjects, story_org)
             if si == 0 and _HOOK_ACTION_BONUS > 0:
                 rec_actions = {a.lower() for a in (r.get("action") or []) if isinstance(a, str)}
                 if rec_actions & _HOOK_ACTIONS:
@@ -1412,6 +1513,43 @@ def _cmd_stats() -> None:
         print(f"  {n:4d}  {name}")
 
 
+def tag_orgs(channels: list[str] | None = None) -> dict[str, int]:
+    """Проставить record['org'] уже проиндексированным клипам по спискам каналов
+    (yt-dlp --flat-playlist, без скачивания и без Gemini). Возвращает {org: число}.
+    Клип, найденный на нескольких каналах, получает метку первого канала в списке
+    (репосты UFC на RAF-канале маловероятны — приоритет у более «узких» каналов)."""
+    import video_generator as vg
+    chans = list(channels or CHANNELS)
+    # Узкие каналы (RAF/PFL) раньше общих UFC — чтобы репост не затёр метку
+    chans.sort(key=lambda c: org_from_channel(c) in ("ufc", ""))
+    id_org: dict[str, str] = {}
+    for ch in chans:
+        org = org_from_channel(ch)
+        if not org:
+            continue
+        r = subprocess.run(
+            ["yt-dlp", ch, "--flat-playlist", "--print", "id", "--no-warnings", *vg._YT_COOKIE_ARGS],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800,
+        )
+        ids = [x.strip() for x in (r.stdout or "").splitlines() if x.strip()]
+        logger.info("tag_orgs: %s → %d ids (%s)", ch, len(ids), org)
+        for vid in ids:
+            id_org.setdefault(vid, org)
+    index = load_index()
+    counts: dict[str, int] = {}
+    for rec in index:
+        org = id_org.get(rec.get("id"))
+        if org:
+            rec["org"] = org
+            counts[org] = counts.get(org, 0) + 1
+            dest = clip_abspath(rec)
+            if os.path.exists(dest):
+                with open(os.path.splitext(dest)[0] + ".json", "w", encoding="utf-8") as fh:
+                    json.dump(rec, fh, ensure_ascii=False, indent=2)
+    save_index(index)
+    return counts
+
+
 def _cmd_info(video_id: str) -> None:
     r = find_record(video_id)
     if r is None:
@@ -1458,6 +1596,9 @@ def main() -> None:
 
     sub.add_parser("stats", help="index statistics")
 
+    p_to = sub.add_parser("tag-orgs", help="backfill record['org'] from channel listings (no Gemini)")
+    p_to.add_argument("--channel", action="append", default=None,
+                      help="repeatable; defaults to all configured CHANNELS")
     p_info = sub.add_parser("info", help="show a clip's current tags (id or filename fragment)")
     p_info.add_argument("video_id")
 
@@ -1514,6 +1655,8 @@ def main() -> None:
             print(f"       {r.get('title', '')[:100]}")
     elif args.cmd == "stats":
         _cmd_stats()
+    elif args.cmd == "tag-orgs":
+        print(f"Tagged: {tag_orgs(args.channel)}")
     elif args.cmd == "info":
         _cmd_info(args.video_id)
     elif args.cmd == "relabel":
